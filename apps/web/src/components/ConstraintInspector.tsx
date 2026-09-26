@@ -5,16 +5,20 @@ import {
   draftFromSnapshot,
   type ConstraintDraft,
 } from "../constraints/constraintRepository";
+import { MaskEditor } from "./MaskEditor";
 
 type ConstraintInspectorProps = {
   snapshot: ConstraintSnapshot | null;
   assets: Asset[];
+  previewUrls: Record<string, string>;
   onSave: (draft: ConstraintDraft) => void;
+  onSaveMask: (sourceAssetId: string, blob: Blob, width: number, height: number) => Promise<Asset>;
 };
 
-export function ConstraintInspector({ snapshot, assets, onSave }: ConstraintInspectorProps) {
+export function ConstraintInspector({ snapshot, assets, previewUrls, onSave, onSaveMask }: ConstraintInspectorProps) {
   const [draft, setDraft] = useState(() => draftFromSnapshot(snapshot));
   const [error, setError] = useState("");
+  const [maskRegionId, setMaskRegionId] = useState<string | null>(null);
 
   const updateRegion = (id: string, patch: Partial<ConstraintDraft["editableRegions"][number]>) => {
     setDraft((current) => ({
@@ -41,9 +45,12 @@ export function ConstraintInspector({ snapshot, assets, onSave }: ConstraintInsp
             <input aria-label={`区域 ${index + 1} 描述`} value={region.description} onChange={(event) => updateRegion(region.id, { description: event.target.value })} />
             <select aria-label={`区域 ${index + 1} 蒙版`} value={region.maskAssetId ?? ""} onChange={(event) => updateRegion(region.id, { maskAssetId: event.target.value || undefined })}>
               <option value="">无蒙版资产</option>
-              {assets.filter((asset) => asset.kind === "image").map((asset) => <option key={asset.id} value={asset.id}>{asset.originalName}</option>)}
+              {assets.filter((asset) => asset.kind === "image" && asset.purpose === "mask").map((asset) => <option key={asset.id} value={asset.id}>{asset.originalName}</option>)}
             </select>
-            {draft.editableRegions.length > 1 && <button aria-label={`删除区域 ${index + 1}`} onClick={() => setDraft({ ...draft, editableRegions: draft.editableRegions.filter((item) => item.id !== region.id) })}>删除</button>}
+            <div className="region-actions">
+              <button onClick={() => setMaskRegionId(region.id)}>{region.maskAssetId ? "编辑蒙版" : "绘制蒙版"}</button>
+              {draft.editableRegions.length > 1 && <button aria-label={`删除区域 ${index + 1}`} onClick={() => setDraft({ ...draft, editableRegions: draft.editableRegions.filter((item) => item.id !== region.id) })}>删除</button>}
+            </div>
           </div>
         ))}
         <button className="secondary" onClick={() => setDraft({
@@ -77,6 +84,20 @@ export function ConstraintInspector({ snapshot, assets, onSave }: ConstraintInsp
         }
       }}>保存为新约束快照</button>
       <small>快照创建后不可修改；后续调整会生成新版本，AI 执行只能引用明确快照。</small>
+      {maskRegionId && (
+        <MaskEditor
+          assets={assets}
+          previewUrls={previewUrls}
+          initialMaskAssetId={draft.editableRegions.find((region) => region.id === maskRegionId)?.maskAssetId}
+          onCancel={() => setMaskRegionId(null)}
+          onSave={async (sourceAssetId, blob, width, height) => {
+            const mask = await onSaveMask(sourceAssetId, blob, width, height);
+            updateRegion(maskRegionId, { maskAssetId: mask.id });
+            setMaskRegionId(null);
+            return mask;
+          }}
+        />
+      )}
     </aside>
   );
 }

@@ -213,6 +213,70 @@ test("人工约束每次保存都生成新的不可变快照", async ({ page }) 
   await expect(page.getByRole("complementary", { name: "人工约束" }).getByText("基于已保存快照创建新版本")).toBeVisible();
 });
 
+test("画布节点引用会保护资产，解除引用后才允许移除", async ({ page }) => {
+  await page.goto("/");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "protected.png", mimeType: "image/png", buffer: png });
+  const library = page.getByRole("complementary", { name: "项目资产库" });
+  await expect(library.getByLabel("资产存储占用")).toContainText("当前项目");
+  const card = library.locator(".asset-card").filter({ hasText: "protected.png" });
+  await expect(card.getByRole("button", { name: "使用中 1" })).toBeDisabled();
+
+  await library.getByRole("button", { name: "关闭资产库" }).click();
+  await page.getByRole("button", { name: "删除", exact: true }).click();
+  await page.getByRole("button", { name: "资产库 1" }).click();
+  await card.getByRole("button", { name: "移除" }).click();
+  const confirmation = page.getByRole("alertdialog", { name: "确认移除资产" });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "确认移除" }).click();
+  await expect(page.getByRole("button", { name: "资产库 0" })).toBeVisible();
+});
+
+test("可以一次清理所有未使用资产而保留引用资产", async ({ page }) => {
+  await page.goto("/");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "orphan.png", mimeType: "image/png", buffer: png });
+  await page.getByRole("button", { name: "关闭资产库" }).click();
+  await page.getByRole("button", { name: "删除", exact: true }).click();
+  await page.getByRole("button", { name: "资产库 1" }).click();
+  await page.getByRole("button", { name: "清理未使用 1" }).click();
+  const confirmation = page.getByRole("alertdialog", { name: "确认清理未使用资产" });
+  await confirmation.getByRole("button", { name: "确认清理" }).click();
+  await expect(page.getByRole("button", { name: "资产库 0" })).toBeVisible();
+});
+
+test("在底图上绘制蒙版并把蒙版版本写入约束快照", async ({ page }) => {
+  await page.goto("/");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "mask-source.png", mimeType: "image/png", buffer: png });
+  await page.getByRole("button", { name: "关闭资产库" }).click();
+  await page.getByRole("button", { name: "＋ 约束" }).click();
+  const inspector = page.getByRole("complementary", { name: "人工约束" });
+  await inspector.getByRole("button", { name: "绘制蒙版" }).click();
+  const editor = page.getByRole("dialog", { name: "蒙版编辑器" });
+  await expect(editor).toBeVisible();
+  const canvas = editor.getByLabel("蒙版绘制画布");
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  if (box) {
+    await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.5);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.5, { steps: 4 });
+    await page.mouse.up();
+  }
+  await editor.getByRole("button", { name: "保存蒙版版本" }).click();
+  await expect(editor).toBeHidden();
+  await expect(page.getByRole("button", { name: "资产库 2" })).toBeVisible();
+  await inspector.getByRole("button", { name: "保存为新约束快照" }).click();
+
+  const snapshots = await page.evaluate(() => JSON.parse(localStorage.getItem("ai-commerce-canvas.constraints.project-main-image") ?? "[]"));
+  expect(snapshots).toHaveLength(1);
+  expect(snapshots[0].editableRegions[0].maskAssetId).toMatch(/^mask-/);
+  await page.getByRole("button", { name: "资产库 2" }).click();
+  const maskCard = page.getByRole("complementary", { name: "项目资产库" }).locator(".asset-card").filter({ hasText: "蒙版" });
+  await expect(maskCard.getByRole("button", { name: "使用中 1" })).toBeDisabled();
+});
+
 test.describe("390 像素触控布局", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 

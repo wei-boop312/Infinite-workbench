@@ -33,7 +33,7 @@ import {
 } from "@xyflow/react";
 import type { Asset, CanvasDocument, ConstraintSnapshot } from "@canvas/contracts";
 import { executeMockRun } from "@canvas/testing/browser";
-import { assetRepository } from "./assets/assetRepository";
+import { assetRepository, type AssetUsage } from "./assets/assetRepository";
 import { documentToSnapshot, snapshotFingerprint, snapshotToDocument } from "./canvas/document";
 import { layoutCanvas } from "./canvas/autoLayout";
 import { validateConnection } from "./canvas/graphRules";
@@ -162,7 +162,10 @@ function CanvasKernel() {
   const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
   const [assetImporting, setAssetImporting] = useState(false);
   const [assetError, setAssetError] = useState("");
+  const [assetUsage, setAssetUsage] = useState<AssetUsage | null>(null);
+  const [storageQuota, setStorageQuota] = useState<number | null>(null);
   const [constraintSnapshots, setConstraintSnapshots] = useState<ConstraintSnapshot[]>([]);
+  const [pendingMaskAssetIds, setPendingMaskAssetIds] = useState<Set<string>>(() => new Set());
   const clipboardRef = useRef<CanvasSnapshot | null>(null);
   const assetInputRef = useRef<HTMLInputElement>(null);
   const lastSavedFingerprint = useRef("");
@@ -209,6 +212,21 @@ function CanvasKernel() {
   useEffect(() => {
     setConstraintSnapshots(constraintRepository.list(projectId));
   }, [projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      assetRepository.usage(projectId),
+      navigator.storage?.estimate?.() ?? Promise.resolve({}),
+    ]).then(([usage, estimate]) => {
+      if (cancelled) return;
+      setAssetUsage(usage);
+      setStorageQuota(typeof estimate.quota === "number" ? estimate.quota : null);
+    }).catch(() => {
+      if (!cancelled) setAssetUsage(null);
+    });
+    return () => { cancelled = true; };
+  }, [assets, projectId]);
 
   const loadDocument = useCallback((document: CanvasDocument, message: string) => {
     const snapshot = documentToSnapshot(document);
@@ -399,6 +417,14 @@ function CanvasKernel() {
       if (assetInputRef.current) assetInputRef.current.value = "";
     }
   }, [assets, commit, projectId, screenToFlowPosition]);
+
+  const saveMaskAsset = useCallback(async (sourceAssetId: string, blob: Blob, width: number, height: number) => {
+    const mask = await assetRepository.saveMask(projectId, sourceAssetId, blob, width, height);
+    setPendingMaskAssetIds((current) => new Set(current).add(mask.id));
+    setAssetCatalogRevision((revision) => revision + 1);
+    setLastAction(`已创建不可变蒙版资产 ${mask.id.slice(-8)}；保存约束快照后才会进入任务输入`);
+    return mask;
+  }, [projectId]);
 
   const selectedClosure = useCallback(() => {
     const selectedIds = new Set(nodes.filter((node) => node.selected).map((node) => node.id));
@@ -606,6 +632,25 @@ function CanvasKernel() {
 
   const selectedText = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && node.data.kind === "text");
   const selectedConstraint = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && node.data.kind === "constraint");
+  const assetReferenceCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const node of nodes) {
+      if (node.type !== "studio" || !node.data.assetId) continue;
+      counts[node.data.assetId] = (counts[node.data.assetId] ?? 0) + 1;
+    }
+    for (const snapshot of constraintSnapshots) {
+      for (const region of snapshot.editableRegions) {
+        if (!region.maskAssetId) continue;
+        counts[region.maskAssetId] = (counts[region.maskAssetId] ?? 0) + 1;
+      }
+    }
+    for (const asset of assets) {
+      if (!asset.sourceAssetId) continue;
+      counts[asset.sourceAssetId] = (counts[asset.sourceAssetId] ?? 0) + 1;
+    }
+    for (const maskAssetId of pendingMaskAssetIds) counts[maskAssetId] = (counts[maskAssetId] ?? 0) + 1;
+    return counts;
+  }, [assets, constraintSnapshots, nodes, pendingMaskAssetIds]);
   const activeConstraintSnapshot = selectedConstraint?.data.constraintSnapshotId
     ? constraintSnapshots.find((snapshot) => snapshot.id === selectedConstraint.data.constraintSnapshotId) ?? null
     : null;
@@ -613,6 +658,8 @@ function CanvasKernel() {
     if (!selectedConstraint) return;
     const snapshot = constraintRepository.save(projectId, draft);
     setConstraintSnapshots((current) => [...current, snapshot]);
+    const savedMaskIds = new Set(snapshot.editableRegions.flatMap((region) => region.maskAssetId ? [region.maskAssetId] : []));
+    setPendingMaskAssetIds((current) => new Set([...current].filter((assetId) => !savedMaskIds.has(assetId))));
     commit({
       nodes: nodes.map((node) => node.id === selectedConstraint.id
         ? {
@@ -628,6 +675,23 @@ function CanvasKernel() {
       edges,
     }, `已保存不可变约束快照 ${snapshot.id.slice(-8)}`);
   }, [commit, edges, nodes, projectId, selectedConstraint]);
+  const removeAsset = useCallback(async (asset: Asset) => {
+    const references = assetReferenceCounts[asset.id] ?? 0;
+    if (references > 0) throw new Error(`该资产仍被 ${references} 处引用，不能删除`);
+    const removed = await assetRepository.remove(projectId, asset.id);
+    if (!removed) throw new Error("资产不存在或不属于当前项目");
+    setAssetCatalogRevision((revision) => revision + 1);
+    setLastAction(`已移除未使用资产 ${asset.originalName}`);
+  }, [assetReferenceCounts, projectId]);
+  const cleanupUnusedAssets = useCallback(async () => {
+    const unused = assets.filter((asset) => (assetReferenceCounts[asset.id] ?? 0) === 0);
+    for (const asset of unused) await assetRepository.remove(projectId, asset.id);
+    if (unused.length) {
+      setAssetCatalogRevision((revision) => revision + 1);
+      setLastAction(`已清理 ${unused.length} 个未使用资产；所有被引用的原图和蒙版均已保留`);
+    }
+    return unused.length;
+  }, [assetReferenceCounts, assets, projectId]);
   const stats = useMemo(() => ({ nodes: nodes.length, edges: edges.length }), [edges.length, nodes.length]);
   const saveLabel: Record<SaveState, string> = {
     loading: "正在恢复",
@@ -757,9 +821,14 @@ function CanvasKernel() {
           previewUrls={assetPreviewUrls}
           importing={assetImporting}
           error={assetError}
+          referenceCounts={assetReferenceCounts}
+          usage={assetUsage}
+          storageQuota={storageQuota}
           onClose={() => setAssetLibraryOpen(false)}
           onChooseFiles={() => assetInputRef.current?.click()}
           onAddToCanvas={addAssetToCanvas}
+          onRemove={removeAsset}
+          onCleanup={cleanupUnusedAssets}
         />
 
         {selectedText && (
@@ -790,7 +859,9 @@ function CanvasKernel() {
             key={`${selectedConstraint.id}:${selectedConstraint.data.constraintSnapshotId ?? "draft"}`}
             snapshot={activeConstraintSnapshot}
             assets={assets}
+            previewUrls={assetPreviewUrls}
             onSave={saveConstraintSnapshot}
+            onSaveMask={saveMaskAsset}
           />
         )}
 

@@ -17,6 +17,7 @@ describe("阶段 2 资产与约束合同", () => {
       id: "asset-1",
       projectId: "project-1",
       kind: "image",
+      purpose: "source",
       originalName: "product.png",
       storageKey: "indexeddb://assets/asset-1/original",
       proxyStorageKey: "indexeddb://assets/asset-1/proxy",
@@ -26,7 +27,7 @@ describe("阶段 2 资产与约束合同", () => {
       height: 1200,
       createdAt: "2026-09-27T00:00:00+08:00",
     });
-    expect(asset).toMatchObject({ originalName: "product.png", width: 1200, height: 1200 });
+    expect(asset).toMatchObject({ originalName: "product.png", purpose: "source", width: 1200, height: 1200 });
     expect(JSON.stringify(asset)).not.toContain("data:image");
   });
 

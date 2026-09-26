@@ -81,6 +81,8 @@ export const AssetSchema = z.object({
   id: IdSchema,
   projectId: IdSchema,
   kind: z.enum(["image", "video", "audio", "document"]),
+  purpose: z.enum(["source", "mask", "generated"]).optional(),
+  sourceAssetId: IdSchema.optional(),
   originalName: z.string().trim().min(1).max(260),
   contentFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
   storageKey: z.string().min(1),

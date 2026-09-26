@@ -15,10 +15,14 @@ type BlobRecord = { key: string; assetId: string; role: BlobRole; blob: Blob };
 
 export type AssetFileDescriptor = Pick<File, "name" | "type" | "size">;
 export type AssetImportResult = { assets: Asset[]; errors: string[] };
+export type AssetUsage = { count: number; originalBytes: number; proxyBytes: number; totalBytes: number };
 export interface AssetRepositoryPort {
   list(projectId: string): Promise<Asset[]>;
   getBlob(assetId: string, role: BlobRole): Promise<Blob | null>;
   importFiles(projectId: string, files: File[]): Promise<AssetImportResult>;
+  saveMask(projectId: string, sourceAssetId: string, blob: Blob, width: number, height: number): Promise<Asset>;
+  remove(projectId: string, assetId: string): Promise<boolean>;
+  usage(projectId: string): Promise<AssetUsage>;
 }
 
 function createId(prefix: string): string {
@@ -194,6 +198,68 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
     }
   }
 
+  async usage(projectId: string): Promise<AssetUsage> {
+    const assets = await this.list(projectId);
+    let proxyBytes = 0;
+    for (const asset of assets) {
+      if (!asset.proxyStorageKey) continue;
+      proxyBytes += (await this.getBlob(asset.id, "proxy"))?.size ?? 0;
+    }
+    const originalBytes = assets.reduce((total, asset) => total + asset.byteSize, 0);
+    return { count: assets.length, originalBytes, proxyBytes, totalBytes: originalBytes + proxyBytes };
+  }
+
+  async saveMask(projectId: string, sourceAssetId: string, blob: Blob, width: number, height: number): Promise<Asset> {
+    if (blob.type !== "image/png" || blob.size <= 0) throw new Error("蒙版必须是有效的 PNG 文件");
+    const source = (await this.list(projectId)).find((asset) => asset.id === sourceAssetId);
+    if (!source || source.kind !== "image" || source.purpose === "mask") throw new Error("蒙版源图片不存在或不可用");
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+    const contentFingerprint = `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    const id = createId("mask");
+    const asset: Asset = {
+      id,
+      projectId,
+      kind: "image",
+      purpose: "mask",
+      sourceAssetId,
+      originalName: `mask-${new Date().toISOString().replaceAll(":", "-")}.png`,
+      contentFingerprint,
+      storageKey: `indexeddb://assets/${id}/original`,
+      mimeType: "image/png",
+      byteSize: blob.size,
+      width,
+      height,
+      createdAt: new Date().toISOString(),
+    };
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction([ASSET_STORE, BLOB_STORE], "readwrite");
+      transaction.objectStore(ASSET_STORE).put(asset);
+      transaction.objectStore(BLOB_STORE).put({ key: `${id}:original`, assetId: id, role: "original", blob } satisfies BlobRecord);
+      await transactionComplete(transaction);
+      return asset;
+    } finally {
+      database.close();
+    }
+  }
+
+  async remove(projectId: string, assetId: string): Promise<boolean> {
+    const database = await openDatabase();
+    try {
+      const lookup = database.transaction(ASSET_STORE, "readonly");
+      const asset = await requestResult(lookup.objectStore(ASSET_STORE).get(assetId) as IDBRequest<Asset | undefined>);
+      if (!asset || asset.projectId !== projectId) return false;
+      const transaction = database.transaction([ASSET_STORE, BLOB_STORE], "readwrite");
+      transaction.objectStore(ASSET_STORE).delete(assetId);
+      transaction.objectStore(BLOB_STORE).delete(`${assetId}:original`);
+      transaction.objectStore(BLOB_STORE).delete(`${assetId}:proxy`);
+      await transactionComplete(transaction);
+      return true;
+    } finally {
+      database.close();
+    }
+  }
+
   async importFiles(projectId: string, files: File[]): Promise<AssetImportResult> {
     const imported: Asset[] = [];
     const errors: string[] = [];
@@ -226,6 +292,7 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
       id,
       projectId,
       kind,
+      purpose: "source",
       originalName: file.name,
       contentFingerprint,
       storageKey: `indexeddb://assets/${id}/original`,
