@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@canvas/canvas-schema": "workspace:*",
     "@canvas/contracts": "workspace:*",
     "@canvas/testing": "workspace:*"
   }

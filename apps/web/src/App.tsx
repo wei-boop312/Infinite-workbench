@@ -30,8 +30,10 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import type { CanvasDocument } from "@canvas/contracts";
-import { executeMockRun } from "@canvas/testing";
+import { executeMockRun } from "@canvas/testing/browser";
 import { documentToSnapshot, snapshotFingerprint, snapshotToDocument } from "./canvas/document";
+import { layoutCanvas } from "./canvas/autoLayout";
+import { validateConnection } from "./canvas/graphRules";
 import { createHistoryState, historyReducer } from "./canvas/history";
 import { LocalCanvasRepository, RevisionConflictError } from "./canvas/localRepository";
 import {
@@ -68,16 +70,17 @@ const StudioCard = memo(function StudioCard({ data, selected }: NodeProps<Studio
   const acceptsInputs = data.kind === "action";
   const hasGenericInput = data.kind === "output" || data.kind === "video";
   const hasOutput = data.kind !== "video";
+  const outputDataClass = data.kind === "text" ? "port-data-text" : data.kind === "constraint" ? "port-data-constraint" : "port-data-image";
   return (
     <article className={`studio-node kind-${data.kind} ${selected ? "is-selected" : ""}`} style={{ "--accent": data.accent } as CSSProperties}>
       <NodeResizer minWidth={180} minHeight={116} isVisible={selected} lineClassName="resize-line" handleClassName="resize-handle" />
       {acceptsInputs && (
         <>
-          <Handle id="product" className="port port-product" type="target" position={Position.Left} style={{ top: 48 }} />
-          <Handle id="constraint" className="port port-constraint" type="target" position={Position.Left} style={{ top: 82 }} />
+          <Handle id="product" className="port port-product port-data-image" type="target" position={Position.Left} style={{ top: 48 }} title="只接受图片" />
+          <Handle id="constraint" className="port port-constraint port-data-mixed" type="target" position={Position.Left} style={{ top: 82 }} title="接受文字或约束" />
         </>
       )}
-      {hasGenericInput && <Handle id="input" className="port port-input" type="target" position={Position.Left} />}
+      {hasGenericInput && <Handle id="input" className="port port-input port-data-image" type="target" position={Position.Left} title="只接受图片" />}
       <header>
         <span>{KIND_LABEL[data.kind]}</span>
         {data.badge && <em>{data.badge}</em>}
@@ -89,7 +92,7 @@ const StudioCard = memo(function StudioCard({ data, selected }: NodeProps<Studio
       )}
       <strong>{data.title}</strong>
       <small>{data.subtitle}</small>
-      {hasOutput && <Handle id="output" className="port port-output" type="source" position={Position.Right} />}
+      {hasOutput && <Handle id="output" className={`port port-output ${outputDataClass}`} type="source" position={Position.Right} title={`${KIND_LABEL[data.kind]}输出`} />}
     </article>
   );
 });
@@ -107,6 +110,10 @@ const GroupCard = memo(function GroupCard({ data, selected }: NodeProps<GroupNod
 const nodeTypes = { studio: StudioCard, group: GroupCard };
 const initialSnapshot: CanvasSnapshot = { nodes: semanticNodes, edges: semanticEdges };
 const initialViewport: Viewport = { x: 0, y: 0, zoom: 1 };
+const PROJECTS = [
+  { documentId: "phase-1-demo", projectId: "project-main-image", label: "商品主图工作台" },
+  { documentId: "phase-1-campaign", projectId: "project-campaign", label: "活动套图工作台" },
+] as const;
 
 type SaveState = "loading" | "dirty" | "saving" | "saved" | "conflict" | "error";
 
@@ -117,13 +124,18 @@ function CanvasKernel() {
   const [savedRevision, setSavedRevision] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>("loading");
   const [conflict, setConflict] = useState<CanvasDocument | null>(null);
+  const [saveFailure, setSaveFailure] = useState("");
+  const [retryNonce, setRetryNonce] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [lastAction, setLastAction] = useState("阶段 1 可靠画布已加载");
+  const [online, setOnline] = useState(() => navigator.onLine);
   const clipboardRef = useRef<CanvasSnapshot | null>(null);
   const lastSavedFingerprint = useRef("");
   const currentRef = useRef({ snapshot: history.present, viewport, revision: savedRevision });
   const repository = useMemo(() => new LocalCanvasRepository(documentId), [documentId]);
-  const { screenToFlowPosition, setViewport: setFlowViewport } = useReactFlow<CanvasNode, CanvasEdge>();
+  const activeProject = PROJECTS.find((project) => project.documentId === documentId);
+  const projectId = activeProject?.projectId ?? "project-recovery";
+  const { screenToFlowPosition, setViewport: setFlowViewport, fitView: fitCanvasView } = useReactFlow<CanvasNode, CanvasEdge>();
 
   const { nodes, edges } = history.present;
   currentRef.current = { snapshot: history.present, viewport, revision: savedRevision };
@@ -139,6 +151,16 @@ function CanvasKernel() {
     setConflict(null);
     setLastAction(message);
   }, [setFlowViewport]);
+
+  useEffect(() => {
+    const updateOnline = () => setOnline(navigator.onLine);
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+    return () => {
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+    };
+  }, []);
 
   useEffect(() => {
     setLoaded(false);
@@ -180,22 +202,25 @@ function CanvasKernel() {
     const timer = window.setTimeout(() => {
       setSaveState("saving");
       try {
-        const draft = snapshotToDocument(documentId, "project-phase-1", savedRevision, history.present, viewport);
+        const draft = snapshotToDocument(documentId, projectId, savedRevision, history.present, viewport);
         const saved = repository.save(draft, savedRevision);
         setSavedRevision(saved.revision);
         lastSavedFingerprint.current = fingerprint;
+        setSaveFailure("");
         setSaveState("saved");
       } catch (error) {
         if (error instanceof RevisionConflictError) {
           setConflict(error.remote);
           setSaveState("conflict");
         } else {
+          setSaveFailure(error instanceof Error ? error.message : "未知本地保存错误");
           setSaveState("error");
+          setLastAction("自动保存失败；当前修改仍保留在内存中，可重试或下载恢复文件");
         }
       }
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [conflict, documentId, history.present, loaded, repository, savedRevision, viewport]);
+  }, [conflict, documentId, history.present, loaded, projectId, repository, retryNonce, savedRevision, viewport]);
 
   const commit = useCallback((next: CanvasSnapshot, message: string) => {
     dispatch({ type: "commit", next });
@@ -228,11 +253,24 @@ function CanvasKernel() {
   }, [edges, nodes]);
 
   const onConnect = useCallback((connection: Connection) => {
+    const validation = validateConnection(connection, nodes, edges);
+    if (!validation.valid) {
+      setLastAction(`连接被拒绝：${validation.reason}`);
+      return;
+    }
     commit({
       nodes,
-      edges: addEdge({ ...connection, type: "smoothstep", className: "edge-workflow", data: { kind: "workflow" } }, edges),
+      edges: addEdge({ ...connection, type: "smoothstep", className: "edge-workflow", data: { kind: "workflow", dataType: validation.dataType } }, edges),
     }, "已建立用户工作流连线");
   }, [commit, edges, nodes]);
+
+  const isConnectionValid = useCallback((connection: Connection | CanvasEdge) =>
+    validateConnection(connection, nodes, edges).valid, [edges, nodes]);
+
+  const autoArrange = useCallback(() => {
+    commit({ nodes: layoutCanvas(nodes, edges), edges }, "已按工作流依赖自动整理顶层节点");
+    window.setTimeout(() => void fitCanvasView({ padding: 0.18, duration: 260 }), 0);
+  }, [commit, edges, fitCanvasView, nodes]);
 
   const addNode = useCallback((kind: "image" | "text") => {
     const position = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
@@ -372,14 +410,14 @@ function CanvasKernel() {
 
   const runMockExecutor = useCallback(() => {
     const result = executeMockRun({
-      projectId: "project-phase-1",
+      projectId,
       tool: "product-retouch",
       inputAssetIds: ["asset-product-demo"],
       constraints: { productLocked: true, brandLocked: true, editableRegion: "background-only" },
       maxCost: 0,
     });
     setLastAction(`假任务完成：${result.outputAssetIds.length} 个输出 · ${result.networkCalls} 次网络调用 · ¥${result.actualCost}`);
-  }, []);
+  }, [projectId]);
 
   const updateSelectedText = useCallback((field: "title" | "body", value: string, final: boolean) => {
     const next: CanvasSnapshot = {
@@ -397,12 +435,24 @@ function CanvasKernel() {
 
   const keepRecoveryCopy = useCallback(() => {
     if (!conflict) return;
-    const current = snapshotToDocument(documentId, "project-phase-1", savedRevision, history.present, viewport);
+    const current = snapshotToDocument(documentId, projectId, savedRevision, history.present, viewport);
     const recovered = repository.saveRecoveryCopy(current);
     setDocumentId(recovered.id);
     setConflict(null);
     setLastAction(`当前修改已另存为恢复副本 ${recovered.id}`);
-  }, [conflict, documentId, history.present, repository, savedRevision, viewport]);
+  }, [conflict, documentId, history.present, projectId, repository, savedRevision, viewport]);
+
+  const downloadRecovery = useCallback(() => {
+    const document = snapshotToDocument(documentId, projectId, savedRevision, history.present, viewport);
+    const blob = new Blob([JSON.stringify(document, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = window.document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${documentId}-recovery.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setLastAction("已下载当前画布恢复文件");
+  }, [documentId, history.present, projectId, savedRevision, viewport]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -453,7 +503,23 @@ function CanvasKernel() {
           <p>画布编辑与 AI 执行彻底隔离；当前只启用本地持久化和假执行器。</p>
         </div>
         <div className="status-cluster">
+          <label className="project-switcher">
+            <span>项目</span>
+            <select
+              aria-label="切换项目"
+              value={documentId}
+              onChange={(event) => {
+                setConflict(null);
+                setDocumentId(event.target.value);
+                setLastAction("正在切换项目并恢复独立草稿");
+              }}
+            >
+              {PROJECTS.map((project) => <option key={project.documentId} value={project.documentId}>{project.label}</option>)}
+              {!activeProject && <option value={documentId}>恢复副本</option>}
+            </select>
+          </label>
           <span className="safe-badge">无真实 API</span>
+          {!online && <span className="offline-badge">离线草稿</span>}
           <span className={`save-badge state-${saveState}`}>{saveLabel[saveState]}</span>
           <strong>{stats.nodes}</strong><small>节点</small>
           <strong>{stats.edges}</strong><small>连线</small>
@@ -471,6 +537,7 @@ function CanvasKernel() {
           <span className="tool-group">
             <button onClick={groupSelection}>建立分组</button>
             <button onClick={ungroupSelection}>解散分组</button>
+            <button onClick={autoArrange}>自动整理</button>
           </span>
           <span className="tool-group">
             <button className="asset-action" onClick={() => addNode("image")}>＋ 图片</button>
@@ -494,6 +561,7 @@ function CanvasKernel() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          isValidConnection={isConnectionValid}
           onMoveEnd={(_, nextViewport) => setViewport(nextViewport)}
           fitView
           fitViewOptions={{ padding: 0.2 }}
@@ -553,6 +621,18 @@ function CanvasKernel() {
             <div>
               <button className="primary" onClick={keepRecoveryCopy}>保留当前为副本</button>
               <button onClick={acceptRemote}>载入另一标签版本</button>
+            </div>
+          </section>
+        )}
+
+        {saveState === "error" && !conflict && (
+          <section className="save-error-panel" role="alert" aria-label="自动保存失败恢复">
+            <span>自动保存失败</span>
+            <strong>当前修改仍保留在本标签页内存中</strong>
+            <p>{saveFailure || "浏览器存储暂时不可用"}</p>
+            <div>
+              <button className="primary" onClick={() => setRetryNonce((value) => value + 1)}>立即重试</button>
+              <button onClick={downloadRecovery}>下载恢复文件</button>
             </div>
           </section>
         )}

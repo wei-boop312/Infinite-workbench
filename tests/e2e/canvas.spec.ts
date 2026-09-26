@@ -88,6 +88,65 @@ test("双标签页冲突不会静默覆盖，并可另存恢复副本", async ({
   expect(documentKeys.length).toBeGreaterThanOrEqual(2);
 });
 
+test("项目切换会隔离草稿并恢复各自修订", async ({ page }) => {
+  await page.goto("/");
+  const canvasNodes = page.locator(".react-flow__node");
+  await page.getByRole("button", { name: "＋ 文字" }).click();
+  await expect(canvasNodes).toHaveCount(7);
+  await expect(page.getByText(/已保存 r\d+/)).toBeVisible({ timeout: 4_000 });
+
+  await page.getByLabel("切换项目").selectOption("phase-1-campaign");
+  await expect(canvasNodes).toHaveCount(6);
+  await expect(page.getByText("已保存 r1")).toBeVisible({ timeout: 4_000 });
+
+  await page.getByLabel("切换项目").selectOption("phase-1-demo");
+  await expect(canvasNodes).toHaveCount(7);
+  await expect(page.getByText(/已恢复本地修订 r\d+/)).toBeVisible();
+});
+
+test("离线重载仍可打开应用并恢复草稿", async ({ context, page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "＋ 文字" }).click();
+  await expect(page.getByText(/已保存 r\d+/)).toBeVisible({ timeout: 4_000 });
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await page.reload();
+  await expect(page.locator(".react-flow__node")).toHaveCount(7);
+
+  await context.setOffline(true);
+  try {
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "AI 电商视觉工作台" })).toBeVisible();
+    await expect(page.locator(".react-flow__node")).toHaveCount(7);
+    await expect(page.getByText("离线草稿")).toBeVisible();
+  } finally {
+    await context.setOffline(false);
+  }
+});
+
+test("保存失败时保留内存草稿并可下载恢复文件", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function setItem(key: string, value: string) {
+      if (key.startsWith("ai-commerce-canvas.document.")) {
+        throw new DOMException("测试模拟存储空间不足", "QuotaExceededError");
+      }
+      return original.call(this, key, value);
+    };
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "＋ 文字" }).click();
+  const recovery = page.getByRole("alert", { name: "自动保存失败恢复" });
+  await expect(recovery).toBeVisible({ timeout: 4_000 });
+  await expect(page.locator(".react-flow__node")).toHaveCount(7);
+
+  const downloadPromise = page.waitForEvent("download");
+  await recovery.getByRole("button", { name: "下载恢复文件" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("phase-1-demo-recovery.json");
+});
+
 test.describe("390 像素触控布局", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 

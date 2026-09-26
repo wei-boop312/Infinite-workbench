@@ -1,5 +1,5 @@
 import type { CanvasDocument } from "@canvas/contracts";
-import { migrateCanvasDocument } from "@canvas/canvas-schema";
+import { migrateCanvasDocumentLight } from "@canvas/canvas-schema/light";
 
 const KEY_PREFIX = "ai-commerce-canvas.document.";
 
@@ -19,7 +19,7 @@ export class LocalCanvasRepository {
 
   load(): CanvasDocument | null {
     const raw = localStorage.getItem(this.key);
-    return raw ? migrateCanvasDocument(JSON.parse(raw)) : null;
+    return raw ? migrateCanvasDocumentLight(JSON.parse(raw)) : null;
   }
 
   save(document: CanvasDocument, expectedRevision: number): CanvasDocument {
@@ -30,7 +30,7 @@ export class LocalCanvasRepository {
       throw new RevisionConflictError(remote);
     }
 
-    const saved = migrateCanvasDocument({
+    const saved = migrateCanvasDocumentLight({
       ...document,
       id: this.documentId,
       revision: expectedRevision + 1,
@@ -42,7 +42,7 @@ export class LocalCanvasRepository {
 
   saveRecoveryCopy(document: CanvasDocument): CanvasDocument {
     const recoveredId = `${document.id}-recovery-${Date.now()}`;
-    const recovered = migrateCanvasDocument({
+    const recovered = migrateCanvasDocumentLight({
       ...document,
       id: recoveredId,
       revision: 1,
@@ -55,10 +55,9 @@ export class LocalCanvasRepository {
   subscribe(listener: (document: CanvasDocument) => void): () => void {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== this.key || !event.newValue) return;
-      listener(migrateCanvasDocument(JSON.parse(event.newValue)));
+      listener(migrateCanvasDocumentLight(JSON.parse(event.newValue)));
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }
 }
-

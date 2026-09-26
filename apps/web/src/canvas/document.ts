@@ -75,6 +75,7 @@ export function snapshotToDocument(
           kind: "workflow" as const,
           editable: true as const,
           deletable: edge.deletable !== false,
+          dataType: edge.data?.dataType,
         }),
     viewport,
     updatedAt: new Date().toISOString(),
@@ -131,7 +132,7 @@ export function documentToSnapshot(document: CanvasDocument): CanvasSnapshot {
     deletable: edge.deletable,
     data: edge.kind === "lineage"
       ? { kind: "lineage", runJobId: edge.runJobId }
-      : { kind: "workflow" },
+      : { kind: "workflow", dataType: edge.dataType },
   }));
 
   return { nodes, edges };
@@ -142,4 +143,3 @@ export function snapshotFingerprint(snapshot: CanvasSnapshot, viewport: Viewport
   const normalizedEdges = snapshot.edges.map(({ selected: _selected, ...edge }) => edge);
   return JSON.stringify({ nodes: normalizedNodes, edges: normalizedEdges, viewport });
 }
-

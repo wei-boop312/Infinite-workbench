@@ -25,6 +25,7 @@ export type CanvasNode = StudioNode | GroupNode;
 export type CanvasEdgeData = {
   kind: "workflow" | "lineage";
   runJobId?: string;
+  dataType?: "image" | "text" | "constraint";
 };
 
 export type CanvasEdge = Edge<CanvasEdgeData>;
@@ -109,4 +110,3 @@ export function createStressNodes(count: number): CanvasNode[] {
     } satisfies StudioNode;
   });
 }
-

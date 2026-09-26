@@ -26,6 +26,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@canvas/canvas-schema':
+        specifier: workspace:*
+        version: link:../../packages/canvas-schema
       '@canvas/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

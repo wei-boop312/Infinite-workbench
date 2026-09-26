@@ -42,6 +42,7 @@ export const WorkflowEdgeSchema = z.object({
   kind: z.literal("workflow"),
   editable: z.literal(true),
   deletable: z.boolean(),
+  dataType: z.enum(["image", "text", "constraint"]).optional(),
 }).strict();
 
 export const LineageEdgeSchema = z.object({
