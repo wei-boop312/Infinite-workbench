@@ -38,7 +38,7 @@ export type CanvasSnapshot = {
 };
 
 export const semanticNodes: CanvasNode[] = [
-  { id: "product", type: "studio", position: { x: 80, y: 120 }, data: { kind: "image", title: "商品原图", subtitle: "asset-product-demo · 不存 Base64", badge: "已锁定", accent: "#60a5fa", assetId: "asset-product-demo" }, style: { width: 210, height: 160 } },
+  { id: "product", type: "studio", position: { x: 80, y: 120 }, data: { kind: "image", title: "商品原图", subtitle: "等待绑定本地资产 · 不存 Base64", badge: "演示占位", accent: "#60a5fa" }, style: { width: 210, height: 160 } },
   { id: "brand", type: "studio", position: { x: 90, y: 360 }, data: { kind: "constraint", title: "品牌与文案约束", subtitle: "人决定不可修改项", badge: "人工确认", accent: "#f59e0b" }, style: { width: 220, height: 148 } },
   { id: "retouch", type: "studio", position: { x: 430, y: 220 }, data: { kind: "action", title: "产品精修", subtitle: "模型、预算和范围执行前确认", badge: "假执行器", accent: "#a78bfa" }, style: { width: 250, height: 180 } },
   { id: "output-a", type: "studio", position: { x: 820, y: 100 }, data: { kind: "output", title: "精修结果 A", subtitle: "不可变生成谱系", badge: "版本 1", accent: "#34d399" }, style: { width: 220, height: 160 } },
@@ -71,10 +71,9 @@ export function createImageNode(position: XYPosition): StudioNode {
     data: {
       kind: "image",
       title: "新图片资产",
-      subtitle: "轻量 assetId 引用",
+      subtitle: "等待导入或绑定真实资产",
       badge: "本地占位",
       accent: "#60a5fa",
-      assetId: `asset-${id}`,
     },
     style: { width: 220, height: 160 },
   };

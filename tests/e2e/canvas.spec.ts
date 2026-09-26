@@ -277,6 +277,34 @@ test("在底图上绘制蒙版并把蒙版版本写入约束快照", async ({ pa
   await expect(maskCard.getByRole("button", { name: "使用中 1" })).toBeDisabled();
 });
 
+test("项目包可导出并作为独立副本完整导入", async ({ page }) => {
+  await page.goto("/");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "portable.png", mimeType: "image/png", buffer: png });
+  await expect(page.getByText(/已保存 r\d+/)).toBeVisible({ timeout: 4_000 });
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "导出项目包" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.canvaspack$/);
+  const archivePath = await download.path();
+  expect(archivePath).not.toBeNull();
+  await page.getByLabel("选择画布项目包").setInputFiles(archivePath!);
+
+  const confirmation = page.getByRole("alertdialog", { name: "确认导入项目包" });
+  await expect(confirmation).toContainText("1 个资产");
+  await confirmation.getByRole("button", { name: "确认导入副本" }).click();
+  await expect(page.getByLabel("切换项目")).toHaveValue(/import-/);
+  await expect(page.getByLabel("切换项目").locator("option:checked")).toContainText("商品主图工作台（导入）");
+  await expect(page.getByRole("button", { name: "资产库 1" })).toBeVisible();
+  await expect(page.locator('.asset-node-preview img[alt="portable.png"]')).toHaveCount(1);
+  await expect(page.locator(".react-flow__node")).toHaveCount(7);
+
+  await page.reload();
+  await expect(page.getByLabel("切换项目").locator("option:checked")).toContainText("商品主图工作台（导入）");
+  await expect(page.locator('.asset-node-preview img[alt="portable.png"]')).toHaveCount(1);
+});
+
 test.describe("390 像素触控布局", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 

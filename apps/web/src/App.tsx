@@ -33,7 +33,7 @@ import {
 } from "@xyflow/react";
 import type { Asset, CanvasDocument, ConstraintSnapshot } from "@canvas/contracts";
 import { executeMockRun } from "@canvas/testing/browser";
-import { assetRepository, type AssetUsage } from "./assets/assetRepository";
+import { assetRepository, formatAssetBytes, type AssetUsage } from "./assets/assetRepository";
 import { documentToSnapshot, snapshotFingerprint, snapshotToDocument } from "./canvas/document";
 import { layoutCanvas } from "./canvas/autoLayout";
 import { validateConnection } from "./canvas/graphRules";
@@ -61,6 +61,17 @@ import {
   constraintRepository,
   type ConstraintDraft,
 } from "./constraints/constraintRepository";
+import {
+  createProjectPackage,
+  parseProjectPackage,
+  remapProjectPackage,
+  type PortableProject,
+} from "./projects/projectPackage";
+import {
+  loadImportedProjects,
+  registerImportedProject,
+  type ImportedProject,
+} from "./projects/projectRegistry";
 
 const KIND_LABEL: Record<StudioKind, string> = {
   image: "图片资产",
@@ -137,17 +148,24 @@ const GroupCard = memo(function GroupCard({ data, selected }: NodeProps<GroupNod
 const nodeTypes = { studio: StudioCard, group: GroupCard };
 const initialSnapshot: CanvasSnapshot = { nodes: semanticNodes, edges: semanticEdges };
 const initialViewport: Viewport = { x: 0, y: 0, zoom: 1 };
-const PROJECTS = [
+const BUILT_IN_PROJECTS = [
   { documentId: "phase-1-demo", projectId: "project-main-image", label: "商品主图工作台" },
   { documentId: "phase-1-campaign", projectId: "project-campaign", label: "活动套图工作台" },
 ] as const;
+const ACTIVE_DOCUMENT_KEY = "ai-commerce-canvas.active-document";
 
 type SaveState = "loading" | "dirty" | "saving" | "saved" | "conflict" | "error";
 
 function CanvasKernel() {
   const [history, dispatch] = useReducer(historyReducer, initialSnapshot, createHistoryState);
   const [viewport, setViewport] = useState<Viewport>(initialViewport);
-  const [documentId, setDocumentId] = useState("phase-1-demo");
+  const [importedProjects, setImportedProjects] = useState<ImportedProject[]>(loadImportedProjects);
+  const [documentId, setDocumentId] = useState(() => {
+    const stored = localStorage.getItem(ACTIVE_DOCUMENT_KEY);
+    return stored && ([...BUILT_IN_PROJECTS, ...importedProjects].some((project) => project.documentId === stored))
+      ? stored
+      : "phase-1-demo";
+  });
   const [savedRevision, setSavedRevision] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>("loading");
   const [conflict, setConflict] = useState<CanvasDocument | null>(null);
@@ -166,17 +184,26 @@ function CanvasKernel() {
   const [storageQuota, setStorageQuota] = useState<number | null>(null);
   const [constraintSnapshots, setConstraintSnapshots] = useState<ConstraintSnapshot[]>([]);
   const [pendingMaskAssetIds, setPendingMaskAssetIds] = useState<Set<string>>(() => new Set());
+  const [pendingProjectPackage, setPendingProjectPackage] = useState<PortableProject | null>(null);
+  const [packageBusy, setPackageBusy] = useState(false);
+  const [packageError, setPackageError] = useState("");
   const clipboardRef = useRef<CanvasSnapshot | null>(null);
   const assetInputRef = useRef<HTMLInputElement>(null);
+  const packageInputRef = useRef<HTMLInputElement>(null);
   const lastSavedFingerprint = useRef("");
   const currentRef = useRef({ snapshot: history.present, viewport, revision: savedRevision });
   const repository = useMemo(() => new LocalCanvasRepository(documentId), [documentId]);
-  const activeProject = PROJECTS.find((project) => project.documentId === documentId);
+  const availableProjects = useMemo(() => [...BUILT_IN_PROJECTS, ...importedProjects], [importedProjects]);
+  const activeProject = availableProjects.find((project) => project.documentId === documentId);
   const projectId = activeProject?.projectId ?? "project-recovery";
   const { screenToFlowPosition, setViewport: setFlowViewport, fitView: fitCanvasView } = useReactFlow<CanvasNode, CanvasEdge>();
 
   const { nodes, edges } = history.present;
   currentRef.current = { snapshot: history.present, viewport, revision: savedRevision };
+
+  useEffect(() => {
+    localStorage.setItem(ACTIVE_DOCUMENT_KEY, documentId);
+  }, [documentId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -211,6 +238,7 @@ function CanvasKernel() {
 
   useEffect(() => {
     setConstraintSnapshots(constraintRepository.list(projectId));
+    setPendingMaskAssetIds(new Set());
   }, [projectId]);
 
   useEffect(() => {
@@ -601,6 +629,95 @@ function CanvasKernel() {
     setLastAction("已下载当前画布恢复文件");
   }, [documentId, history.present, projectId, savedRevision, viewport]);
 
+  const exportProjectPackage = useCallback(async () => {
+    setPackageBusy(true);
+    setPackageError("");
+    try {
+      const current = currentRef.current;
+      const document = snapshotToDocument(documentId, projectId, current.revision, current.snapshot, current.viewport);
+      const blob = await createProjectPackage({
+        projectName: activeProject?.label ?? "画布恢复项目",
+        document,
+        constraints: constraintSnapshots,
+        assets,
+      }, (assetId, role) => assetRepository.getBlob(assetId, role));
+      const url = URL.createObjectURL(blob);
+      const anchor = window.document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${documentId}-${new Date().toISOString().slice(0, 10)}.canvaspack`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setLastAction(`项目包已导出：${assets.length} 个资产、${constraintSnapshots.length} 个约束快照，画布引用保持完整`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "项目包导出失败";
+      setPackageError(message);
+      setLastAction(`项目包导出失败：${message}`);
+    } finally {
+      setPackageBusy(false);
+    }
+  }, [activeProject?.label, assets, constraintSnapshots, documentId, projectId]);
+
+  const inspectProjectPackage = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    setPackageBusy(true);
+    setPackageError("");
+    try {
+      const parsed = await parseProjectPackage(file);
+      setPendingProjectPackage(parsed);
+      setLastAction(`项目包校验通过：${parsed.assets.length} 个资产、${parsed.constraints.length} 个约束快照；等待确认导入`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "项目包无法读取";
+      setPendingProjectPackage(null);
+      setPackageError(message);
+      setLastAction(`项目包导入被拒绝：${message}`);
+    } finally {
+      setPackageBusy(false);
+      if (packageInputRef.current) packageInputRef.current.value = "";
+    }
+  }, []);
+
+  const importProjectPackage = useCallback(async () => {
+    if (!pendingProjectPackage) return;
+    setPackageBusy(true);
+    setPackageError("");
+    const suffix = crypto.randomUUID();
+    const importedDocumentId = `import-${suffix}`;
+    const importedProjectId = `project-import-${suffix}`;
+    const remapped = remapProjectPackage(pendingProjectPackage, importedDocumentId, importedProjectId);
+    const importedRepository = new LocalCanvasRepository(importedDocumentId);
+    let assetsRestored = false;
+    try {
+      await assetRepository.restore(importedProjectId, remapped.assets);
+      assetsRestored = true;
+      constraintRepository.replace(importedProjectId, remapped.constraints);
+      importedRepository.save(remapped.document, 0);
+      const entry: ImportedProject = {
+        documentId: importedDocumentId,
+        projectId: importedProjectId,
+        label: `${remapped.projectName}（导入）`,
+        importedAt: new Date().toISOString(),
+      };
+      const nextProjects = registerImportedProject(entry);
+      setImportedProjects(nextProjects);
+      setPendingProjectPackage(null);
+      setAssetLibraryOpen(false);
+      setConflict(null);
+      setDocumentId(importedDocumentId);
+      setLastAction(`已导入独立项目副本：${remapped.assets.length} 个资产、${remapped.constraints.length} 个约束快照；原项目未被覆盖`);
+    } catch (error) {
+      constraintRepository.remove(importedProjectId);
+      importedRepository.remove();
+      if (assetsRestored) {
+        await Promise.all(remapped.assets.map(({ asset }) => assetRepository.remove(importedProjectId, asset.id).catch(() => false)));
+      }
+      const message = error instanceof Error ? error.message : "项目包导入失败";
+      setPackageError(message);
+      setLastAction(`项目包导入失败，已回滚本次写入：${message}`);
+    } finally {
+      setPackageBusy(false);
+    }
+  }, [pendingProjectPackage]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -722,7 +839,7 @@ function CanvasKernel() {
                 setLastAction("正在切换项目并恢复独立草稿");
               }}
             >
-              {PROJECTS.map((project) => <option key={project.documentId} value={project.documentId}>{project.label}</option>)}
+              {availableProjects.map((project) => <option key={project.documentId} value={project.documentId}>{project.label}</option>)}
               {!activeProject && <option value={documentId}>恢复副本</option>}
             </select>
           </label>
@@ -745,6 +862,14 @@ function CanvasKernel() {
           multiple
           onChange={(event) => void importAssetFiles(Array.from(event.target.files ?? []))}
         />
+        <input
+          ref={packageInputRef}
+          className="hidden-asset-input"
+          aria-label="选择画布项目包"
+          type="file"
+          accept=".canvaspack,application/x-ai-commerce-canvas-package"
+          onChange={(event) => void inspectProjectPackage(event.target.files?.[0])}
+        />
         <div className="toolbar-actions">
           <span className="tool-group">
             <button disabled={!history.past.length} onClick={() => dispatch({ type: "undo" })}>撤销</button>
@@ -763,6 +888,10 @@ function CanvasKernel() {
             <button className="asset-action" onClick={() => addNode("image")}>＋ 图片占位</button>
             <button className="asset-action" onClick={() => addNode("text")}>＋ 文字</button>
             <button className="constraint-action" onClick={addConstraintNode}>＋ 约束</button>
+          </span>
+          <span className="tool-group">
+            <button className="package-action" disabled={packageBusy} onClick={() => void exportProjectPackage()}>{packageBusy ? "处理中…" : "导出项目包"}</button>
+            <button className="package-action" disabled={packageBusy} onClick={() => packageInputRef.current?.click()}>导入项目包</button>
           </span>
           <span className="tool-group test-tools">
             <button onClick={() => switchScene("semantic")}>业务样例</button>
@@ -882,6 +1011,30 @@ function CanvasKernel() {
               <button className="primary" onClick={keepRecoveryCopy}>保留当前为副本</button>
               <button onClick={acceptRemote}>载入另一标签版本</button>
             </div>
+          </section>
+        )}
+
+        {(pendingProjectPackage || packageError) && (
+          <section className="package-panel" role={pendingProjectPackage ? "alertdialog" : "alert"} aria-label={pendingProjectPackage ? "确认导入项目包" : "项目包错误"}>
+            <span>{pendingProjectPackage ? "项目包已通过完整性校验" : "项目包操作失败"}</span>
+            {pendingProjectPackage ? (
+              <>
+                <strong>将“{pendingProjectPackage.projectName}”导入为独立项目副本？</strong>
+                <p>
+                  {pendingProjectPackage.assets.length} 个资产 · {pendingProjectPackage.constraints.length} 个约束快照 · {formatAssetBytes(pendingProjectPackage.packageBytes)}。资产与约束编号会安全重建，现有项目不会被覆盖。
+                </p>
+                <div>
+                  <button className="primary" disabled={packageBusy} onClick={() => void importProjectPackage()}>{packageBusy ? "正在导入…" : "确认导入副本"}</button>
+                  <button disabled={packageBusy} onClick={() => setPendingProjectPackage(null)}>取消</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <strong>{packageError}</strong>
+                <p>未写入或覆盖任何项目数据。</p>
+                <div><button onClick={() => setPackageError("")}>知道了</button></div>
+              </>
+            )}
           </section>
         )}
 

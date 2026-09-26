@@ -52,6 +52,10 @@ export class LocalCanvasRepository {
     return recovered;
   }
 
+  remove(): void {
+    localStorage.removeItem(this.key);
+  }
+
   subscribe(listener: (document: CanvasDocument) => void): () => void {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== this.key || !event.newValue) return;

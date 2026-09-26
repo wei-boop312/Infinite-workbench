@@ -16,11 +16,13 @@ type BlobRecord = { key: string; assetId: string; role: BlobRole; blob: Blob };
 export type AssetFileDescriptor = Pick<File, "name" | "type" | "size">;
 export type AssetImportResult = { assets: Asset[]; errors: string[] };
 export type AssetUsage = { count: number; originalBytes: number; proxyBytes: number; totalBytes: number };
+export type RestoredAsset = { asset: Asset; original: Blob; proxy?: Blob };
 export interface AssetRepositoryPort {
   list(projectId: string): Promise<Asset[]>;
   getBlob(assetId: string, role: BlobRole): Promise<Blob | null>;
   importFiles(projectId: string, files: File[]): Promise<AssetImportResult>;
   saveMask(projectId: string, sourceAssetId: string, blob: Blob, width: number, height: number): Promise<Asset>;
+  restore(projectId: string, records: RestoredAsset[]): Promise<void>;
   remove(projectId: string, assetId: string): Promise<boolean>;
   usage(projectId: string): Promise<AssetUsage>;
 }
@@ -238,6 +240,33 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
       transaction.objectStore(BLOB_STORE).put({ key: `${id}:original`, assetId: id, role: "original", blob } satisfies BlobRecord);
       await transactionComplete(transaction);
       return asset;
+    } finally {
+      database.close();
+    }
+  }
+
+  async restore(projectId: string, records: RestoredAsset[]): Promise<void> {
+    const ids = new Set<string>();
+    for (const { asset, original, proxy } of records) {
+      if (asset.projectId !== projectId || ids.has(asset.id)) throw new Error("项目包资产编号无效或重复");
+      if (original.size !== asset.byteSize) throw new Error(`原文件大小不匹配：${asset.originalName}`);
+      if (Boolean(asset.proxyStorageKey) !== Boolean(proxy)) throw new Error(`预览文件不完整：${asset.originalName}`);
+      ids.add(asset.id);
+    }
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction([ASSET_STORE, BLOB_STORE], "readwrite");
+      const assetStore = transaction.objectStore(ASSET_STORE);
+      const blobStore = transaction.objectStore(BLOB_STORE);
+      for (const { asset, original, proxy } of records) {
+        assetStore.add(asset);
+        blobStore.add({ key: `${asset.id}:original`, assetId: asset.id, role: "original", blob: original } satisfies BlobRecord);
+        if (proxy) blobStore.add({ key: `${asset.id}:proxy`, assetId: asset.id, role: "proxy", blob: proxy } satisfies BlobRecord);
+      }
+      await transactionComplete(transaction);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "ConstraintError") throw new Error("项目包资产与本地编号冲突");
+      throw error;
     } finally {
       database.close();
     }

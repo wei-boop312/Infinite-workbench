@@ -111,6 +111,15 @@ export class LocalConstraintRepository {
     localStorage.setItem(`${KEY_PREFIX}${projectId}`, JSON.stringify([...this.list(projectId), snapshot]));
     return snapshot;
   }
+
+  replace(projectId: string, snapshots: ConstraintSnapshot[]): void {
+    if (snapshots.some((snapshot) => snapshot.projectId !== projectId)) throw new Error("约束快照不属于导入项目");
+    localStorage.setItem(`${KEY_PREFIX}${projectId}`, JSON.stringify(snapshots));
+  }
+
+  remove(projectId: string): void {
+    localStorage.removeItem(`${KEY_PREFIX}${projectId}`);
+  }
 }
 
 export const constraintRepository = new LocalConstraintRepository();
