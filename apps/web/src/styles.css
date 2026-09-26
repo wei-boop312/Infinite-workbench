@@ -1,0 +1,56 @@
+:root {
+  color: #f3f4f6;
+  background: #090b0f;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; }
+button { font: inherit; }
+
+.app-shell { display: grid; grid-template-rows: auto auto 1fr; width: 100%; height: 100%; min-height: 620px; background: radial-gradient(circle at 30% -10%, #1f2740 0, transparent 33%), #0b0d12; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 20px 28px 15px; border-bottom: 1px solid #ffffff12; background: #0d0f14d9; backdrop-filter: blur(18px); }
+.topbar h1 { margin: 3px 0 5px; font-size: 23px; letter-spacing: -.03em; }
+.topbar p { margin: 0; color: #8d93a1; font-size: 12px; }
+.eyebrow { color: #8b9eff; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+.status-cluster { display: flex; align-items: baseline; gap: 7px; color: #9da3b1; }
+.status-cluster strong { color: #fff; font-size: 17px; }
+.status-cluster small { margin-right: 6px; font-size: 10px; }
+.safe-badge { margin-right: 10px; padding: 6px 9px; border: 1px solid #34d39945; border-radius: 999px; color: #65e6b6; background: #34d39912; font-size: 10px; font-weight: 700; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 28px; border-bottom: 1px solid #ffffff0c; background: #11141a; }
+.toolbar div { display: flex; gap: 7px; }
+.toolbar button { padding: 7px 12px; border: 1px solid #ffffff12; border-radius: 8px; color: #9197a5; background: #191c23; cursor: pointer; font-size: 11px; }
+.toolbar button:hover { color: #fff; border-color: #ffffff28; }
+.toolbar button.active { color: #fff; border-color: #7c8dff88; background: #6d7cff26; }
+.toolbar button.mock-run { margin-left: 5px; color: #74e6bd; border-color: #34d39955; background: #34d39914; }
+.toolbar button:disabled { opacity: .38; cursor: not-allowed; }
+.toolbar p { margin: 0; color: #777e8d; font-size: 11px; }
+.canvas-frame { position: relative; min-height: 0; }
+
+.studio-node { position: relative; display: grid; grid-template-rows: auto 1fr auto auto; gap: 5px; width: 100%; height: 100%; min-width: 180px; min-height: 116px; overflow: visible; padding: 12px; border: 1px solid #ffffff15; border-top-color: color-mix(in srgb, var(--accent), transparent 25%); border-radius: 13px; color: #e8eaf0; background: linear-gradient(165deg, color-mix(in srgb, var(--accent), transparent 92%), #181b22 45%); box-shadow: 0 16px 35px #00000045; transition: border-color .15s, box-shadow .15s; }
+.studio-node.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 70%), 0 20px 40px #00000066; }
+.studio-node header { display: flex; align-items: center; justify-content: space-between; color: color-mix(in srgb, var(--accent), white 18%); font-size: 9px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+.studio-node header em { padding: 3px 6px; border-radius: 999px; color: #c7cbd5; background: #ffffff0e; font-size: 8px; font-style: normal; letter-spacing: 0; }
+.studio-node strong { font-size: 12px; }
+.studio-node small { overflow: hidden; color: #828896; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.node-preview { display: flex; align-items: end; gap: 5px; min-height: 40px; padding: 8px; border: 1px solid #ffffff0a; border-radius: 8px; background: #080a0e99; }
+.node-preview i { flex: 1; border-radius: 4px 4px 2px 2px; background: linear-gradient(180deg, color-mix(in srgb, var(--accent), white 15%), color-mix(in srgb, var(--accent), transparent 70%)); }
+.node-preview i:nth-child(1) { height: 45%; }.node-preview i:nth-child(2) { height: 82%; }.node-preview i:nth-child(3) { height: 62%; }
+.kind-constraint .node-preview i { height: 3px; }.kind-video .node-preview::after { content: "▶"; display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; color: #fff; background: var(--accent); font-size: 9px; }
+.port { width: 11px !important; height: 11px !important; border: 2px solid #14171d !important; background: var(--accent) !important; box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent), white 12%); }
+.port-product::after, .port-constraint::after { position: absolute; left: 14px; width: 70px; color: #838997; font-size: 8px; }
+.port-product::after { content: "商品"; }.port-constraint::after { content: "约束"; }
+.resize-line { border-color: var(--accent) !important; }.resize-handle { width: 8px !important; height: 8px !important; border-color: #11141a !important; background: var(--accent) !important; }
+.edge-workflow path { stroke: #8694ff; stroke-width: 1.8; }.edge-lineage path { stroke: #43d6a1; stroke-width: 2.1; stroke-dasharray: 7 5; }
+.react-flow__minimap { overflow: hidden; border: 1px solid #ffffff14; border-radius: 10px; background: #11141a !important; }
+.react-flow__controls { overflow: hidden; border: 1px solid #ffffff14; border-radius: 9px; box-shadow: none; }.react-flow__controls button { border-bottom-color: #ffffff12; color: #c3c7d1; background: #161920; fill: currentColor; }
+.react-flow__selection { border-color: #8290ff; background: #7282ff12; }
+.legend { position: absolute; right: 14px; bottom: 114px; z-index: 10; display: grid; gap: 7px; width: 180px; padding: 11px 12px; border: 1px solid #ffffff12; border-radius: 10px; background: #11141ae8; backdrop-filter: blur(12px); }
+.legend strong { font-size: 10px; }.legend span { display: flex; align-items: center; gap: 8px; color: #8f95a2; font-size: 9px; }.legend i { width: 24px; height: 0; border-top: 2px solid; }.legend .workflow-line { border-color: #8694ff; }.legend .lineage-line { border-color: #43d6a1; border-top-style: dashed; }
+
+@media (max-width: 720px) {
+  .topbar { align-items: flex-start; padding: 15px; }.topbar p { display: none; }.topbar h1 { font-size: 18px; }.status-cluster small, .safe-badge { display: none; }
+  .toolbar { align-items: flex-start; flex-direction: column; padding: 9px 15px; }.toolbar p { min-height: 14px; }.legend { display: none; }
+}
