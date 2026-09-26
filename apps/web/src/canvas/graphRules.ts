@@ -1,6 +1,6 @@
 import type { CanvasEdge, CanvasNode, StudioKind } from "./model";
 
-export type PortDataType = "image" | "text" | "constraint";
+export type PortDataType = "image" | "video" | "text" | "constraint";
 export type ConnectionValidation = { valid: true; dataType: PortDataType } | { valid: false; reason: string };
 type GraphConnection = {
   source: string | null;
@@ -16,6 +16,7 @@ function nodeKind(node: CanvasNode): StudioKind | "group" {
 function outputType(kind: StudioKind | "group", handle: string | null | undefined): PortDataType | null {
   if (handle !== "output") return null;
   if (kind === "image" || kind === "action" || kind === "output") return "image";
+  if (kind === "video") return "video";
   if (kind === "text") return "text";
   if (kind === "constraint") return "constraint";
   return null;

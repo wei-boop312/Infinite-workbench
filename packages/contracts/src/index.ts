@@ -42,7 +42,7 @@ export const WorkflowEdgeSchema = z.object({
   kind: z.literal("workflow"),
   editable: z.literal(true),
   deletable: z.boolean(),
-  dataType: z.enum(["image", "text", "constraint"]).optional(),
+  dataType: z.enum(["image", "video", "text", "constraint"]).optional(),
 }).strict();
 
 export const LineageEdgeSchema = z.object({
@@ -81,6 +81,8 @@ export const AssetSchema = z.object({
   id: IdSchema,
   projectId: IdSchema,
   kind: z.enum(["image", "video", "audio", "document"]),
+  originalName: z.string().trim().min(1).max(260),
+  contentFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
   storageKey: z.string().min(1),
   proxyStorageKey: z.string().min(1).optional(),
   mimeType: z.string().regex(/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i),

@@ -1,4 +1,5 @@
 import type { Edge, Node, XYPosition } from "@xyflow/react";
+import type { Asset } from "@canvas/contracts";
 
 export type StudioKind = "image" | "video" | "constraint" | "action" | "output" | "text";
 
@@ -9,6 +10,7 @@ export type StudioNodeData = {
   badge?: string;
   accent: string;
   assetId?: string;
+  constraintSnapshotId?: string;
   body?: string;
 };
 
@@ -25,7 +27,7 @@ export type CanvasNode = StudioNode | GroupNode;
 export type CanvasEdgeData = {
   kind: "workflow" | "lineage";
   runJobId?: string;
-  dataType?: "image" | "text" | "constraint";
+  dataType?: "image" | "video" | "text" | "constraint";
 };
 
 export type CanvasEdge = Edge<CanvasEdgeData>;
@@ -92,6 +94,45 @@ export function createTextNode(position: XYPosition): StudioNode {
       body: "输入由人确认的文案与设计意图。",
     },
     style: { width: 240, height: 168 },
+  };
+}
+
+export function createConstraintNode(position: XYPosition): StudioNode {
+  return {
+    id: createId("constraint"),
+    type: "studio",
+    position,
+    selected: true,
+    data: {
+      kind: "constraint",
+      title: "新设计约束",
+      subtitle: "由人锁定商品、品牌与可编辑区域",
+      badge: "待确认",
+      accent: "#f59e0b",
+    },
+    style: { width: 240, height: 168 },
+  };
+}
+
+export function createAssetNode(asset: Asset, position: XYPosition): StudioNode {
+  const dimensions = asset.width && asset.height ? `${asset.width} × ${asset.height}` : "尺寸待识别";
+  const size = asset.byteSize < 1024 * 1024
+    ? `${(asset.byteSize / 1024).toFixed(1)} KB`
+    : `${(asset.byteSize / 1024 / 1024).toFixed(1)} MB`;
+  return {
+    id: createId(asset.kind),
+    type: "studio",
+    position,
+    selected: true,
+    data: {
+      kind: asset.kind === "video" ? "video" : "image",
+      title: asset.originalName,
+      subtitle: `${dimensions} · ${size}`,
+      badge: "本地资产",
+      accent: asset.kind === "video" ? "#fb7185" : "#60a5fa",
+      assetId: asset.id,
+    },
+    style: { width: 240, height: 180 },
   };
 }
 

@@ -76,7 +76,7 @@ test("双标签页冲突不会静默覆盖，并可另存恢复副本", async ({
 
   await firstPage.getByRole("button", { name: "＋ 文字" }).click();
   await firstPage.waitForTimeout(180);
-  await secondPage.getByRole("button", { name: "＋ 图片" }).click();
+  await secondPage.getByRole("button", { name: "＋ 图片占位" }).click();
 
   const conflict = secondPage.getByRole("alertdialog", { name: "修订冲突恢复" });
   await expect(conflict).toBeVisible({ timeout: 4_000 });
@@ -145,6 +145,72 @@ test("保存失败时保留内存草稿并可下载恢复文件", async ({ page 
   await recovery.getByRole("button", { name: "下载恢复文件" }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe("phase-1-demo-recovery.json");
+});
+
+test("导入真实图片后原文件进入资产库，画布只保存 assetId", async ({ page }) => {
+  await page.goto("/");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.getByLabel("导入本地资产").setInputFiles({
+    name: "phase2-product.png",
+    mimeType: "image/png",
+    buffer: png,
+  });
+
+  const library = page.getByRole("complementary", { name: "项目资产库" });
+  await expect(library).toBeVisible();
+  await expect(library.getByText("phase2-product.png")).toBeVisible();
+  await expect(page.locator('.asset-node-preview img[alt="phase2-product.png"]')).toHaveCount(1);
+  await expect(page.locator(".react-flow__node")).toHaveCount(7);
+
+  await page.getByLabel("导入本地资产").setInputFiles({
+    name: "phase2-product-copy.png",
+    mimeType: "image/png",
+    buffer: png,
+  });
+  await expect(library.getByText("1 个资产")).toBeVisible();
+  await expect(page.locator('.asset-node-preview img[alt="phase2-product.png"]')).toHaveCount(2);
+  await expect(page.locator(".react-flow__node")).toHaveCount(8);
+  await expect(page.getByText(/已保存 r\d+/)).toBeVisible({ timeout: 4_000 });
+
+  const persisted = await page.evaluate(() => {
+    const raw = localStorage.getItem("ai-commerce-canvas.document.phase-1-demo");
+    return raw ? JSON.parse(raw) : null;
+  });
+  const importedNode = persisted.nodes.find((node: { data?: { title?: string } }) => node.data?.title === "phase2-product.png");
+  expect(importedNode.data.assetId).toMatch(/^image-/);
+  expect(JSON.stringify(persisted)).not.toContain("data:image");
+
+  await page.reload();
+  await expect(page.locator('.asset-node-preview img[alt="phase2-product.png"]')).toHaveCount(2);
+  await page.getByLabel("切换项目").selectOption("phase-1-campaign");
+  await expect(page.getByRole("button", { name: "资产库 0" })).toBeVisible();
+  await expect(page.locator('.asset-node-preview img[alt="phase2-product.png"]')).toHaveCount(0);
+  await page.getByLabel("切换项目").selectOption("phase-1-demo");
+  await expect(page.locator('.asset-node-preview img[alt="phase2-product.png"]')).toHaveCount(2);
+});
+
+test("人工约束每次保存都生成新的不可变快照", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "＋ 约束" }).click();
+  const inspector = page.getByRole("complementary", { name: "人工约束" });
+  await expect(inspector).toBeVisible();
+  await inspector.getByLabel("区域 1 描述").fill("只允许替换纯色背景");
+  await inspector.getByLabel("输出宽度").fill("1080");
+  await inspector.getByLabel("输出高度").fill("1440");
+  await inspector.getByRole("button", { name: "保存为新约束快照" }).click();
+  await expect(page.getByText(/已保存不可变约束快照/)).toBeVisible();
+
+  await inspector.getByLabel("输出宽度").fill("1200");
+  await inspector.getByRole("button", { name: "保存为新约束快照" }).click();
+  const snapshots = await page.evaluate(() => JSON.parse(localStorage.getItem("ai-commerce-canvas.constraints.project-main-image") ?? "[]"));
+  expect(snapshots).toHaveLength(2);
+  expect(snapshots[0].id).not.toBe(snapshots[1].id);
+  expect(snapshots[0].outputSpec.width).toBe(1080);
+  expect(snapshots[1].outputSpec.width).toBe(1200);
+  await expect(page.getByText(/已保存 r\d+/)).toBeVisible({ timeout: 4_000 });
+  await page.reload();
+  await page.locator('.react-flow__node[data-id^="constraint-"]').click();
+  await expect(page.getByRole("complementary", { name: "人工约束" }).getByText("基于已保存快照创建新版本")).toBeVisible();
 });
 
 test.describe("390 像素触控布局", () => {

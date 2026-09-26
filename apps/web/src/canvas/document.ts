@@ -114,6 +114,7 @@ export function documentToSnapshot(document: CanvasDocument): CanvasSnapshot {
         badge: typeof node.data.badge === "string" ? node.data.badge : undefined,
         accent: typeof node.data.accent === "string" ? node.data.accent : DEFAULT_ACCENTS[kind],
         assetId: typeof node.data.assetId === "string" ? node.data.assetId : undefined,
+        constraintSnapshotId: typeof node.data.constraintSnapshotId === "string" ? node.data.constraintSnapshotId : undefined,
         body: typeof node.data.body === "string" ? node.data.body : undefined,
       },
       style: { width: node.size?.width ?? 220, height: node.size?.height ?? 160 },

@@ -1,6 +1,8 @@
 import {
+  createContext,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useReducer,
@@ -29,8 +31,9 @@ import {
   type NodeProps,
   type Viewport,
 } from "@xyflow/react";
-import type { CanvasDocument } from "@canvas/contracts";
+import type { Asset, CanvasDocument, ConstraintSnapshot } from "@canvas/contracts";
 import { executeMockRun } from "@canvas/testing/browser";
+import { assetRepository } from "./assets/assetRepository";
 import { documentToSnapshot, snapshotFingerprint, snapshotToDocument } from "./canvas/document";
 import { layoutCanvas } from "./canvas/autoLayout";
 import { validateConnection } from "./canvas/graphRules";
@@ -38,6 +41,8 @@ import { createHistoryState, historyReducer } from "./canvas/history";
 import { LocalCanvasRepository, RevisionConflictError } from "./canvas/localRepository";
 import {
   createId,
+  createAssetNode,
+  createConstraintNode,
   createImageNode,
   createStressNodes,
   createTextNode,
@@ -50,6 +55,12 @@ import {
   type StudioKind,
   type StudioNode,
 } from "./canvas/model";
+import { AssetLibrary } from "./components/AssetLibrary";
+import { ConstraintInspector } from "./components/ConstraintInspector";
+import {
+  constraintRepository,
+  type ConstraintDraft,
+} from "./constraints/constraintRepository";
 
 const KIND_LABEL: Record<StudioKind, string> = {
   image: "图片资产",
@@ -60,6 +71,8 @@ const KIND_LABEL: Record<StudioKind, string> = {
   text: "文字资产",
 };
 
+const AssetPreviewContext = createContext<Record<string, string>>({});
+
 function nodeSize(node: CanvasNode): { width: number; height: number } {
   const width = node.measured?.width ?? Number.parseFloat(String(node.style?.width ?? (node.type === "group" ? 520 : 220)));
   const height = node.measured?.height ?? Number.parseFloat(String(node.style?.height ?? (node.type === "group" ? 340 : 160)));
@@ -67,10 +80,19 @@ function nodeSize(node: CanvasNode): { width: number; height: number } {
 }
 
 const StudioCard = memo(function StudioCard({ data, selected }: NodeProps<StudioNode>) {
+  const assetPreviews = useContext(AssetPreviewContext);
+  const assetPreview = data.assetId ? assetPreviews[data.assetId] : undefined;
+  const isVideoAsset = data.kind === "video" && Boolean(data.assetId);
   const acceptsInputs = data.kind === "action";
-  const hasGenericInput = data.kind === "output" || data.kind === "video";
-  const hasOutput = data.kind !== "video";
-  const outputDataClass = data.kind === "text" ? "port-data-text" : data.kind === "constraint" ? "port-data-constraint" : "port-data-image";
+  const hasGenericInput = data.kind === "output" || (data.kind === "video" && !isVideoAsset);
+  const hasOutput = data.kind !== "video" || isVideoAsset;
+  const outputDataClass = data.kind === "text"
+    ? "port-data-text"
+    : data.kind === "constraint"
+      ? "port-data-constraint"
+      : data.kind === "video"
+        ? "port-data-video"
+        : "port-data-image";
   return (
     <article className={`studio-node kind-${data.kind} ${selected ? "is-selected" : ""}`} style={{ "--accent": data.accent } as CSSProperties}>
       <NodeResizer minWidth={180} minHeight={116} isVisible={selected} lineClassName="resize-line" handleClassName="resize-handle" />
@@ -85,7 +107,12 @@ const StudioCard = memo(function StudioCard({ data, selected }: NodeProps<Studio
         <span>{KIND_LABEL[data.kind]}</span>
         {data.badge && <em>{data.badge}</em>}
       </header>
-      {data.kind === "text" ? (
+      {assetPreview ? (
+        <div className="asset-node-preview">
+          <img src={assetPreview} alt={data.title} />
+          {data.kind === "video" && <i>▶</i>}
+        </div>
+      ) : data.kind === "text" ? (
         <div className="text-preview">{data.body || "空文字节点"}</div>
       ) : (
         <div className="node-preview" aria-hidden="true"><i /><i /><i /></div>
@@ -127,9 +154,17 @@ function CanvasKernel() {
   const [saveFailure, setSaveFailure] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
   const [loaded, setLoaded] = useState(false);
-  const [lastAction, setLastAction] = useState("阶段 1 可靠画布已加载");
+  const [lastAction, setLastAction] = useState("阶段 2 资产与约束系统已加载");
   const [online, setOnline] = useState(() => navigator.onLine);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [assetPreviewUrls, setAssetPreviewUrls] = useState<Record<string, string>>({});
+  const [assetCatalogRevision, setAssetCatalogRevision] = useState(0);
+  const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
+  const [assetImporting, setAssetImporting] = useState(false);
+  const [assetError, setAssetError] = useState("");
+  const [constraintSnapshots, setConstraintSnapshots] = useState<ConstraintSnapshot[]>([]);
   const clipboardRef = useRef<CanvasSnapshot | null>(null);
+  const assetInputRef = useRef<HTMLInputElement>(null);
   const lastSavedFingerprint = useRef("");
   const currentRef = useRef({ snapshot: history.present, viewport, revision: savedRevision });
   const repository = useMemo(() => new LocalCanvasRepository(documentId), [documentId]);
@@ -139,6 +174,41 @@ function CanvasKernel() {
 
   const { nodes, edges } = history.present;
   currentRef.current = { snapshot: history.present, viewport, revision: savedRevision };
+
+  useEffect(() => {
+    let cancelled = false;
+    const createdUrls: string[] = [];
+    setAssets([]);
+    setAssetPreviewUrls({});
+    setAssetError("");
+    void assetRepository.list(projectId).then(async (projectAssets) => {
+      const previews: Record<string, string> = {};
+      for (const asset of projectAssets) {
+        if (cancelled) return;
+        const role = asset.proxyStorageKey ? "proxy" : asset.kind === "image" ? "original" : null;
+        if (!role) continue;
+        const blob = await assetRepository.getBlob(asset.id, role);
+        if (cancelled) return;
+        if (!blob) continue;
+        const url = URL.createObjectURL(blob);
+        createdUrls.push(url);
+        previews[asset.id] = url;
+      }
+      if (cancelled) return;
+      setAssets(projectAssets);
+      setAssetPreviewUrls(previews);
+    }).catch((error) => {
+      if (!cancelled) setAssetError(error instanceof Error ? error.message : "资产库加载失败");
+    });
+    return () => {
+      cancelled = true;
+      for (const url of createdUrls) URL.revokeObjectURL(url);
+    };
+  }, [assetCatalogRevision, projectId]);
+
+  useEffect(() => {
+    setConstraintSnapshots(constraintRepository.list(projectId));
+  }, [projectId]);
 
   const loadDocument = useCallback((document: CanvasDocument, message: string) => {
     const snapshot = documentToSnapshot(document);
@@ -278,6 +348,57 @@ function CanvasKernel() {
     const node = kind === "image" ? createImageNode(position) : createTextNode(position);
     commit({ nodes: [...deselected, node], edges }, kind === "image" ? "已添加图片资产节点" : "已添加文字资产节点");
   }, [commit, edges, nodes, screenToFlowPosition]);
+
+  const addConstraintNode = useCallback(() => {
+    const position = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+    const deselected = nodes.map((node) => ({ ...node, selected: false }));
+    commit({ nodes: [...deselected, createConstraintNode(position)], edges }, "已添加人工约束节点；请选择它定义锁定项与可编辑区域");
+  }, [commit, edges, nodes, screenToFlowPosition]);
+
+  const addAssetToCanvas = useCallback((asset: Asset) => {
+    const current = currentRef.current.snapshot;
+    const position = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+    const deselected = current.nodes.map((node) => ({ ...node, selected: false }));
+    commit({ nodes: [...deselected, createAssetNode(asset, position)], edges: current.edges }, `已把 ${asset.originalName} 添加到画布；文档仅保存 assetId`);
+  }, [commit, screenToFlowPosition]);
+
+  const importAssetFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    setAssetImporting(true);
+    setAssetError("");
+    try {
+      const result = await assetRepository.importFiles(projectId, files);
+      const imported = result.assets;
+      if (result.errors.length) setAssetError(result.errors.join("；"));
+      if (!imported.length) {
+        setLastAction(`资产导入失败：${result.errors.join("；")}`);
+        setAssetLibraryOpen(true);
+        return;
+      }
+      const knownAssetIds = new Set(assets.map((asset) => asset.id));
+      const addedCount = imported.filter((asset) => !knownAssetIds.has(asset.id)).length;
+      const current = currentRef.current.snapshot;
+      const center = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+      const importedNodes = imported.map((asset, index) => createAssetNode(asset, {
+        x: center.x + (index % 3) * 270,
+        y: center.y + Math.floor(index / 3) * 210,
+      }));
+      commit({
+        nodes: [...current.nodes.map((node) => ({ ...node, selected: false })), ...importedNodes],
+        edges: current.edges,
+      }, `资产就绪：新增 ${addedCount} 个，复用 ${imported.length - addedCount} 个${result.errors.length ? `，${result.errors.length} 个失败` : ""}；画布只保存引用`);
+      setAssetCatalogRevision((revision) => revision + 1);
+      setAssetLibraryOpen(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "资产导入失败";
+      setAssetError(message);
+      setLastAction(`资产导入失败：${message}`);
+      setAssetLibraryOpen(true);
+    } finally {
+      setAssetImporting(false);
+      if (assetInputRef.current) assetInputRef.current.value = "";
+    }
+  }, [assets, commit, projectId, screenToFlowPosition]);
 
   const selectedClosure = useCallback(() => {
     const selectedIds = new Set(nodes.filter((node) => node.selected).map((node) => node.id));
@@ -484,6 +605,29 @@ function CanvasKernel() {
   }, [copySelection, deleteSelection, duplicateSelection, pasteSelection]);
 
   const selectedText = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && node.data.kind === "text");
+  const selectedConstraint = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && node.data.kind === "constraint");
+  const activeConstraintSnapshot = selectedConstraint?.data.constraintSnapshotId
+    ? constraintSnapshots.find((snapshot) => snapshot.id === selectedConstraint.data.constraintSnapshotId) ?? null
+    : null;
+  const saveConstraintSnapshot = useCallback((draft: ConstraintDraft) => {
+    if (!selectedConstraint) return;
+    const snapshot = constraintRepository.save(projectId, draft);
+    setConstraintSnapshots((current) => [...current, snapshot]);
+    commit({
+      nodes: nodes.map((node) => node.id === selectedConstraint.id
+        ? {
+            ...node,
+            data: {
+              ...node.data,
+              constraintSnapshotId: snapshot.id,
+              badge: "已确认",
+              subtitle: `${snapshot.editableRegions.length} 个可编辑区域 · ${snapshot.outputSpec.width}×${snapshot.outputSpec.height} ${snapshot.outputSpec.format.toUpperCase()}`,
+            },
+          } as CanvasNode
+        : node),
+      edges,
+    }, `已保存不可变约束快照 ${snapshot.id.slice(-8)}`);
+  }, [commit, edges, nodes, projectId, selectedConstraint]);
   const stats = useMemo(() => ({ nodes: nodes.length, edges: edges.length }), [edges.length, nodes.length]);
   const saveLabel: Record<SaveState, string> = {
     loading: "正在恢复",
@@ -498,9 +642,9 @@ function CanvasKernel() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <span className="eyebrow">PHASE 1 · RELIABLE CANVAS CORE</span>
+          <span className="eyebrow">PHASE 2 · ASSETS & CONSTRAINTS</span>
           <h1>AI 电商视觉工作台</h1>
-          <p>画布编辑与 AI 执行彻底隔离；当前只启用本地持久化和假执行器。</p>
+          <p>原始媒体、画布引用与人工约束分层保存；AI 与 MCP 仍保持关闭。</p>
         </div>
         <div className="status-cluster">
           <label className="project-switcher">
@@ -520,6 +664,7 @@ function CanvasKernel() {
           </label>
           <span className="safe-badge">无真实 API</span>
           {!online && <span className="offline-badge">离线草稿</span>}
+          <span className="asset-count">{assets.length} 资产</span>
           <span className={`save-badge state-${saveState}`}>{saveLabel[saveState]}</span>
           <strong>{stats.nodes}</strong><small>节点</small>
           <strong>{stats.edges}</strong><small>连线</small>
@@ -527,6 +672,15 @@ function CanvasKernel() {
       </header>
 
       <section className="toolbar" aria-label="画布编辑工具">
+        <input
+          ref={assetInputRef}
+          className="hidden-asset-input"
+          aria-label="导入本地资产"
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime"
+          multiple
+          onChange={(event) => void importAssetFiles(Array.from(event.target.files ?? []))}
+        />
         <div className="toolbar-actions">
           <span className="tool-group">
             <button disabled={!history.past.length} onClick={() => dispatch({ type: "undo" })}>撤销</button>
@@ -540,8 +694,11 @@ function CanvasKernel() {
             <button onClick={autoArrange}>自动整理</button>
           </span>
           <span className="tool-group">
-            <button className="asset-action" onClick={() => addNode("image")}>＋ 图片</button>
+            <button className="asset-action" disabled={assetImporting} onClick={() => assetInputRef.current?.click()}>{assetImporting ? "导入中…" : "导入资产"}</button>
+            <button className="asset-action" onClick={() => setAssetLibraryOpen((open) => !open)}>资产库 {assets.length}</button>
+            <button className="asset-action" onClick={() => addNode("image")}>＋ 图片占位</button>
             <button className="asset-action" onClick={() => addNode("text")}>＋ 文字</button>
+            <button className="constraint-action" onClick={addConstraintNode}>＋ 约束</button>
           </span>
           <span className="tool-group test-tools">
             <button onClick={() => switchScene("semantic")}>业务样例</button>
@@ -553,8 +710,19 @@ function CanvasKernel() {
         <p>{lastAction}</p>
       </section>
 
-      <section className="canvas-frame">
-        <ReactFlow<CanvasNode, CanvasEdge>
+      <section
+        className="canvas-frame"
+        onDragOver={(event) => {
+          if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer.files.length) return;
+          event.preventDefault();
+          void importAssetFiles(Array.from(event.dataTransfer.files));
+        }}
+      >
+        <AssetPreviewContext.Provider value={assetPreviewUrls}>
+          <ReactFlow<CanvasNode, CanvasEdge>
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
@@ -576,11 +744,23 @@ function CanvasKernel() {
           panOnDrag={[1, 2]}
           nodesFocusable
           edgesFocusable
-        >
-          <Background variant={BackgroundVariant.Dots} gap={22} size={1.25} color="#343842" />
-          <MiniMap pannable zoomable nodeColor={(node) => (node.data as { accent?: string }).accent ?? "#64748b"} maskColor="rgba(8, 10, 14, 0.72)" />
-          <Controls showInteractive={false} />
-        </ReactFlow>
+          >
+            <Background variant={BackgroundVariant.Dots} gap={22} size={1.25} color="#343842" />
+            <MiniMap pannable zoomable nodeColor={(node) => (node.data as { accent?: string }).accent ?? "#64748b"} maskColor="rgba(8, 10, 14, 0.72)" />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </AssetPreviewContext.Provider>
+
+        <AssetLibrary
+          open={assetLibraryOpen}
+          assets={assets}
+          previewUrls={assetPreviewUrls}
+          importing={assetImporting}
+          error={assetError}
+          onClose={() => setAssetLibraryOpen(false)}
+          onChooseFiles={() => assetInputRef.current?.click()}
+          onAddToCanvas={addAssetToCanvas}
+        />
 
         {selectedText && (
           <aside className="inspector" onPointerDown={(event) => event.stopPropagation()}>
@@ -605,7 +785,16 @@ function CanvasKernel() {
           </aside>
         )}
 
-        {!selectedText && (
+        {selectedConstraint && (
+          <ConstraintInspector
+            key={`${selectedConstraint.id}:${selectedConstraint.data.constraintSnapshotId ?? "draft"}`}
+            snapshot={activeConstraintSnapshot}
+            assets={assets}
+            onSave={saveConstraintSnapshot}
+          />
+        )}
+
+        {!selectedText && !selectedConstraint && !assetLibraryOpen && (
           <aside className="legend">
             <strong>两类关系</strong>
             <span><i className="workflow-line" />工作流连线：用户可编辑</span>

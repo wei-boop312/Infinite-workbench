@@ -42,7 +42,7 @@ export function createApiServer() {
 
   return createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/health") {
-      sendJson(response, 200, { ok: true, mode: "phase-1", realExecutorsEnabled: false });
+      sendJson(response, 200, { ok: true, mode: "phase-2", realExecutorsEnabled: false });
       return;
     }
 
@@ -113,6 +113,6 @@ const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(resolve
 if (isDirectRun) {
   const port = Number(process.env.PORT ?? 4100);
   createApiServer().listen(port, "127.0.0.1", () => {
-    console.log(`Phase 1 API listening on http://127.0.0.1:${port}`);
+    console.log(`Phase 2 API listening on http://127.0.0.1:${port}`);
   });
 }
