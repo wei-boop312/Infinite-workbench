@@ -35,6 +35,12 @@ importers:
 
   apps/web:
     dependencies:
+      '@canvas/canvas-schema':
+        specifier: workspace:*
+        version: link:../../packages/canvas-schema
+      '@canvas/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@canvas/testing':
         specifier: workspace:*
         version: link:../../packages/testing

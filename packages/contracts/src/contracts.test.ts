@@ -6,7 +6,7 @@ import {
 } from "./index";
 
 const validDocument = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   id: "canvas-1",
   projectId: "project-1",
   revision: 0,
@@ -58,4 +58,3 @@ describe("阶段 0 数据合同", () => {
     })).toThrow();
   });
 });
-

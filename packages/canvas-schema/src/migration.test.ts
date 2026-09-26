@@ -11,15 +11,24 @@ const legacy = {
 };
 
 describe("画布迁移器", () => {
-  it("将无版本旧文档迁移到 v1，并保留旧连线为工作流边", () => {
+  it("将无版本旧文档迁移到当前版本，并保留旧连线为工作流边", () => {
     const migrated = migrateCanvasDocument(legacy);
-    expect(migrated.schemaVersion).toBe(1);
+    expect(migrated.schemaVersion).toBe(2);
     expect(migrated.revision).toBe(0);
     expect(migrated.edges[0]).toMatchObject({ kind: "workflow", editable: true, deletable: true });
+  });
+
+  it("将 v1 文档迁移到支持分组关系的 v2", () => {
+    const migrated = migrateCanvasDocument({
+      ...legacy,
+      schemaVersion: 1,
+      revision: 3,
+      edges: [],
+    });
+    expect(migrated).toMatchObject({ schemaVersion: 2, revision: 3 });
   });
 
   it("拒绝未来版本，避免旧客户端静默破坏数据", () => {
     expect(() => migrateCanvasDocument({ ...legacy, schemaVersion: 99 })).toThrow(/高于当前支持版本/);
   });
 });
-

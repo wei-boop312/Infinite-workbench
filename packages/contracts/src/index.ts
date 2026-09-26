@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const CURRENT_CANVAS_SCHEMA_VERSION = 1 as const;
+export const CURRENT_CANVAS_SCHEMA_VERSION = 2 as const;
 
 const IdSchema = z.string().trim().min(1).max(160);
 const IsoDateSchema = z.iso.datetime({ offset: true });
@@ -25,6 +25,7 @@ export const CanvasNodeSchema = z.object({
   type: z.enum(["image", "video", "text", "constraint", "tool", "output", "group", "note"]),
   position: z.object({ x: z.number().finite(), y: z.number().finite() }).strict(),
   size: z.object({ width: z.number().positive(), height: z.number().positive() }).strict().optional(),
+  parentId: IdSchema.optional(),
   data: CanvasNodeDataSchema,
 }).strict();
 
@@ -198,4 +199,3 @@ export type McpConnection = z.infer<typeof McpConnectionSchema>;
 export type CostLedger = z.infer<typeof CostLedgerSchema>;
 export type MockRunRequest = z.infer<typeof MockRunRequestSchema>;
 export type MockRunResult = z.infer<typeof MockRunResultSchema>;
-

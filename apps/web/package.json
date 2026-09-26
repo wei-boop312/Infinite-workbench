@@ -8,6 +8,8 @@
     "build": "tsc -b && vite build"
   },
   "dependencies": {
+    "@canvas/canvas-schema": "workspace:*",
+    "@canvas/contracts": "workspace:*",
     "@canvas/testing": "workspace:*",
     "@xyflow/react": "12.12.0",
     "react": "19.2.0",

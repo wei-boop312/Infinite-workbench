@@ -14,13 +14,17 @@ function migrateV0(input: UnknownRecord): UnknownRecord {
   const legacyEdges = Array.isArray(input.edges) ? input.edges : [];
   return {
     ...input,
-    schemaVersion: CURRENT_CANVAS_SCHEMA_VERSION,
+    schemaVersion: 1,
     revision: typeof input.revision === "number" ? input.revision : 0,
     edges: legacyEdges.map((edge) => {
       if (!isRecord(edge) || edge.kind) return edge;
       return { ...edge, kind: "workflow", editable: true, deletable: true };
     }),
   };
+}
+
+function migrateV1(input: UnknownRecord): UnknownRecord {
+  return { ...input, schemaVersion: 2 };
 }
 
 export function migrateCanvasDocument(input: unknown): CanvasDocument {
@@ -34,9 +38,16 @@ export function migrateCanvasDocument(input: unknown): CanvasDocument {
     throw new Error(`画布版本 ${version} 高于当前支持版本 ${CURRENT_CANVAS_SCHEMA_VERSION}`);
   }
 
-  const migrated = version === 0 ? migrateV0(input) : input;
+  let migrated = input;
+  let migratedVersion = version;
+  if (migratedVersion === 0) {
+    migrated = migrateV0(migrated);
+    migratedVersion = 1;
+  }
+  if (migratedVersion === 1) {
+    migrated = migrateV1(migrated);
+  }
   return CanvasDocumentSchema.parse(migrated);
 }
 
 export { CURRENT_CANVAS_SCHEMA_VERSION };
-
