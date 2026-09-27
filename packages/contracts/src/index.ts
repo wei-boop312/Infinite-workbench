@@ -163,7 +163,8 @@ export const RunBatchSchema = z.object({
   adapterId: IdSchema,
   inputAssetIds: z.array(IdSchema).min(1).max(20),
   idempotencyKey: IdSchema,
-  status: z.enum(["draft", "awaiting_confirmation", "queued", "running", "partial", "succeeded", "failed", "cancelled"]),
+  mockScenario: z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]),
+  status: z.enum(["draft", "awaiting_confirmation", "queued", "running", "partial", "succeeded", "failed", "billing_unknown", "cancelled"]),
   expectedOutputs: z.number().int().positive(),
   estimatedCostMinor: z.number().int().nonnegative(),
   maxCostMinor: z.number().int().nonnegative(),
@@ -176,14 +177,21 @@ export const RunBatchSchema = z.object({
 export const RunJobSchema = z.object({
   id: IdSchema,
   batchId: IdSchema,
+  outputIndex: z.number().int().nonnegative(),
+  attempt: z.number().int().positive(),
   executorKind: z.enum(["provider", "mcp", "mock"]),
   adapterId: IdSchema,
   idempotencyKey: IdSchema,
-  status: z.enum(["queued", "running", "succeeded", "failed", "cancelled", "billing_unknown"]),
+  status: z.enum(["queued", "running", "succeeded", "failed", "timed_out", "cancelled", "billing_unknown"]),
   retryOf: IdSchema.optional(),
   inputAssetIds: z.array(IdSchema),
   outputAssetIds: z.array(IdSchema),
+  estimatedCostMinor: z.number().int().nonnegative(),
+  actualCostMinor: z.number().int().nonnegative().optional(),
   providerRequestId: z.string().min(1).optional(),
+  failureCode: IdSchema.optional(),
+  startedAt: IsoDateSchema.optional(),
+  finishedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
 }).strict();
 
@@ -230,11 +238,18 @@ export const CreateRunBatchRequestSchema = z.object({
   maxCostMinor: z.number().int().nonnegative(),
   currency: z.string().regex(/^[A-Z]{3}$/),
   idempotencyKey: IdSchema,
+  mockScenario: z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]).default("success"),
 }).strict();
 
 export const ConfirmRunBatchRequestSchema = z.object({
   expectedEstimatedCostMinor: z.number().int().nonnegative(),
   expectedCurrency: z.string().regex(/^[A-Z]{3}$/),
+}).strict();
+
+export const RetryRunJobRequestSchema = z.object({
+  expectedEstimatedCostMinor: z.number().int().nonnegative(),
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/),
+  mockScenario: z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]).default("success"),
 }).strict();
 
 export const RunAuditEventSchema = z.object({
@@ -249,6 +264,14 @@ export const RunAuditEventSchema = z.object({
     "batch-confirmed",
     "budget-reserved",
     "jobs-created",
+    "batch-dispatched",
+    "job-started",
+    "job-succeeded",
+    "job-failed",
+    "job-timed-out",
+    "billing-unknown",
+    "cost-settled",
+    "job-retry-created",
     "batch-cancelled",
     "budget-released",
   ]),
@@ -304,6 +327,7 @@ export type RunBatch = z.infer<typeof RunBatchSchema>;
 export type RunJob = z.infer<typeof RunJobSchema>;
 export type CreateRunBatchRequest = z.infer<typeof CreateRunBatchRequestSchema>;
 export type ConfirmRunBatchRequest = z.infer<typeof ConfirmRunBatchRequestSchema>;
+export type RetryRunJobRequest = z.infer<typeof RetryRunJobRequestSchema>;
 export type RunAuditEvent = z.infer<typeof RunAuditEventSchema>;
 export type ProjectBudgetSnapshot = z.infer<typeof ProjectBudgetSnapshotSchema>;
 export type RunBatchAggregate = z.infer<typeof RunBatchAggregateSchema>;

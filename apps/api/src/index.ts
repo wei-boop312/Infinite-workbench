@@ -6,6 +6,7 @@ import {
   CreateRunBatchRequestSchema,
   MockRunRequestSchema,
   ObjectStorageGrantRequestSchema,
+  RetryRunJobRequestSchema,
 } from "@canvas/contracts";
 import type { CanvasDocument } from "@canvas/contracts";
 import { migrateCanvasDocument } from "@canvas/canvas-schema";
@@ -91,7 +92,7 @@ export function createApiServer(options: ApiServerOptions = {}) {
       return;
     }
 
-    const runActionMatch = pathname.match(/^\/v1\/run-batches\/([^/]+)\/(confirm|cancel)$/);
+    const runActionMatch = pathname.match(/^\/v1\/run-batches\/([^/]+)\/(confirm|cancel|dispatch|reconcile)$/);
     if (runActionMatch && request.method === "POST") {
       const kernel = options.runKernel;
       if (!kernel) {
@@ -109,6 +110,10 @@ export function createApiServer(options: ApiServerOptions = {}) {
         if (action === "confirm") {
           const confirmation = ConfirmRunBatchRequestSchema.parse(await readJson(request, MAX_RUN_BODY_BYTES));
           sendJson(response, 200, kernel.confirmBatch(principal, batchId, confirmation));
+        } else if (action === "dispatch") {
+          sendJson(response, 200, kernel.dispatchBatch(principal, batchId));
+        } else if (action === "reconcile") {
+          sendJson(response, 200, kernel.reconcileBatch(principal, batchId));
         } else {
           sendJson(response, 200, kernel.cancelBatch(principal, batchId));
         }
@@ -119,6 +124,32 @@ export function createApiServer(options: ApiServerOptions = {}) {
         }
         const code = error instanceof Error && error.message === "REQUEST_TOO_LARGE" ? 413 : 400;
         sendJson(response, code, { error: code === 413 ? "request_too_large" : "invalid_run_batch_action" });
+      }
+      return;
+    }
+
+    const retryJobMatch = pathname.match(/^\/v1\/run-jobs\/([^/]+)\/retry$/);
+    if (retryJobMatch && request.method === "POST") {
+      const kernel = options.runKernel;
+      if (!kernel) {
+        sendJson(response, 503, { error: "run_kernel_not_configured" });
+        return;
+      }
+      const principal = kernel.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "run_authentication_required" });
+        return;
+      }
+      try {
+        const input = RetryRunJobRequestSchema.parse(await readJson(request, MAX_RUN_BODY_BYTES));
+        sendJson(response, 201, kernel.retryJob(principal, decodeURIComponent(retryJobMatch[1]), input));
+      } catch (error) {
+        if (error instanceof RunKernelError) {
+          sendJson(response, error.status, { error: error.code });
+          return;
+        }
+        const code = error instanceof Error && error.message === "REQUEST_TOO_LARGE" ? 413 : 400;
+        sendJson(response, code, { error: code === 413 ? "request_too_large" : "invalid_run_job_retry" });
       }
       return;
     }

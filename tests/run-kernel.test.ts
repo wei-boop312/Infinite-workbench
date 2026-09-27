@@ -20,8 +20,8 @@ async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${address.port}`;
 }
 
-function createKernel() {
-  const full = ["run:read", "run:create", "run:confirm", "run:cancel"] as const;
+function createKernel(options: { clock?: () => number; maxConcurrentJobs?: number; jobTimeoutMs?: number } = {}) {
+  const full = ["run:read", "run:create", "run:confirm", "run:cancel", "run:execute", "run:retry"] as const;
   return new InMemoryRunKernel({
     authorizer: new StaticRunAuthorizer([
       { bearerToken: "owner-token", tenantId: "tenant-a", actorId: "owner", projects: { "project-a": full } },
@@ -33,6 +33,10 @@ function createKernel() {
       { tenantId: "tenant-b", projectId: "project-a", currency: "CNY", limitMinor: 500 },
     ],
     unitEstimateMinor: 40,
+    unitActualMinor: 30,
+    maxConcurrentJobs: options.maxConcurrentJobs ?? 2,
+    jobTimeoutMs: options.jobTimeoutMs ?? 1_000,
+    clock: options.clock,
   });
 }
 
@@ -56,6 +60,14 @@ async function postJson(baseUrl: string, path: string, token: string, body?: unk
     headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+
+async function createConfirmedBatch(baseUrl: string, overrides: Record<string, unknown> = {}): Promise<RunBatchAggregate> {
+  const draft = await (await postJson(baseUrl, "/v1/run-batches", "owner-token", batchRequest(overrides))).json() as RunBatchAggregate;
+  return await (await postJson(baseUrl, `/v1/run-batches/${draft.batch.id}/confirm`, "owner-token", {
+    expectedEstimatedCostMinor: draft.batch.estimatedCostMinor,
+    expectedCurrency: draft.batch.currency,
+  })).json() as RunBatchAggregate;
 }
 
 describe("阶段 3 批次与预算内核", () => {
@@ -200,5 +212,128 @@ describe("阶段 3 批次与预算内核", () => {
 
     const repeated = await postJson(baseUrl, `/v1/run-batches/${draft.batch.id}/cancel`, "owner-token");
     expect((await repeated.json() as RunBatchAggregate).ledger).toHaveLength(cancelled.ledger.length);
+  });
+
+  it("假调度器遵守并发上限，并按逐任务实际成本结算后释放差额", async () => {
+    const baseUrl = await listen(createApiServer({ runKernel: createKernel({ maxConcurrentJobs: 2 }) }));
+    const confirmed = await createConfirmedBatch(baseUrl, { idempotencyKey: "concurrency", expectedOutputs: 3 });
+
+    const firstDispatch = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/dispatch`, "owner-token")).json() as RunBatchAggregate;
+    expect(firstDispatch.batch.status).toBe("queued");
+    expect(firstDispatch.jobs.filter((job) => job.status === "succeeded")).toHaveLength(2);
+    expect(firstDispatch.jobs.filter((job) => job.status === "queued")).toHaveLength(1);
+    expect(await (await fetch(`${baseUrl}/v1/projects/project-a/budget`, {
+      headers: { authorization: "Bearer owner-token" },
+    })).json()).toMatchObject({ reservedMinor: 40, spentMinor: 60, availableMinor: 200 });
+
+    const completed = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/dispatch`, "owner-token")).json() as RunBatchAggregate;
+    expect(completed.batch.status).toBe("succeeded");
+    expect(completed.jobs.every((job) => job.status === "succeeded" && job.actualCostMinor === 30)).toBe(true);
+    expect(completed.ledger.filter((entry) => entry.settlement === "settled")).toHaveLength(3);
+    expect(await (await fetch(`${baseUrl}/v1/projects/project-a/budget`, {
+      headers: { authorization: "Bearer owner-token" },
+    })).json()).toMatchObject({ reservedMinor: 0, spentMinor: 90, availableMinor: 210 });
+  });
+
+  it("部分失败保留成功结果，人工重试创建新任务并可恢复完整批次", async () => {
+    const baseUrl = await listen(createApiServer({ runKernel: createKernel({ maxConcurrentJobs: 2 }) }));
+    const confirmed = await createConfirmedBatch(baseUrl, {
+      idempotencyKey: "partial",
+      expectedOutputs: 2,
+      mockScenario: "partial-failure",
+    });
+    const partial = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/dispatch`, "owner-token")).json() as RunBatchAggregate;
+    expect(partial.batch.status).toBe("partial");
+    expect(partial.jobs.map((job) => job.status)).toEqual(["succeeded", "failed"]);
+    expect(partial.jobs[0].outputAssetIds).toHaveLength(1);
+    const failed = partial.jobs[1];
+
+    const retriedResponse = await postJson(baseUrl, `/v1/run-jobs/${failed.id}/retry`, "owner-token", {
+      expectedEstimatedCostMinor: 40,
+      expectedCurrency: "CNY",
+      mockScenario: "success",
+    });
+    expect(retriedResponse.status).toBe(201);
+    const retried = await retriedResponse.json() as RunBatchAggregate;
+    const retry = retried.jobs.at(-1)!;
+    expect(retry).toMatchObject({ retryOf: failed.id, outputIndex: failed.outputIndex, attempt: 2, status: "queued" });
+
+    const recovered = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/dispatch`, "owner-token")).json() as RunBatchAggregate;
+    expect(recovered.batch.status).toBe("succeeded");
+    expect(recovered.jobs).toHaveLength(3);
+    expect(recovered.audit.map((event) => event.eventType)).toContain("job-retry-created");
+    expect(await (await fetch(`${baseUrl}/v1/projects/project-a/budget`, {
+      headers: { authorization: "Bearer owner-token" },
+    })).json()).toMatchObject({ reservedMinor: 0, spentMinor: 60, availableMinor: 240 });
+  });
+
+  it("明确失败会保留失败任务并释放全部未消费预算", async () => {
+    const baseUrl = await listen(createApiServer({ runKernel: createKernel({ maxConcurrentJobs: 2 }) }));
+    const confirmed = await createConfirmedBatch(baseUrl, {
+      idempotencyKey: "explicit-failure",
+      expectedOutputs: 2,
+      mockScenario: "failed",
+    });
+    const failed = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/dispatch`, "owner-token")).json() as RunBatchAggregate;
+    expect(failed.batch.status).toBe("failed");
+    expect(failed.jobs.every((job) => job.status === "failed" && job.failureCode === "mock-failure")).toBe(true);
+    expect(failed.ledger.filter((entry) => entry.settlement === "released")).toHaveLength(2);
+    expect(await (await fetch(`${baseUrl}/v1/projects/project-a/budget`, {
+      headers: { authorization: "Bearer owner-token" },
+    })).json()).toMatchObject({ reservedMinor: 0, spentMinor: 0, availableMinor: 300 });
+  });
+
+  it("慢任务超时后只标记失败并释放预算，不会自动创建重试", async () => {
+    let now = Date.parse("2026-09-27T18:00:00+08:00");
+    const baseUrl = await listen(createApiServer({
+      runKernel: createKernel({ clock: () => now, maxConcurrentJobs: 1, jobTimeoutMs: 1_000 }),
+    }));
+    const confirmed = await createConfirmedBatch(baseUrl, {
+      idempotencyKey: "slow-timeout",
+      expectedOutputs: 1,
+      mockScenario: "slow",
+    });
+    const running = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/dispatch`, "owner-token")).json() as RunBatchAggregate;
+    expect(running.jobs[0].status).toBe("running");
+
+    now += 999;
+    const stillRunning = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/reconcile`, "owner-token")).json() as RunBatchAggregate;
+    expect(stillRunning.jobs[0].status).toBe("running");
+    now += 2;
+    const timedOut = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/reconcile`, "owner-token")).json() as RunBatchAggregate;
+    expect(timedOut.batch.status).toBe("failed");
+    expect(timedOut.jobs).toHaveLength(1);
+    expect(timedOut.jobs[0]).toMatchObject({ status: "timed_out", failureCode: "mock-timeout" });
+    expect(timedOut.audit.map((event) => event.eventType)).not.toContain("job-retry-created");
+    expect(await (await fetch(`${baseUrl}/v1/projects/project-a/budget`, {
+      headers: { authorization: "Bearer owner-token" },
+    })).json()).toMatchObject({ reservedMinor: 0, spentMinor: 0, availableMinor: 300 });
+  });
+
+  it("计费未知时保留预算并禁止重试或取消，避免潜在重复扣费", async () => {
+    const baseUrl = await listen(createApiServer({ runKernel: createKernel({ maxConcurrentJobs: 1 }) }));
+    const confirmed = await createConfirmedBatch(baseUrl, {
+      idempotencyKey: "billing-unknown",
+      expectedOutputs: 1,
+      mockScenario: "billing-unknown",
+    });
+    const unknown = await (await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/dispatch`, "owner-token")).json() as RunBatchAggregate;
+    expect(unknown.batch.status).toBe("billing_unknown");
+    expect(unknown.jobs[0].status).toBe("billing_unknown");
+    expect(unknown.ledger.at(-1)).toMatchObject({ settlement: "unknown", reservedMinor: 40 });
+
+    const retry = await postJson(baseUrl, `/v1/run-jobs/${unknown.jobs[0].id}/retry`, "owner-token", {
+      expectedEstimatedCostMinor: 40,
+      expectedCurrency: "CNY",
+      mockScenario: "success",
+    });
+    expect(retry.status).toBe(409);
+    expect(await retry.json()).toEqual({ error: "billing_state_unknown" });
+    const cancel = await postJson(baseUrl, `/v1/run-batches/${confirmed.batch.id}/cancel`, "owner-token");
+    expect(cancel.status).toBe(409);
+    expect(await cancel.json()).toEqual({ error: "billing_state_unknown" });
+    expect(await (await fetch(`${baseUrl}/v1/projects/project-a/budget`, {
+      headers: { authorization: "Bearer owner-token" },
+    })).json()).toMatchObject({ reservedMinor: 40, spentMinor: 0, availableMinor: 260 });
   });
 });

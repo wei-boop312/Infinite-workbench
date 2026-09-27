@@ -7,6 +7,7 @@ import {
   type CostLedger,
   type CreateRunBatchRequest,
   type ProjectBudgetSnapshot,
+  type RetryRunJobRequest,
   type RunAuditEvent,
   type RunBatch,
   type RunBatchAggregate,
@@ -18,7 +19,7 @@ export type RunPrincipal = {
   actorId: string;
 };
 
-export type RunPermission = "run:read" | "run:create" | "run:confirm" | "run:cancel";
+export type RunPermission = "run:read" | "run:create" | "run:confirm" | "run:cancel" | "run:execute" | "run:retry";
 
 export type StaticRunAccess = RunPrincipal & {
   bearerToken: string;
@@ -79,12 +80,19 @@ type BudgetState = ProjectBudgetConfig & {
 type StoredBatch = {
   aggregate: RunBatchAggregate;
   requestFingerprint: string;
+  reservedMinor: number;
+  actualMinor: number;
+  jobReservations: Map<string, number>;
+  jobScenarios: Map<string, RunBatch["mockScenario"]>;
 };
 
 type RunKernelOptions = {
   authorizer: RunAuthorizer;
   budgets: readonly ProjectBudgetConfig[];
   unitEstimateMinor?: number;
+  unitActualMinor?: number;
+  maxConcurrentJobs?: number;
+  jobTimeoutMs?: number;
   clock?: () => number;
 };
 
@@ -93,6 +101,9 @@ export interface RunKernelPort {
   createBatch(principal: RunPrincipal, request: CreateRunBatchRequest): RunBatchAggregate;
   getBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   confirmBatch(principal: RunPrincipal, batchId: string, confirmation: ConfirmRunBatchRequest): RunBatchAggregate;
+  dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
+  reconcileBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
+  retryJob(principal: RunPrincipal, jobId: string, request: RetryRunJobRequest): RunBatchAggregate;
   cancelBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   getBudget(principal: RunPrincipal, projectId: string): ProjectBudgetSnapshot;
 }
@@ -112,6 +123,9 @@ function idempotencyIndexKey(principal: RunPrincipal, request: CreateRunBatchReq
 export class InMemoryRunKernel implements RunKernelPort {
   private readonly clock: () => number;
   private readonly unitEstimateMinor: number;
+  private readonly unitActualMinor: number;
+  private readonly maxConcurrentJobs: number;
+  private readonly jobTimeoutMs: number;
   private readonly budgets = new Map<string, BudgetState>();
   private readonly batches = new Map<string, StoredBatch>();
   private readonly idempotencyIndex = new Map<string, string>();
@@ -119,7 +133,13 @@ export class InMemoryRunKernel implements RunKernelPort {
   constructor(private readonly options: RunKernelOptions) {
     this.clock = options.clock ?? Date.now;
     this.unitEstimateMinor = options.unitEstimateMinor ?? 25;
+    this.unitActualMinor = options.unitActualMinor ?? Math.max(0, this.unitEstimateMinor - 5);
+    this.maxConcurrentJobs = options.maxConcurrentJobs ?? 2;
+    this.jobTimeoutMs = options.jobTimeoutMs ?? 30_000;
     if (!Number.isSafeInteger(this.unitEstimateMinor) || this.unitEstimateMinor < 0) throw new Error("假执行器单位估价必须是非负整数");
+    if (!Number.isSafeInteger(this.unitActualMinor) || this.unitActualMinor < 0 || this.unitActualMinor > this.unitEstimateMinor) throw new Error("假执行器实际单价必须位于 0 和估价之间");
+    if (!Number.isSafeInteger(this.maxConcurrentJobs) || this.maxConcurrentJobs < 1) throw new Error("假调度器并发数必须是正整数");
+    if (!Number.isSafeInteger(this.jobTimeoutMs) || this.jobTimeoutMs < 1_000) throw new Error("假任务超时至少为 1 秒");
     for (const budget of options.budgets) {
       if (!/^[A-Z]{3}$/.test(budget.currency) || !Number.isSafeInteger(budget.limitMinor) || budget.limitMinor < 0) {
         throw new Error("项目预算配置无效");
@@ -162,6 +182,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       adapterId: "mock-product-retouch-v1",
       inputAssetIds: [...request.inputAssetIds],
       idempotencyKey: request.idempotencyKey,
+      mockScenario: request.mockScenario,
       status: "awaiting_confirmation",
       expectedOutputs: request.expectedOutputs,
       estimatedCostMinor,
@@ -190,7 +211,14 @@ export class InMemoryRunKernel implements RunKernelPort {
       })],
     };
     const parsed = RunBatchAggregateSchema.parse(aggregate);
-    this.batches.set(batchId, { aggregate: parsed, requestFingerprint: fingerprint });
+    this.batches.set(batchId, {
+      aggregate: parsed,
+      requestFingerprint: fingerprint,
+      reservedMinor: 0,
+      actualMinor: 0,
+      jobReservations: new Map(),
+      jobScenarios: new Map(),
+    });
     this.idempotencyIndex.set(indexKey, batchId);
     return this.copy(parsed);
   }
@@ -249,14 +277,22 @@ export class InMemoryRunKernel implements RunKernelPort {
     aggregate.jobs = Array.from({ length: batch.expectedOutputs }, (_, index): RunJob => ({
       id: `job-${randomUUID()}`,
       batchId: batch.id,
+      outputIndex: index,
+      attempt: 1,
       executorKind: "mock",
       adapterId: batch.adapterId,
       idempotencyKey: `job-key-${createHash("sha256").update(`${batch.tenantId}:${batch.projectId}:${batch.idempotencyKey}:${index}`).digest("hex")}`,
       status: "queued",
       inputAssetIds: [...batch.inputAssetIds],
       outputAssetIds: [],
+      estimatedCostMinor: this.unitEstimateMinor,
       createdAt: confirmedAt,
     }));
+    stored.reservedMinor = batch.estimatedCostMinor;
+    for (const job of aggregate.jobs) {
+      stored.jobReservations.set(job.id, this.unitEstimateMinor);
+      stored.jobScenarios.set(job.id, batch.mockScenario);
+    }
     aggregate.audit.push(
       this.audit(batch, principal.actorId, "batch-confirmed", { estimatedCostMinor: String(batch.estimatedCostMinor) }),
       this.audit(batch, principal.actorId, "budget-reserved", { reservedMinor: String(batch.estimatedCostMinor) }),
@@ -266,38 +302,165 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.copy(stored.aggregate);
   }
 
+  dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
+    const stored = this.requireBatch(principal, batchId);
+    const aggregate = stored.aggregate;
+    this.assertAllowed(principal, aggregate.batch.projectId, "run:execute");
+    if (aggregate.batch.status === "billing_unknown") {
+      throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止继续调度");
+    }
+    const latest = this.latestJobs(aggregate.jobs);
+    const runningCount = latest.filter((job) => job.status === "running").length;
+    const queued = latest.filter((job) => job.status === "queued").slice(0, Math.max(0, this.maxConcurrentJobs - runningCount));
+    if (!queued.length) return this.copy(aggregate);
+
+    aggregate.batch = { ...aggregate.batch, status: "running" };
+    aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "batch-dispatched", { count: String(queued.length) }));
+    for (const queuedJob of queued) {
+      const startedAt = new Date(this.clock()).toISOString();
+      const running: RunJob = {
+        ...queuedJob,
+        status: "running",
+        startedAt,
+        providerRequestId: `mock-request-${randomUUID()}`,
+      };
+      this.replaceJob(aggregate, running);
+      aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "job-started", { jobId: running.id }));
+      const scenario = stored.jobScenarios.get(running.id) ?? aggregate.batch.mockScenario;
+      if (scenario === "slow") continue;
+      if (scenario === "billing-unknown") {
+        this.finishJob(stored, running, "billing-unknown", principal.actorId);
+      } else if (scenario === "failed" || (scenario === "partial-failure" && running.outputIndex % 2 === 1)) {
+        this.finishJob(stored, running, "failed", principal.actorId);
+      } else {
+        this.finishJob(stored, running, "succeeded", principal.actorId);
+      }
+    }
+    this.refreshBatchStatus(stored);
+    stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    return this.copy(stored.aggregate);
+  }
+
+  reconcileBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
+    const stored = this.requireBatch(principal, batchId);
+    this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
+    const now = this.clock();
+    for (const job of this.latestJobs(stored.aggregate.jobs)) {
+      if (job.status !== "running" || !job.startedAt) continue;
+      if (now - Date.parse(job.startedAt) >= this.jobTimeoutMs) {
+        this.finishJob(stored, job, "timed-out", principal.actorId);
+      }
+    }
+    this.refreshBatchStatus(stored);
+    stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    return this.copy(stored.aggregate);
+  }
+
+  retryJob(principal: RunPrincipal, jobId: string, request: RetryRunJobRequest): RunBatchAggregate {
+    const located = this.findJob(principal, jobId);
+    const { stored, job } = located;
+    const batch = stored.aggregate.batch;
+    this.assertAllowed(principal, batch.projectId, "run:retry");
+    if (job.status === "billing_unknown") {
+      throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止重试，以免重复扣费");
+    }
+    if (!["failed", "timed_out"].includes(job.status)) {
+      throw new RunKernelError(409, "run_job_not_retryable", "当前任务状态不能重试");
+    }
+    const latest = this.latestJobs(stored.aggregate.jobs).find((candidate) => candidate.outputIndex === job.outputIndex);
+    if (!latest || latest.id !== job.id) throw new RunKernelError(409, "run_job_superseded", "该任务已有后续重试");
+    if (request.expectedEstimatedCostMinor !== this.unitEstimateMinor || request.expectedCurrency !== batch.currency) {
+      throw new RunKernelError(409, "retry_cost_snapshot_mismatch", "重试成本快照已失效");
+    }
+    if (stored.actualMinor + stored.reservedMinor + this.unitEstimateMinor > batch.maxCostMinor) {
+      throw new RunKernelError(422, "batch_cost_ceiling_exceeded", "重试会超过批次成本上限");
+    }
+    const budget = this.requireBudget(batch.tenantId, batch.projectId);
+    const availableMinor = budget.limitMinor - budget.reservedMinor - budget.spentMinor;
+    if (availableMinor < this.unitEstimateMinor) throw new RunKernelError(422, "project_budget_exceeded", "项目可用预算不足");
+
+    budget.reservedMinor += this.unitEstimateMinor;
+    stored.reservedMinor += this.unitEstimateMinor;
+    const createdAt = new Date(this.clock()).toISOString();
+    const retry: RunJob = {
+      id: `job-${randomUUID()}`,
+      batchId: batch.id,
+      outputIndex: job.outputIndex,
+      attempt: job.attempt + 1,
+      executorKind: "mock",
+      adapterId: batch.adapterId,
+      idempotencyKey: `retry-key-${createHash("sha256").update(`${job.id}:${job.attempt + 1}`).digest("hex")}`,
+      status: "queued",
+      retryOf: job.id,
+      inputAssetIds: [...job.inputAssetIds],
+      outputAssetIds: [],
+      estimatedCostMinor: this.unitEstimateMinor,
+      createdAt,
+    };
+    stored.aggregate.jobs.push(retry);
+    stored.jobReservations.set(retry.id, this.unitEstimateMinor);
+    stored.jobScenarios.set(retry.id, request.mockScenario);
+    stored.aggregate.batch = { ...batch, status: "queued" };
+    stored.aggregate.ledger.push({
+      id: `ledger-${randomUUID()}`,
+      tenantId: batch.tenantId,
+      projectId: batch.projectId,
+      batchId: batch.id,
+      jobId: retry.id,
+      currency: batch.currency,
+      estimatedMinor: this.unitEstimateMinor,
+      reservedMinor: this.unitEstimateMinor,
+      settlement: "reserved",
+      createdAt,
+    });
+    stored.aggregate.audit.push(
+      this.audit(batch, principal.actorId, "budget-reserved", { jobId: retry.id, reservedMinor: String(this.unitEstimateMinor) }),
+      this.audit(batch, principal.actorId, "job-retry-created", { jobId: retry.id, retryOf: job.id }),
+    );
+    stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    return this.copy(stored.aggregate);
+  }
+
   cancelBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
     const stored = this.requireBatch(principal, batchId);
     const aggregate = stored.aggregate;
     const batch = aggregate.batch;
     this.assertAllowed(principal, batch.projectId, "run:cancel");
     if (batch.status === "cancelled") return this.copy(aggregate);
-    if (!["awaiting_confirmation", "queued"].includes(batch.status)) {
+    if (batch.status === "billing_unknown") {
+      throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时不能释放预算或取消批次");
+    }
+    if (!["awaiting_confirmation", "queued", "running"].includes(batch.status)) {
       throw new RunKernelError(409, "run_batch_not_cancellable", "当前批次状态不能取消");
     }
 
     const now = new Date(this.clock()).toISOString();
-    if (batch.status === "queued") {
+    const releasable = [...stored.jobReservations.values()].reduce((total, amount) => total + amount, 0);
+    if (releasable > 0) {
       const budget = this.requireBudget(batch.tenantId, batch.projectId);
-      budget.reservedMinor = Math.max(0, budget.reservedMinor - batch.estimatedCostMinor);
+      budget.reservedMinor = Math.max(0, budget.reservedMinor - releasable);
+      stored.reservedMinor = Math.max(0, stored.reservedMinor - releasable);
+      stored.jobReservations.clear();
       aggregate.audit.push(this.audit(batch, principal.actorId, "budget-released", {
-        releasedMinor: String(batch.estimatedCostMinor),
+        releasedMinor: String(releasable),
       }));
+      aggregate.ledger.push({
+        id: `ledger-${randomUUID()}`,
+        tenantId: batch.tenantId,
+        projectId: batch.projectId,
+        batchId: batch.id,
+        currency: batch.currency,
+        estimatedMinor: releasable,
+        reservedMinor: 0,
+        actualMinor: 0,
+        settlement: "released",
+        createdAt: now,
+      });
     }
     aggregate.batch = { ...batch, status: "cancelled" };
-    aggregate.jobs = aggregate.jobs.map((job) => job.status === "queued" ? { ...job, status: "cancelled" } : job);
-    aggregate.ledger.push({
-      id: `ledger-${randomUUID()}`,
-      tenantId: batch.tenantId,
-      projectId: batch.projectId,
-      batchId: batch.id,
-      currency: batch.currency,
-      estimatedMinor: batch.estimatedCostMinor,
-      reservedMinor: 0,
-      actualMinor: 0,
-      settlement: "released",
-      createdAt: now,
-    });
+    aggregate.jobs = aggregate.jobs.map((job) => ["queued", "running"].includes(job.status)
+      ? { ...job, status: "cancelled", finishedAt: now }
+      : job);
     aggregate.audit.push(this.audit(batch, principal.actorId, "batch-cancelled", { previousStatus: batch.status }));
     stored.aggregate = RunBatchAggregateSchema.parse(aggregate);
     return this.copy(stored.aggregate);
@@ -315,6 +478,134 @@ export class InMemoryRunKernel implements RunKernelPort {
       spentMinor: budget.spentMinor,
       availableMinor: budget.limitMinor - budget.reservedMinor - budget.spentMinor,
     });
+  }
+
+  private finishJob(
+    stored: StoredBatch,
+    job: RunJob,
+    outcome: "succeeded" | "failed" | "timed-out" | "billing-unknown",
+    actorId: string,
+  ): void {
+    const batch = stored.aggregate.batch;
+    const finishedAt = new Date(this.clock()).toISOString();
+    if (outcome === "billing-unknown") {
+      const reservation = stored.jobReservations.get(job.id) ?? 0;
+      this.replaceJob(stored.aggregate, { ...job, status: "billing_unknown", finishedAt });
+      stored.aggregate.ledger.push({
+        id: `ledger-${randomUUID()}`,
+        tenantId: batch.tenantId,
+        projectId: batch.projectId,
+        batchId: batch.id,
+        jobId: job.id,
+        currency: batch.currency,
+        estimatedMinor: job.estimatedCostMinor,
+        reservedMinor: reservation,
+        settlement: "unknown",
+        createdAt: finishedAt,
+      });
+      stored.aggregate.audit.push(this.audit(batch, actorId, "billing-unknown", { jobId: job.id }));
+      return;
+    }
+
+    if (outcome === "succeeded") {
+      const completed: RunJob = {
+        ...job,
+        status: "succeeded",
+        outputAssetIds: [`mock-output-${batch.id}-${job.outputIndex}-attempt-${job.attempt}`],
+        actualCostMinor: this.unitActualMinor,
+        finishedAt,
+      };
+      this.replaceJob(stored.aggregate, completed);
+      this.settleReservation(stored, completed, this.unitActualMinor, "settled", actorId);
+      stored.aggregate.audit.push(this.audit(batch, actorId, "job-succeeded", { jobId: job.id }));
+      return;
+    }
+
+    const timedOut = outcome === "timed-out";
+    const failed: RunJob = {
+      ...job,
+      status: timedOut ? "timed_out" : "failed",
+      actualCostMinor: 0,
+      failureCode: timedOut ? "mock-timeout" : "mock-failure",
+      finishedAt,
+    };
+    this.replaceJob(stored.aggregate, failed);
+    this.settleReservation(stored, failed, 0, "released", actorId);
+    stored.aggregate.audit.push(this.audit(batch, actorId, timedOut ? "job-timed-out" : "job-failed", { jobId: job.id }));
+  }
+
+  private settleReservation(
+    stored: StoredBatch,
+    job: RunJob,
+    actualMinor: number,
+    settlement: "settled" | "released",
+    actorId: string,
+  ): void {
+    const batch = stored.aggregate.batch;
+    const reservedMinor = stored.jobReservations.get(job.id) ?? 0;
+    const budget = this.requireBudget(batch.tenantId, batch.projectId);
+    budget.reservedMinor = Math.max(0, budget.reservedMinor - reservedMinor);
+    stored.reservedMinor = Math.max(0, stored.reservedMinor - reservedMinor);
+    stored.jobReservations.delete(job.id);
+    if (actualMinor > 0) {
+      budget.spentMinor += actualMinor;
+      stored.actualMinor += actualMinor;
+    }
+    stored.aggregate.ledger.push({
+      id: `ledger-${randomUUID()}`,
+      tenantId: batch.tenantId,
+      projectId: batch.projectId,
+      batchId: batch.id,
+      jobId: job.id,
+      currency: batch.currency,
+      estimatedMinor: job.estimatedCostMinor,
+      reservedMinor: 0,
+      actualMinor,
+      settlement,
+      createdAt: new Date(this.clock()).toISOString(),
+    });
+    stored.aggregate.audit.push(this.audit(batch, actorId, "cost-settled", {
+      jobId: job.id,
+      actualMinor: String(actualMinor),
+      releasedMinor: String(Math.max(0, reservedMinor - actualMinor)),
+    }));
+  }
+
+  private refreshBatchStatus(stored: StoredBatch): void {
+    if (stored.aggregate.batch.status === "cancelled") return;
+    const jobs = this.latestJobs(stored.aggregate.jobs);
+    let status: RunBatch["status"];
+    if (jobs.some((job) => job.status === "billing_unknown")) status = "billing_unknown";
+    else if (jobs.some((job) => job.status === "running")) status = "running";
+    else if (jobs.some((job) => job.status === "queued")) status = "queued";
+    else if (jobs.length > 0 && jobs.every((job) => job.status === "succeeded")) status = "succeeded";
+    else if (jobs.some((job) => job.status === "succeeded")) status = "partial";
+    else status = "failed";
+    stored.aggregate.batch = { ...stored.aggregate.batch, status };
+  }
+
+  private latestJobs(jobs: RunJob[]): RunJob[] {
+    const latest = new Map<number, RunJob>();
+    for (const job of jobs) {
+      const current = latest.get(job.outputIndex);
+      if (!current || job.attempt > current.attempt) latest.set(job.outputIndex, job);
+    }
+    return [...latest.values()].sort((left, right) => left.outputIndex - right.outputIndex);
+  }
+
+  private replaceJob(aggregate: RunBatchAggregate, replacement: RunJob): void {
+    const index = aggregate.jobs.findIndex((job) => job.id === replacement.id);
+    if (index < 0) throw new RunKernelError(404, "run_job_not_found", "任务不存在");
+    aggregate.jobs[index] = replacement;
+  }
+
+  private findJob(principal: RunPrincipal, jobId: string): { stored: StoredBatch; job: RunJob } {
+    for (const stored of this.batches.values()) {
+      if (stored.aggregate.batch.tenantId !== principal.tenantId) continue;
+      const job = stored.aggregate.jobs.find((candidate) => candidate.id === jobId);
+      if (job) return { stored, job };
+    }
+    throw new RunKernelError(404, "run_job_not_found", "任务不存在");
   }
 
   private requireBatch(principal: RunPrincipal, batchId: string): StoredBatch {
