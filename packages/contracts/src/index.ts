@@ -296,6 +296,34 @@ export const RunBatchAggregateSchema = z.object({
   audit: z.array(RunAuditEventSchema),
 }).strict();
 
+export const RunKernelBudgetStateSchema = z.object({
+  tenantId: IdSchema,
+  projectId: IdSchema,
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  limitMinor: z.number().int().nonnegative(),
+  reservedMinor: z.number().int().nonnegative(),
+  spentMinor: z.number().int().nonnegative(),
+}).strict();
+
+export const RunKernelStoredBatchSchema = z.object({
+  aggregate: RunBatchAggregateSchema,
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  reservedMinor: z.number().int().nonnegative(),
+  actualMinor: z.number().int().nonnegative(),
+  jobReservations: z.array(z.tuple([IdSchema, z.number().int().nonnegative()])),
+  jobScenarios: z.array(z.tuple([
+    IdSchema,
+    z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]),
+  ])),
+}).strict();
+
+export const RunKernelSnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  savedAt: IsoDateSchema,
+  budgets: z.array(RunKernelBudgetStateSchema),
+  batches: z.array(RunKernelStoredBatchSchema),
+}).strict();
+
 export const MockRunRequestSchema = z.object({
   projectId: IdSchema,
   tool: z.literal("product-retouch"),
@@ -331,6 +359,9 @@ export type RetryRunJobRequest = z.infer<typeof RetryRunJobRequestSchema>;
 export type RunAuditEvent = z.infer<typeof RunAuditEventSchema>;
 export type ProjectBudgetSnapshot = z.infer<typeof ProjectBudgetSnapshotSchema>;
 export type RunBatchAggregate = z.infer<typeof RunBatchAggregateSchema>;
+export type RunKernelBudgetState = z.infer<typeof RunKernelBudgetStateSchema>;
+export type RunKernelStoredBatch = z.infer<typeof RunKernelStoredBatchSchema>;
+export type RunKernelSnapshot = z.infer<typeof RunKernelSnapshotSchema>;
 export type ProviderConnection = z.infer<typeof ProviderConnectionSchema>;
 export type McpConnection = z.infer<typeof McpConnectionSchema>;
 export type CostLedger = z.infer<typeof CostLedgerSchema>;

@@ -3,6 +3,7 @@ import type { IncomingMessage } from "node:http";
 import {
   ProjectBudgetSnapshotSchema,
   RunBatchAggregateSchema,
+  RunKernelSnapshotSchema,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -12,7 +13,9 @@ import {
   type RunBatch,
   type RunBatchAggregate,
   type RunJob,
+  type RunKernelSnapshot,
 } from "@canvas/contracts";
+import type { RunKernelStateStore } from "./runKernelStore";
 
 export type RunPrincipal = {
   tenantId: string;
@@ -86,9 +89,10 @@ type StoredBatch = {
   jobScenarios: Map<string, RunBatch["mockScenario"]>;
 };
 
-type RunKernelOptions = {
+export type RunKernelOptions = {
   authorizer: RunAuthorizer;
   budgets: readonly ProjectBudgetConfig[];
+  stateStore?: RunKernelStateStore;
   unitEstimateMinor?: number;
   unitActualMinor?: number;
   maxConcurrentJobs?: number;
@@ -113,7 +117,18 @@ function scopedProjectKey(tenantId: string, projectId: string): string {
 }
 
 function requestFingerprint(request: CreateRunBatchRequest): string {
-  return createHash("sha256").update(JSON.stringify(request)).digest("hex");
+  const canonicalRequest: CreateRunBatchRequest = {
+    projectId: request.projectId,
+    constraintSnapshotId: request.constraintSnapshotId,
+    tool: request.tool,
+    inputAssetIds: [...request.inputAssetIds],
+    expectedOutputs: request.expectedOutputs,
+    maxCostMinor: request.maxCostMinor,
+    currency: request.currency,
+    idempotencyKey: request.idempotencyKey,
+    mockScenario: request.mockScenario,
+  };
+  return createHash("sha256").update(JSON.stringify(canonicalRequest)).digest("hex");
 }
 
 function idempotencyIndexKey(principal: RunPrincipal, request: CreateRunBatchRequest): string {
@@ -148,6 +163,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (this.budgets.has(key)) throw new Error("项目预算配置重复");
       this.budgets.set(key, { ...budget, reservedMinor: 0, spentMinor: 0 });
     }
+    this.restore();
   }
 
   authenticate(request: IncomingMessage): RunPrincipal | null {
@@ -220,6 +236,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       jobScenarios: new Map(),
     });
     this.idempotencyIndex.set(indexKey, batchId);
+    this.persist();
     return this.copy(parsed);
   }
 
@@ -241,10 +258,12 @@ export class InMemoryRunKernel implements RunKernelPort {
     }
     if (confirmation.expectedEstimatedCostMinor !== batch.estimatedCostMinor || confirmation.expectedCurrency !== batch.currency) {
       aggregate.audit.push(this.audit(batch, principal.actorId, "confirmation-rejected", { reason: "snapshot-mismatch" }));
+      this.persist();
       throw new RunKernelError(409, "confirmation_snapshot_mismatch", "确认的成本快照已失效");
     }
     if (batch.estimatedCostMinor > batch.maxCostMinor) {
       aggregate.audit.push(this.audit(batch, principal.actorId, "confirmation-rejected", { reason: "batch-cost-ceiling" }));
+      this.persist();
       throw new RunKernelError(422, "batch_cost_ceiling_exceeded", "预计成本超过本批次上限");
     }
 
@@ -252,6 +271,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     const availableMinor = budget.limitMinor - budget.reservedMinor - budget.spentMinor;
     if (availableMinor < batch.estimatedCostMinor) {
       aggregate.audit.push(this.audit(batch, principal.actorId, "confirmation-rejected", { reason: "project-budget" }));
+      this.persist();
       throw new RunKernelError(422, "project_budget_exceeded", "项目可用预算不足");
     }
 
@@ -299,6 +319,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       this.audit(batch, principal.actorId, "jobs-created", { count: String(batch.expectedOutputs) }),
     );
     stored.aggregate = RunBatchAggregateSchema.parse(aggregate);
+    this.persist();
     return this.copy(stored.aggregate);
   }
 
@@ -338,6 +359,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     }
     this.refreshBatchStatus(stored);
     stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    this.persist();
     return this.copy(stored.aggregate);
   }
 
@@ -353,6 +375,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     }
     this.refreshBatchStatus(stored);
     stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    this.persist();
     return this.copy(stored.aggregate);
   }
 
@@ -418,6 +441,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       this.audit(batch, principal.actorId, "job-retry-created", { jobId: retry.id, retryOf: job.id }),
     );
     stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    this.persist();
     return this.copy(stored.aggregate);
   }
 
@@ -463,6 +487,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       : job);
     aggregate.audit.push(this.audit(batch, principal.actorId, "batch-cancelled", { previousStatus: batch.status }));
     stored.aggregate = RunBatchAggregateSchema.parse(aggregate);
+    this.persist();
     return this.copy(stored.aggregate);
   }
 
@@ -478,6 +503,158 @@ export class InMemoryRunKernel implements RunKernelPort {
       spentMinor: budget.spentMinor,
       availableMinor: budget.limitMinor - budget.reservedMinor - budget.spentMinor,
     });
+  }
+
+  private restore(): void {
+    const loaded = this.options.stateStore?.load();
+    if (!loaded) return;
+    const snapshot = RunKernelSnapshotSchema.parse(loaded);
+    const restoredBudgets = new Map<string, BudgetState>();
+    for (const budget of snapshot.budgets) {
+      const key = scopedProjectKey(budget.tenantId, budget.projectId);
+      const configured = this.budgets.get(key);
+      if (!configured || configured.currency !== budget.currency || configured.limitMinor !== budget.limitMinor) {
+        throw new Error("任务内核快照与当前项目预算配置不兼容");
+      }
+      if (restoredBudgets.has(key) || budget.reservedMinor + budget.spentMinor > budget.limitMinor) {
+        throw new Error("任务内核快照中的项目预算状态无效");
+      }
+      restoredBudgets.set(key, { ...budget });
+    }
+    if (restoredBudgets.size !== this.budgets.size) {
+      throw new Error("任务内核快照缺少当前配置的项目预算");
+    }
+
+    const restoredBatches = new Map<string, StoredBatch>();
+    const restoredIndex = new Map<string, string>();
+    for (const serialized of snapshot.batches) {
+      const aggregate = RunBatchAggregateSchema.parse(serialized.aggregate);
+      const batch = aggregate.batch;
+      if (restoredBatches.has(batch.id)) throw new Error("任务内核快照包含重复批次");
+      const stored: StoredBatch = {
+        aggregate,
+        requestFingerprint: serialized.requestFingerprint,
+        reservedMinor: serialized.reservedMinor,
+        actualMinor: serialized.actualMinor,
+        jobReservations: new Map(serialized.jobReservations),
+        jobScenarios: new Map(serialized.jobScenarios),
+      };
+      if (stored.jobReservations.size !== serialized.jobReservations.length
+        || stored.jobScenarios.size !== serialized.jobScenarios.length) {
+        throw new Error("任务内核快照包含重复任务状态");
+      }
+      const indexKey = `${scopedProjectKey(batch.tenantId, batch.projectId)}\u0000${batch.idempotencyKey}`;
+      if (restoredIndex.has(indexKey)) throw new Error("任务内核快照包含重复幂等键");
+      restoredBatches.set(batch.id, stored);
+      restoredIndex.set(indexKey, batch.id);
+    }
+
+    this.budgets.clear();
+    this.batches.clear();
+    this.idempotencyIndex.clear();
+    for (const [key, budget] of restoredBudgets) this.budgets.set(key, budget);
+    for (const [key, stored] of restoredBatches) this.batches.set(key, stored);
+    for (const [key, batchId] of restoredIndex) this.idempotencyIndex.set(key, batchId);
+    this.assertStateConsistent();
+
+    let recoveredRunningJobs = false;
+    for (const stored of this.batches.values()) {
+      const batch = stored.aggregate.batch;
+      for (const job of stored.aggregate.jobs.filter((candidate) => candidate.status === "running")) {
+        const recoveredAt = new Date(this.clock()).toISOString();
+        const reservation = stored.jobReservations.get(job.id) ?? 0;
+        this.replaceJob(stored.aggregate, {
+          ...job,
+          status: "billing_unknown",
+          failureCode: "recovered-after-restart",
+          finishedAt: recoveredAt,
+        });
+        stored.aggregate.ledger.push({
+          id: `ledger-${randomUUID()}`,
+          tenantId: batch.tenantId,
+          projectId: batch.projectId,
+          batchId: batch.id,
+          jobId: job.id,
+          currency: batch.currency,
+          estimatedMinor: job.estimatedCostMinor,
+          reservedMinor: reservation,
+          settlement: "unknown",
+          createdAt: recoveredAt,
+        });
+        stored.aggregate.audit.push(this.audit(batch, "system-recovery", "billing-unknown", {
+          jobId: job.id,
+          reason: "process-restart",
+        }));
+        recoveredRunningJobs = true;
+      }
+      this.refreshBatchStatus(stored);
+      stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    }
+    this.assertStateConsistent();
+    if (recoveredRunningJobs) this.persist();
+  }
+
+  private persist(): void {
+    if (!this.options.stateStore) return;
+    const snapshot: RunKernelSnapshot = {
+      schemaVersion: 1,
+      savedAt: new Date(this.clock()).toISOString(),
+      budgets: [...this.budgets.values()].map((budget) => ({ ...budget })),
+      batches: [...this.batches.values()].map((stored) => ({
+        aggregate: this.copy(stored.aggregate),
+        requestFingerprint: stored.requestFingerprint,
+        reservedMinor: stored.reservedMinor,
+        actualMinor: stored.actualMinor,
+        jobReservations: [...stored.jobReservations.entries()],
+        jobScenarios: [...stored.jobScenarios.entries()],
+      })),
+    };
+    this.options.stateStore.save(RunKernelSnapshotSchema.parse(snapshot));
+  }
+
+  private assertStateConsistent(): void {
+    const reservedByProject = new Map<string, number>();
+    const spentByProject = new Map<string, number>();
+    const globalJobIds = new Set<string>();
+    for (const stored of this.batches.values()) {
+      const { batch, jobs } = stored.aggregate;
+      const budgetKey = scopedProjectKey(batch.tenantId, batch.projectId);
+      const budget = this.budgets.get(budgetKey);
+      if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
+      const jobsById = new Map(jobs.map((job) => [job.id, job]));
+      if (jobsById.size !== jobs.length) throw new Error("任务内核快照中的任务编号重复");
+      for (const job of jobs) {
+        if (globalJobIds.has(job.id) || job.batchId !== batch.id) throw new Error("任务内核快照中的任务归属无效");
+        globalJobIds.add(job.id);
+        if (!stored.jobScenarios.has(job.id)) throw new Error("任务内核快照缺少任务执行场景");
+        const shouldReserve = ["queued", "running", "billing_unknown"].includes(job.status);
+        if (shouldReserve !== stored.jobReservations.has(job.id)) {
+          throw new Error("任务内核快照中的任务预留状态无效");
+        }
+      }
+      for (const jobId of stored.jobReservations.keys()) {
+        if (!jobsById.has(jobId)) throw new Error("任务内核快照包含孤立预留记录");
+      }
+      for (const jobId of stored.jobScenarios.keys()) {
+        if (!jobsById.has(jobId)) throw new Error("任务内核快照包含孤立执行场景");
+      }
+      const reservedMinor = [...stored.jobReservations.values()].reduce((total, amount) => total + amount, 0);
+      const actualMinor = jobs.reduce((total, job) => total + (job.actualCostMinor ?? 0), 0);
+      if (reservedMinor !== stored.reservedMinor || actualMinor !== stored.actualMinor) {
+        throw new Error("任务内核快照中的批次金额不守恒");
+      }
+      if (stored.reservedMinor + stored.actualMinor > batch.maxCostMinor) {
+        throw new Error("任务内核快照中的批次金额超过成本上限");
+      }
+      reservedByProject.set(budgetKey, (reservedByProject.get(budgetKey) ?? 0) + stored.reservedMinor);
+      spentByProject.set(budgetKey, (spentByProject.get(budgetKey) ?? 0) + stored.actualMinor);
+    }
+    for (const [key, budget] of this.budgets) {
+      if (budget.reservedMinor !== (reservedByProject.get(key) ?? 0)
+        || budget.spentMinor !== (spentByProject.get(key) ?? 0)) {
+        throw new Error("任务内核快照中的项目金额不守恒");
+      }
+    }
   }
 
   private finishJob(
