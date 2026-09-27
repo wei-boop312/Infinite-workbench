@@ -54,6 +54,7 @@ export type BeginUploadInput = {
 export interface ObjectStoragePort {
   listSessions(projectId: string): Promise<UploadSession[]>;
   getSession(projectId: string, assetId: string): Promise<UploadSession | null>;
+  getObject(objectKey: string): Promise<Blob | null>;
   findObject(fingerprint: string, byteSize: number): Promise<RemoteObject | null>;
   beginUpload(input: BeginUploadInput): Promise<UploadSession>;
   setStatus(sessionId: string, status: UploadStatus, error?: string): Promise<UploadSession>;

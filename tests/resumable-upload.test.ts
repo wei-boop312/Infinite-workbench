@@ -22,6 +22,13 @@ class MemoryObjectStorage implements ObjectStoragePort {
   async getSession(projectId: string, assetId: string) {
     return [...this.sessions.values()].find((session) => session.projectId === projectId && session.assetId === assetId) ?? null;
   }
+  async getObject(objectKey: string) {
+    const object = [...this.objects.values()].find((candidate) => candidate.key === objectKey);
+    if (!object) return null;
+    const parts = this.parts.get(object.ownerSessionId);
+    if (!parts) return null;
+    return new Blob([...parts.entries()].sort(([left], [right]) => left - right).map(([, blob]) => blob), { type: object.mimeType });
+  }
   async findObject(fingerprint: string, byteSize: number) { return this.objects.get(`${fingerprint}:${byteSize}`) ?? null; }
   async beginUpload(input: BeginUploadInput) {
     const existing = await this.getSession(input.projectId, input.assetId);
@@ -151,6 +158,7 @@ describe("可续传对象存储状态机", () => {
     const completed = await manager.upload(createAsset("asset-a", "project-a", blob.size), blob);
     expect(completed).toMatchObject({ status: "completed", uploadedParts: [0, 1, 2], uploadedBytes: 10 });
     expect(storage.partWrites).toEqual([0, 1, 2]);
+    expect(new Uint8Array(await (await storage.getObject(completed.objectKey!))!.arrayBuffer())).toEqual(new Uint8Array(await blob.arrayBuffer()));
 
     const reused = await manager.upload(createAsset("asset-b", "project-b", blob.size), blob);
     expect(reused.status).toBe("reused");

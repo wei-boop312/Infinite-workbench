@@ -23,6 +23,7 @@ export interface AssetRepositoryPort {
   importFiles(projectId: string, files: File[]): Promise<AssetImportResult>;
   saveMask(projectId: string, sourceAssetId: string, blob: Blob, width: number, height: number): Promise<Asset>;
   restore(projectId: string, records: RestoredAsset[]): Promise<void>;
+  restoreOriginal(projectId: string, assetId: string, blob: Blob): Promise<Asset>;
   remove(projectId: string, assetId: string): Promise<boolean>;
   usage(projectId: string): Promise<AssetUsage>;
 }
@@ -103,7 +104,7 @@ function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number)
   ));
 }
 
-async function inspectImage(file: File): Promise<{ width: number; height: number; proxy: Blob }> {
+async function inspectImage(file: Blob): Promise<{ width: number; height: number; proxy: Blob }> {
   const bitmap = await createImageBitmap(file);
   try {
     const scale = Math.min(1, 480 / Math.max(bitmap.width, bitmap.height));
@@ -120,7 +121,7 @@ async function inspectImage(file: File): Promise<{ width: number; height: number
   }
 }
 
-async function inspectVideo(file: File): Promise<{ width: number; height: number; durationMs: number; proxy?: Blob }> {
+async function inspectVideo(file: Blob, fileName: string): Promise<{ width: number; height: number; durationMs: number; proxy?: Blob }> {
   const url = URL.createObjectURL(file);
   const video = document.createElement("video");
   video.preload = "metadata";
@@ -129,14 +130,14 @@ async function inspectVideo(file: File): Promise<{ width: number; height: number
   video.src = url;
   try {
     await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => reject(new Error(`读取视频元数据超时：${file.name}`)), 8_000);
+      const timer = window.setTimeout(() => reject(new Error(`读取视频元数据超时：${fileName}`)), 8_000);
       video.onloadedmetadata = () => {
         window.clearTimeout(timer);
         resolve();
       };
       video.onerror = () => {
         window.clearTimeout(timer);
-        reject(new Error(`无法读取视频元数据：${file.name}`));
+        reject(new Error(`无法读取视频元数据：${fileName}`));
       };
     });
     let proxy: Blob | undefined;
@@ -272,6 +273,43 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
     }
   }
 
+  async restoreOriginal(projectId: string, assetId: string, blob: Blob): Promise<Asset> {
+    const asset = (await this.list(projectId)).find((candidate) => candidate.id === assetId);
+    if (!asset) throw new Error("待恢复资产不存在或不属于当前项目");
+    if (blob.size !== asset.byteSize || (blob.type && blob.type !== asset.mimeType)) throw new Error("备份对象与资产元数据不匹配");
+    if (asset.contentFingerprint && blob.size <= 32 * 1024 * 1024) {
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+      const fingerprint = `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+      if (fingerprint !== asset.contentFingerprint) throw new Error("备份对象内容指纹与资产不匹配");
+    }
+    const metadata = asset.kind === "image"
+      ? await inspectImage(blob)
+      : asset.kind === "video"
+        ? await inspectVideo(blob, asset.originalName)
+        : null;
+    const proxy = metadata && "proxy" in metadata ? metadata.proxy : undefined;
+    const restored: Asset = {
+      ...asset,
+      width: metadata?.width ?? asset.width,
+      height: metadata?.height ?? asset.height,
+      durationMs: metadata && "durationMs" in metadata ? metadata.durationMs : asset.durationMs,
+      proxyStorageKey: proxy ? `indexeddb://assets/${asset.id}/proxy` : undefined,
+    };
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction([ASSET_STORE, BLOB_STORE], "readwrite");
+      transaction.objectStore(ASSET_STORE).put(restored);
+      const blobStore = transaction.objectStore(BLOB_STORE);
+      blobStore.put({ key: `${asset.id}:original`, assetId: asset.id, role: "original", blob } satisfies BlobRecord);
+      if (proxy) blobStore.put({ key: `${asset.id}:proxy`, assetId: asset.id, role: "proxy", blob: proxy } satisfies BlobRecord);
+      else blobStore.delete(`${asset.id}:proxy`);
+      await transactionComplete(transaction);
+      return restored;
+    } finally {
+      database.close();
+    }
+  }
+
   async remove(projectId: string, assetId: string): Promise<boolean> {
     const database = await openDatabase();
     try {
@@ -315,7 +353,7 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
         existingDatabase.close();
       }
     }
-    const metadata = kind === "image" ? await inspectImage(file) : await inspectVideo(file);
+    const metadata = kind === "image" ? await inspectImage(file) : await inspectVideo(file, file.name);
     const id = createId(kind);
     const asset: Asset = {
       id,

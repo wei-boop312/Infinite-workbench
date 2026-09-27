@@ -56,6 +56,11 @@ function uploadedBytes(session: UploadSession, parts: number[]): number {
   }, 0);
 }
 
+async function blobDigest(blob: Blob): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+  return `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 export class IndexedDbMockObjectStorage implements ObjectStoragePort {
   private async getSessionById(sessionId: string): Promise<UploadSession | null> {
     const database = await openDatabase();
@@ -93,6 +98,30 @@ export class IndexedDbMockObjectStorage implements ObjectStoragePort {
     try {
       const transaction = database.transaction(OBJECT_STORE, "readonly");
       return await requestResult(transaction.objectStore(OBJECT_STORE).index("fingerprintSize").get([fingerprint, byteSize]) as IDBRequest<RemoteObject | undefined>) ?? null;
+    } finally {
+      database.close();
+    }
+  }
+
+  async getObject(objectKey: string): Promise<Blob | null> {
+    const database = await openDatabase();
+    try {
+      const objectTransaction = database.transaction(OBJECT_STORE, "readonly");
+      const object = await requestResult(objectTransaction.objectStore(OBJECT_STORE).get(objectKey) as IDBRequest<RemoteObject | undefined>);
+      if (!object) return null;
+      const partTransaction = database.transaction(PART_STORE, "readonly");
+      const parts = await requestResult(partTransaction.objectStore(PART_STORE).index("sessionId").getAll(object.ownerSessionId) as IDBRequest<PartRecord[]>);
+      parts.sort((a, b) => a.index - b.index);
+      if (parts.length !== object.totalParts || parts.some((part, index) => part.index !== index || part.digest !== object.partDigests[index])) {
+        throw new Error("假远端对象分片不完整或摘要索引不匹配");
+      }
+      const verifiedDigests = await Promise.all(parts.map((part) => blobDigest(part.blob)));
+      if (verifiedDigests.some((digest, index) => digest !== object.partDigests[index])) {
+        throw new Error("假远端对象分片内容校验失败");
+      }
+      const blob = new Blob(parts.map((part) => part.blob), { type: object.mimeType });
+      if (blob.size !== object.byteSize) throw new Error("假远端对象大小不匹配");
+      return blob;
     } finally {
       database.close();
     }

@@ -183,6 +183,8 @@ function CanvasKernel() {
   const [online, setOnline] = useState(() => navigator.onLine);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetPreviewUrls, setAssetPreviewUrls] = useState<Record<string, string>>({});
+  const [missingOriginalAssetIds, setMissingOriginalAssetIds] = useState<Set<string>>(() => new Set());
+  const [restoringAssetIds, setRestoringAssetIds] = useState<Set<string>>(() => new Set());
   const [assetCatalogRevision, setAssetCatalogRevision] = useState(0);
   const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
   const [assetImporting, setAssetImporting] = useState(false);
@@ -223,14 +225,20 @@ function CanvasKernel() {
     const createdUrls: string[] = [];
     setAssets([]);
     setAssetPreviewUrls({});
+    setMissingOriginalAssetIds(new Set());
     setAssetError("");
     void assetRepository.list(projectId).then(async (projectAssets) => {
       const previews: Record<string, string> = {};
+      const missingOriginals = new Set<string>();
       for (const asset of projectAssets) {
         if (cancelled) return;
-        const role = asset.proxyStorageKey ? "proxy" : asset.kind === "image" ? "original" : null;
-        if (!role) continue;
-        const blob = await assetRepository.getBlob(asset.id, role);
+        const original = await assetRepository.getBlob(asset.id, "original");
+        if (!original) missingOriginals.add(asset.id);
+        const blob = asset.proxyStorageKey
+          ? await assetRepository.getBlob(asset.id, "proxy")
+          : asset.kind === "image"
+            ? original
+            : null;
         if (cancelled) return;
         if (!blob) continue;
         const url = URL.createObjectURL(blob);
@@ -240,6 +248,7 @@ function CanvasKernel() {
       if (cancelled) return;
       setAssets(projectAssets);
       setAssetPreviewUrls(previews);
+      setMissingOriginalAssetIds(missingOriginals);
     }).catch((error) => {
       if (!cancelled) setAssetError(error instanceof Error ? error.message : "资产库加载失败");
     });
@@ -260,6 +269,7 @@ function CanvasKernel() {
     uploadControllersRef.current.clear();
     setUploadSessions({});
     setBackupAllBusy(false);
+    setRestoringAssetIds(new Set());
     void Promise.all([
       mockObjectStorage.listSessions(projectId),
       mockObjectStorage.usage(),
@@ -594,10 +604,43 @@ function CanvasKernel() {
     uploadControllersRef.current.get(assetId)?.abort();
   }, []);
 
+  const restoreAssetFromBackup = useCallback(async (asset: Asset) => {
+    const session = uploadSessions[asset.id];
+    if (!session?.objectKey || !["completed", "reused"].includes(session.status)) {
+      setAssetError("该资产没有可用的完整备份对象");
+      return;
+    }
+    setRestoringAssetIds((current) => new Set(current).add(asset.id));
+    setAssetError("");
+    try {
+      const blob = await mockObjectStorage.getObject(session.objectKey);
+      if (!blob) throw new Error("假远端对象不存在");
+      await assetRepository.restoreOriginal(asset.projectId, asset.id, blob);
+      setMissingOriginalAssetIds((current) => {
+        const next = new Set(current);
+        next.delete(asset.id);
+        return next;
+      });
+      setAssetCatalogRevision((revision) => revision + 1);
+      setLastAction(`已从备份恢复 ${asset.originalName}；assetId 和所有画布引用保持不变`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "本地资产恢复失败";
+      setAssetError(message);
+      setLastAction(`本地资产恢复失败：${message}`);
+    } finally {
+      setRestoringAssetIds((current) => {
+        const next = new Set(current);
+        next.delete(asset.id);
+        return next;
+      });
+    }
+  }, [uploadSessions]);
+
   const backupAllAssets = useCallback(async () => {
     setBackupAllBusy(true);
     try {
       for (const asset of assets) {
+        if (missingOriginalAssetIds.has(asset.id)) continue;
         const status = uploadSessions[asset.id]?.status;
         if (status === "completed" || status === "reused") continue;
         await backupAsset(asset);
@@ -605,7 +648,7 @@ function CanvasKernel() {
     } finally {
       setBackupAllBusy(false);
     }
-  }, [assets, backupAsset, uploadSessions]);
+  }, [assets, backupAsset, missingOriginalAssetIds, uploadSessions]);
 
   const selectedClosure = useCallback(() => {
     const selectedIds = new Set(nodes.filter((node) => node.selected).map((node) => node.id));
@@ -1109,6 +1152,8 @@ function CanvasKernel() {
           uploadSessions={uploadSessions}
           remoteUsage={remoteUsage}
           backupAllBusy={backupAllBusy}
+          missingOriginalAssetIds={missingOriginalAssetIds}
+          restoringAssetIds={restoringAssetIds}
           onClose={() => setAssetLibraryOpen(false)}
           onChooseFiles={() => assetInputRef.current?.click()}
           onAddToCanvas={addAssetToCanvas}
@@ -1117,6 +1162,7 @@ function CanvasKernel() {
           onBackup={backupAsset}
           onPauseBackup={pauseAssetBackup}
           onBackupAll={backupAllAssets}
+          onRestore={restoreAssetFromBackup}
         />
 
         {selectedText && (

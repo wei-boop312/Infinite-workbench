@@ -15,6 +15,8 @@ type AssetLibraryProps = {
   uploadSessions: Record<string, UploadSession>;
   remoteUsage: RemoteStorageUsage | null;
   backupAllBusy: boolean;
+  missingOriginalAssetIds: Set<string>;
+  restoringAssetIds: Set<string>;
   onClose: () => void;
   onAddToCanvas: (asset: Asset) => void;
   onChooseFiles: () => void;
@@ -23,6 +25,7 @@ type AssetLibraryProps = {
   onBackup: (asset: Asset) => Promise<void>;
   onPauseBackup: (assetId: string) => void;
   onBackupAll: () => Promise<void>;
+  onRestore: (asset: Asset) => Promise<void>;
 };
 
 function uploadLabel(session: UploadSession | undefined): string {
@@ -48,6 +51,8 @@ export function AssetLibrary({
   uploadSessions,
   remoteUsage,
   backupAllBusy,
+  missingOriginalAssetIds,
+  restoringAssetIds,
   onClose,
   onAddToCanvas,
   onChooseFiles,
@@ -56,6 +61,7 @@ export function AssetLibrary({
   onBackup,
   onPauseBackup,
   onBackupAll,
+  onRestore,
 }: AssetLibraryProps) {
   const [confirmAssetId, setConfirmAssetId] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -64,7 +70,8 @@ export function AssetLibrary({
   if (!open) return null;
   const confirmAsset = assets.find((asset) => asset.id === confirmAssetId);
   const unusedCount = assets.filter((asset) => (referenceCounts[asset.id] ?? 0) === 0).length;
-  const pendingBackupCount = assets.filter((asset) => !["completed", "reused"].includes(uploadSessions[asset.id]?.status ?? "")).length;
+  const pendingBackupCount = assets.filter((asset) => !missingOriginalAssetIds.has(asset.id)
+    && !["completed", "reused"].includes(uploadSessions[asset.id]?.status ?? "")).length;
   return (
     <aside className="asset-library" aria-label="项目资产库">
       <header>
@@ -100,6 +107,9 @@ export function AssetLibrary({
           const transferActive = ["queued", "hashing", "uploading"].includes(session?.status ?? "");
           const transferFinished = ["completed", "reused"].includes(session?.status ?? "");
           const locallyProtected = (referenceCounts[asset.id] ?? 0) > 0;
+          const originalMissing = missingOriginalAssetIds.has(asset.id);
+          const restoring = restoringAssetIds.has(asset.id);
+          const canRestore = originalMissing && transferFinished && Boolean(session?.objectKey);
           return (
           <article key={asset.id} className="asset-card">
             <div className="asset-thumb">
@@ -112,19 +122,23 @@ export function AssetLibrary({
             <small>
               <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "尺寸未知"} · {formatAssetBytes(asset.byteSize)}</span>
               <span className={`remote-state state-${session?.status ?? "local"}`}>
-                {session?.status === "failed" ? `备份失败：${session.error ?? "可重试"}` : uploadLabel(session)}
+                {originalMissing
+                  ? canRestore ? "本地原文件缺失 · 备份可恢复" : "本地原文件缺失 · 无完整备份"
+                  : session?.status === "failed" ? `备份失败：${session.error ?? "可重试"}` : uploadLabel(session)}
               </span>
             </small>
             <div className="asset-card-actions">
-              <button onClick={() => onAddToCanvas(asset)}>添加到画布</button>
+              <button disabled={originalMissing} title={originalMissing ? "请先恢复本地原文件" : undefined} onClick={() => onAddToCanvas(asset)}>添加到画布</button>
               <button
                 className="backup"
-                disabled={transferFinished}
-                onClick={() => transferActive ? onPauseBackup(asset.id) : void onBackup(asset)}
-              >{uploadLabel(session)}</button>
+                disabled={originalMissing ? !canRestore || restoring : transferFinished}
+                onClick={() => originalMissing
+                  ? void onRestore(asset)
+                  : transferActive ? onPauseBackup(asset.id) : void onBackup(asset)}
+              >{restoring ? "恢复中…" : originalMissing ? canRestore ? "恢复本地" : "无可用备份" : uploadLabel(session)}</button>
               <button
                 className="remove"
-                disabled={locallyProtected || transferActive}
+                disabled={locallyProtected || transferActive || restoring}
                 title={locallyProtected ? "先删除画布节点或引用该蒙版的约束快照" : transferActive ? "请先暂停当前备份" : "移除本地原文件和预览"}
                 onClick={() => setConfirmAssetId(asset.id)}
               >{locallyProtected ? `使用中 ${referenceCounts[asset.id]}` : transferActive ? "备份中" : "移除"}</button>

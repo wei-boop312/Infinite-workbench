@@ -277,6 +277,76 @@ test("在底图上绘制蒙版并把蒙版版本写入约束快照", async ({ pa
   await expect(maskCard.getByRole("button", { name: "使用中 1" })).toBeDisabled();
 });
 
+test("蒙版支持独立撤销重做、多边形和套索", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "#2563eb";
+    context.fillRect(0, 0, 64, 64);
+    const blob = await new Promise<Blob>((resolve) => canvas.toBlob((value) => resolve(value!), "image/png"));
+    const input = document.querySelector('input[aria-label="导入本地资产"]') as HTMLInputElement;
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([blob], "mask-tools.png", { type: "image/png" }));
+    input.files = transfer.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.getByRole("complementary", { name: "项目资产库" }).getByText("mask-tools.png")).toBeVisible();
+  await page.getByRole("button", { name: "关闭资产库" }).click();
+  await page.getByRole("button", { name: "＋ 约束" }).click();
+  await page.getByRole("complementary", { name: "人工约束" }).getByRole("button", { name: "绘制蒙版" }).click();
+  const editor = page.getByRole("dialog", { name: "蒙版编辑器" });
+  const canvas = editor.getByLabel("蒙版绘制画布");
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) return;
+
+  await editor.getByRole("button", { name: "矩形" }).click();
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.7, { steps: 4 });
+  await page.mouse.up();
+  await expect(editor.getByRole("button", { name: "撤销蒙版" })).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "保存蒙版版本" })).toBeEnabled();
+  await page.keyboard.press("Control+z");
+  await expect(editor.getByRole("button", { name: "保存蒙版版本" })).toBeDisabled();
+  await page.keyboard.press("Control+Shift+z");
+  await expect(editor.getByRole("button", { name: "保存蒙版版本" })).toBeEnabled();
+
+  await editor.getByRole("button", { name: "清空" }).click();
+  await editor.getByRole("button", { name: "多边形" }).click();
+  const polygonBox = await canvas.boundingBox();
+  expect(polygonBox).not.toBeNull();
+  if (!polygonBox) return;
+  await canvas.click({ position: { x: polygonBox.width * 0.2, y: polygonBox.height * 0.2 } });
+  await canvas.click({ position: { x: polygonBox.width * 0.8, y: polygonBox.height * 0.25 } });
+  await canvas.click({ position: { x: polygonBox.width * 0.5, y: polygonBox.height * 0.8 } });
+  await expect(editor.getByText("已放置 3 个点")).toBeVisible();
+  await editor.getByRole("button", { name: "完成多边形" }).click();
+  await expect(editor.getByRole("button", { name: "保存蒙版版本" })).toBeEnabled();
+  await editor.getByRole("button", { name: "撤销蒙版" }).click();
+  await expect(editor.getByRole("button", { name: "保存蒙版版本" })).toBeDisabled();
+  await editor.getByRole("button", { name: "重做蒙版" }).click();
+
+  await editor.getByRole("button", { name: "清空" }).click();
+  await editor.getByRole("button", { name: "套索" }).click();
+  const lassoBox = await canvas.boundingBox();
+  expect(lassoBox).not.toBeNull();
+  if (!lassoBox) return;
+  await page.mouse.move(lassoBox.x + lassoBox.width * 0.25, lassoBox.y + lassoBox.height * 0.25);
+  await page.mouse.down();
+  await page.mouse.move(lassoBox.x + lassoBox.width * 0.75, lassoBox.y + lassoBox.height * 0.3, { steps: 3 });
+  await page.mouse.move(lassoBox.x + lassoBox.width * 0.55, lassoBox.y + lassoBox.height * 0.75, { steps: 3 });
+  await page.mouse.move(lassoBox.x + lassoBox.width * 0.25, lassoBox.y + lassoBox.height * 0.25, { steps: 3 });
+  await page.mouse.up();
+  await expect(editor.getByRole("button", { name: "保存蒙版版本" })).toBeEnabled();
+  await editor.getByRole("button", { name: "保存蒙版版本" }).click();
+  await expect(editor).toBeHidden();
+  await expect(page.getByRole("button", { name: "资产库 2" })).toBeVisible();
+});
+
 test("本地假远端可分片备份并跨项目复用同一内容", async ({ page }) => {
   const externalRequests: string[] = [];
   page.on("request", (request) => {
@@ -304,6 +374,62 @@ test("本地假远端可分片备份并跨项目复用同一内容", async ({ pa
   await page.reload();
   await page.getByRole("button", { name: "资产库 1" }).click();
   await expect(page.getByRole("complementary", { name: "项目资产库" }).getByRole("button", { name: "已复用" })).toBeDisabled();
+});
+
+test("本地原文件丢失后可从备份恢复且 assetId 不变", async ({ page }) => {
+  await page.goto("/");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "restore-source.png", mimeType: "image/png", buffer: png });
+  const library = page.getByRole("complementary", { name: "项目资产库" });
+  const card = library.locator(".asset-card").filter({ hasText: "restore-source.png" });
+  await card.getByRole("button", { name: "备份", exact: true }).click();
+  await expect(card.getByRole("button", { name: "已备份" })).toBeDisabled();
+
+  const assetId = await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("ai-commerce-canvas-assets", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const asset = await new Promise<{ id: string }>((resolve, reject) => {
+      const request = database.transaction("assets", "readonly").objectStore("assets").index("projectId").getAll("project-main-image");
+      request.onsuccess = () => resolve(request.result.find((entry) => entry.originalName === "restore-source.png"));
+      request.onerror = () => reject(request.error);
+    });
+    const transaction = database.transaction("blobs", "readwrite");
+    transaction.objectStore("blobs").delete(`${asset.id}:original`);
+    transaction.objectStore("blobs").delete(`${asset.id}:proxy`);
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+    return asset.id;
+  });
+
+  await page.reload();
+  await page.getByRole("button", { name: "资产库 1" }).click();
+  const missingCard = page.getByRole("complementary", { name: "项目资产库" }).locator(".asset-card").filter({ hasText: "restore-source.png" });
+  await expect(missingCard).toContainText("本地原文件缺失 · 备份可恢复");
+  await missingCard.getByRole("button", { name: "恢复本地" }).click();
+  await expect(missingCard.getByRole("button", { name: "已备份" })).toBeDisabled();
+  await expect(missingCard.locator('img[alt="restore-source.png"]')).toHaveCount(1);
+
+  const restored = await page.evaluate(async (expectedAssetId) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("ai-commerce-canvas-assets", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const blob = await new Promise<{ assetId: string; blob: Blob } | undefined>((resolve, reject) => {
+      const request = database.transaction("blobs", "readonly").objectStore("blobs").get(`${expectedAssetId}:original`);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return { assetId: blob?.assetId, size: blob?.blob.size };
+  }, assetId);
+  expect(restored).toEqual({ assetId, size: png.length });
 });
 
 test("项目包可导出并作为独立副本完整导入", async ({ page }) => {
