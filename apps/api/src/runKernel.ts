@@ -7,12 +7,16 @@ import {
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
+  type ClaimRunJobsRequest,
+  type ExecuteRunJobRequest,
   type ProjectBudgetSnapshot,
   type RetryRunJobRequest,
   type RunAuditEvent,
   type RunBatch,
   type RunBatchAggregate,
   type RunJob,
+  type RunJobClaimResult,
+  type RunJobLease,
   type RunKernelSnapshot,
 } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
@@ -75,6 +79,19 @@ export type ProjectBudgetConfig = {
   limitMinor: number;
 };
 
+export type ProjectExecutionLimitConfig = {
+  tenantId: string;
+  projectId: string;
+  maxConcurrentJobs: number;
+};
+
+export type ProviderExecutionLimitConfig = {
+  adapterId: string;
+  maxConcurrentJobs: number;
+  maxStartsPerWindow?: number;
+  windowMs?: number;
+};
+
 type BudgetState = ProjectBudgetConfig & {
   reservedMinor: number;
   spentMinor: number;
@@ -96,6 +113,9 @@ export type RunKernelOptions = {
   unitEstimateMinor?: number;
   unitActualMinor?: number;
   maxConcurrentJobs?: number;
+  projectLimits?: readonly ProjectExecutionLimitConfig[];
+  providerLimits?: readonly ProviderExecutionLimitConfig[];
+  leaseDurationMs?: number;
   jobTimeoutMs?: number;
   clock?: () => number;
 };
@@ -105,6 +125,8 @@ export interface RunKernelPort {
   createBatch(principal: RunPrincipal, request: CreateRunBatchRequest): RunBatchAggregate;
   getBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   confirmBatch(principal: RunPrincipal, batchId: string, confirmation: ConfirmRunBatchRequest): RunBatchAggregate;
+  claimBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest): RunJobClaimResult;
+  executeLeasedJob(principal: RunPrincipal, jobId: string, request: ExecuteRunJobRequest): RunBatchAggregate;
   dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   reconcileBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   retryJob(principal: RunPrincipal, jobId: string, request: RetryRunJobRequest): RunBatchAggregate;
@@ -140,20 +162,25 @@ export class InMemoryRunKernel implements RunKernelPort {
   private readonly unitEstimateMinor: number;
   private readonly unitActualMinor: number;
   private readonly maxConcurrentJobs: number;
+  private readonly leaseDurationMs: number;
   private readonly jobTimeoutMs: number;
   private readonly budgets = new Map<string, BudgetState>();
   private readonly batches = new Map<string, StoredBatch>();
   private readonly idempotencyIndex = new Map<string, string>();
+  private readonly projectLimits = new Map<string, number>();
+  private readonly providerLimits = new Map<string, ProviderExecutionLimitConfig>();
 
   constructor(private readonly options: RunKernelOptions) {
     this.clock = options.clock ?? Date.now;
     this.unitEstimateMinor = options.unitEstimateMinor ?? 25;
     this.unitActualMinor = options.unitActualMinor ?? Math.max(0, this.unitEstimateMinor - 5);
     this.maxConcurrentJobs = options.maxConcurrentJobs ?? 2;
+    this.leaseDurationMs = options.leaseDurationMs ?? 30_000;
     this.jobTimeoutMs = options.jobTimeoutMs ?? 30_000;
     if (!Number.isSafeInteger(this.unitEstimateMinor) || this.unitEstimateMinor < 0) throw new Error("假执行器单位估价必须是非负整数");
     if (!Number.isSafeInteger(this.unitActualMinor) || this.unitActualMinor < 0 || this.unitActualMinor > this.unitEstimateMinor) throw new Error("假执行器实际单价必须位于 0 和估价之间");
     if (!Number.isSafeInteger(this.maxConcurrentJobs) || this.maxConcurrentJobs < 1) throw new Error("假调度器并发数必须是正整数");
+    if (!Number.isSafeInteger(this.leaseDurationMs) || this.leaseDurationMs < 1_000) throw new Error("任务租约至少为 1 秒");
     if (!Number.isSafeInteger(this.jobTimeoutMs) || this.jobTimeoutMs < 1_000) throw new Error("假任务超时至少为 1 秒");
     for (const budget of options.budgets) {
       if (!/^[A-Z]{3}$/.test(budget.currency) || !Number.isSafeInteger(budget.limitMinor) || budget.limitMinor < 0) {
@@ -162,6 +189,28 @@ export class InMemoryRunKernel implements RunKernelPort {
       const key = scopedProjectKey(budget.tenantId, budget.projectId);
       if (this.budgets.has(key)) throw new Error("项目预算配置重复");
       this.budgets.set(key, { ...budget, reservedMinor: 0, spentMinor: 0 });
+      this.projectLimits.set(key, this.maxConcurrentJobs);
+    }
+    const configuredProjectLimits = new Set<string>();
+    for (const limit of options.projectLimits ?? []) {
+      const key = scopedProjectKey(limit.tenantId, limit.projectId);
+      if (!this.budgets.has(key)) throw new Error("项目并发配置没有对应预算项目");
+      if (!Number.isSafeInteger(limit.maxConcurrentJobs) || limit.maxConcurrentJobs < 1) throw new Error("项目并发上限必须是正整数");
+      if (configuredProjectLimits.has(key)) throw new Error("项目并发配置重复");
+      configuredProjectLimits.add(key);
+      this.projectLimits.set(key, limit.maxConcurrentJobs);
+    }
+    for (const limit of options.providerLimits ?? []) {
+      if (!limit.adapterId.trim() || !Number.isSafeInteger(limit.maxConcurrentJobs) || limit.maxConcurrentJobs < 1) {
+        throw new Error("供应商并发配置无效");
+      }
+      const hasWindowLimit = limit.maxStartsPerWindow !== undefined || limit.windowMs !== undefined;
+      if (hasWindowLimit && (!Number.isSafeInteger(limit.maxStartsPerWindow) || limit.maxStartsPerWindow! < 1
+        || !Number.isSafeInteger(limit.windowMs) || limit.windowMs! < 1_000)) {
+        throw new Error("供应商时间窗口限流配置无效");
+      }
+      if (this.providerLimits.has(limit.adapterId)) throw new Error("供应商限流配置重复");
+      this.providerLimits.set(limit.adapterId, { ...limit });
     }
     this.restore();
   }
@@ -323,39 +372,138 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.copy(stored.aggregate);
   }
 
-  dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
+  claimBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest): RunJobClaimResult {
     const stored = this.requireBatch(principal, batchId);
-    const aggregate = stored.aggregate;
-    this.assertAllowed(principal, aggregate.batch.projectId, "run:execute");
-    if (aggregate.batch.status === "billing_unknown") {
+    this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
+    if (stored.aggregate.batch.status === "billing_unknown") {
       throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止继续调度");
     }
+    const recoveredExpired = this.recoverExpiredLeases("system-lease-reaper");
+    const aggregate = stored.aggregate;
+    if (aggregate.batch.status === "billing_unknown") {
+      if (recoveredExpired) this.persist();
+      throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止继续调度");
+    }
+    const now = this.clock();
     const latest = this.latestJobs(aggregate.jobs);
-    const runningCount = latest.filter((job) => job.status === "running").length;
-    const queued = latest.filter((job) => job.status === "queued").slice(0, Math.max(0, this.maxConcurrentJobs - runningCount));
-    if (!queued.length) return this.copy(aggregate);
+    const queued = latest.filter((job) => job.status === "queued");
+    if (!queued.length) {
+      if (recoveredExpired) this.persist();
+      return { aggregate: this.copy(aggregate), leases: [] };
+    }
 
-    aggregate.batch = { ...aggregate.batch, status: "running" };
-    aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "batch-dispatched", { count: String(queued.length) }));
-    for (const queuedJob of queued) {
-      const startedAt = new Date(this.clock()).toISOString();
-      const running: RunJob = {
-        ...queuedJob,
-        status: "running",
-        startedAt,
-        providerRequestId: `mock-request-${randomUUID()}`,
-      };
-      this.replaceJob(aggregate, running);
-      aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "job-started", { jobId: running.id }));
-      const scenario = stored.jobScenarios.get(running.id) ?? aggregate.batch.mockScenario;
-      if (scenario === "slow") continue;
-      if (scenario === "billing-unknown") {
-        this.finishJob(stored, running, "billing-unknown", principal.actorId);
-      } else if (scenario === "failed" || (scenario === "partial-failure" && running.outputIndex % 2 === 1)) {
-        this.finishJob(stored, running, "failed", principal.actorId);
+    const projectKey = scopedProjectKey(aggregate.batch.tenantId, aggregate.batch.projectId);
+    const active = this.activeJobs();
+    const projectLimit = this.projectLimits.get(projectKey) ?? this.maxConcurrentJobs;
+    const projectActive = active.filter(({ batch }) => scopedProjectKey(batch.tenantId, batch.projectId) === projectKey).length;
+    const providerLimit = this.providerLimit(aggregate.batch.adapterId);
+    const providerActive = active.filter(({ job }) => job.adapterId === aggregate.batch.adapterId).length;
+    const startsInWindow = providerLimit.maxStartsPerWindow === undefined
+      ? []
+      : this.providerStartsInWindow(aggregate.batch.adapterId, now, providerLimit.windowMs!);
+
+    const desired = Math.min(request.maxJobs, this.maxConcurrentJobs, queued.length);
+    const projectAvailable = Math.max(0, projectLimit - projectActive);
+    const providerAvailable = Math.max(0, providerLimit.maxConcurrentJobs - providerActive);
+    const rateAvailable = providerLimit.maxStartsPerWindow === undefined
+      ? desired
+      : Math.max(0, providerLimit.maxStartsPerWindow - startsInWindow.length);
+    const claimCount = Math.min(desired, projectAvailable, providerAvailable, rateAvailable);
+    let throttledBy: RunJobClaimResult["throttledBy"];
+    let retryAfterMs: number | undefined;
+    if (claimCount < desired) {
+      if (projectAvailable <= claimCount) {
+        throttledBy = "project-concurrency";
+        retryAfterMs = this.activeRetryAfterMs(active.filter(({ batch }) => scopedProjectKey(batch.tenantId, batch.projectId) === projectKey), now);
+      } else if (providerAvailable <= claimCount) {
+        throttledBy = "provider-concurrency";
+        retryAfterMs = this.activeRetryAfterMs(active.filter(({ job }) => job.adapterId === aggregate.batch.adapterId), now);
       } else {
-        this.finishJob(stored, running, "succeeded", principal.actorId);
+        throttledBy = "provider-rate";
+        retryAfterMs = Math.max(1, Date.parse(startsInWindow[0].createdAt) + providerLimit.windowMs! - now);
       }
+    }
+
+    const leases: RunJobLease[] = [];
+    for (const queuedJob of queued.slice(0, claimCount)) {
+      const leasedAt = new Date(now).toISOString();
+      const expiresAt = new Date(now + this.leaseDurationMs).toISOString();
+      const leaseId = `lease-${randomUUID()}`;
+      const leased: RunJob = {
+        ...queuedJob,
+        status: "leased",
+        leaseId,
+        leaseOwnerId: request.workerId,
+        leasedAt,
+        leaseExpiresAt: expiresAt,
+      };
+      this.replaceJob(aggregate, leased);
+      leases.push({ jobId: leased.id, batchId, leaseId, workerId: request.workerId, leasedAt, expiresAt });
+      aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "job-leased", {
+        jobId: leased.id,
+        leaseId,
+        workerId: request.workerId,
+        adapterId: leased.adapterId,
+      }));
+    }
+    if (leases.length > 0) {
+      aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "batch-dispatched", {
+        count: String(leases.length),
+        workerId: request.workerId,
+      }));
+    }
+    if (throttledBy) {
+      aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "dispatch-throttled", {
+        reason: throttledBy,
+        retryAfterMs: String(retryAfterMs),
+        workerId: request.workerId,
+      }));
+    }
+    this.refreshBatchStatus(stored);
+    stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    if (leases.length > 0 || throttledBy || recoveredExpired) this.persist();
+    return {
+      aggregate: this.copy(stored.aggregate),
+      leases,
+      ...(throttledBy ? { throttledBy, retryAfterMs } : {}),
+    };
+  }
+
+  executeLeasedJob(principal: RunPrincipal, jobId: string, request: ExecuteRunJobRequest): RunBatchAggregate {
+    const initial = this.findJob(principal, jobId);
+    this.assertAllowed(principal, initial.stored.aggregate.batch.projectId, "run:execute");
+    const recoveredExpired = this.recoverExpiredLeases("system-lease-reaper");
+    const { stored, job } = this.findJob(principal, jobId);
+    if (job.status !== "leased") {
+      if (recoveredExpired) this.persist();
+      throw new RunKernelError(409, "run_job_not_leased", "任务当前没有可执行租约");
+    }
+    if (job.leaseId !== request.leaseId || job.leaseOwnerId !== request.workerId) {
+      if (recoveredExpired) this.persist();
+      throw new RunKernelError(409, "run_job_lease_mismatch", "租约编号或执行器身份不匹配");
+    }
+
+    const startedAt = new Date(this.clock()).toISOString();
+    const running: RunJob = {
+      ...job,
+      status: "running",
+      startedAt,
+      providerRequestId: `mock-request-${randomUUID()}`,
+    };
+    stored.aggregate.batch = { ...stored.aggregate.batch, status: "running" };
+    this.replaceJob(stored.aggregate, running);
+    stored.aggregate.audit.push(this.audit(stored.aggregate.batch, principal.actorId, "job-started", {
+      jobId: running.id,
+      leaseId: request.leaseId,
+      workerId: request.workerId,
+    }));
+    const scenario = stored.jobScenarios.get(running.id) ?? stored.aggregate.batch.mockScenario;
+    if (scenario === "billing-unknown") {
+      this.finishJob(stored, running, "billing-unknown", principal.actorId);
+    } else if (scenario === "failed" || (scenario === "partial-failure" && running.outputIndex % 2 === 1)) {
+      this.finishJob(stored, running, "failed", principal.actorId);
+    } else if (scenario !== "slow") {
+      this.finishJob(stored, running, "succeeded", principal.actorId);
     }
     this.refreshBatchStatus(stored);
     stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
@@ -363,9 +511,20 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.copy(stored.aggregate);
   }
 
+  dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
+    const workerId = `compat-${createHash("sha256").update(`${principal.tenantId}:${principal.actorId}`).digest("hex")}`;
+    const claim = this.claimBatch(principal, batchId, { workerId, maxJobs: this.maxConcurrentJobs });
+    let aggregate = claim.aggregate;
+    for (const lease of claim.leases) {
+      aggregate = this.executeLeasedJob(principal, lease.jobId, { workerId, leaseId: lease.leaseId });
+    }
+    return aggregate;
+  }
+
   reconcileBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
     const stored = this.requireBatch(principal, batchId);
     this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
+    this.recoverExpiredLeases("system-lease-reaper");
     const now = this.clock();
     for (const job of this.latestJobs(stored.aggregate.jobs)) {
       if (job.status !== "running" || !job.startedAt) continue;
@@ -454,7 +613,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     if (batch.status === "billing_unknown") {
       throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时不能释放预算或取消批次");
     }
-    if (!["awaiting_confirmation", "queued", "running"].includes(batch.status)) {
+    if (!["awaiting_confirmation", "queued"].includes(batch.status)) {
       throw new RunKernelError(409, "run_batch_not_cancellable", "当前批次状态不能取消");
     }
 
@@ -482,7 +641,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       });
     }
     aggregate.batch = { ...batch, status: "cancelled" };
-    aggregate.jobs = aggregate.jobs.map((job) => ["queued", "running"].includes(job.status)
+    aggregate.jobs = aggregate.jobs.map((job) => ["queued", "leased", "running"].includes(job.status)
       ? { ...job, status: "cancelled", finishedAt: now }
       : job);
     aggregate.audit.push(this.audit(batch, principal.actorId, "batch-cancelled", { previousStatus: batch.status }));
@@ -590,8 +749,9 @@ export class InMemoryRunKernel implements RunKernelPort {
       this.refreshBatchStatus(stored);
       stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
     }
+    const recoveredExpiredLeases = this.recoverExpiredLeases("system-recovery");
     this.assertStateConsistent();
-    if (recoveredRunningJobs) this.persist();
+    if (recoveredRunningJobs || recoveredExpiredLeases) this.persist();
   }
 
   private persist(): void {
@@ -627,9 +787,16 @@ export class InMemoryRunKernel implements RunKernelPort {
         if (globalJobIds.has(job.id) || job.batchId !== batch.id) throw new Error("任务内核快照中的任务归属无效");
         globalJobIds.add(job.id);
         if (!stored.jobScenarios.has(job.id)) throw new Error("任务内核快照缺少任务执行场景");
-        const shouldReserve = ["queued", "running", "billing_unknown"].includes(job.status);
+        const shouldReserve = ["queued", "leased", "running", "billing_unknown"].includes(job.status);
         if (shouldReserve !== stored.jobReservations.has(job.id)) {
           throw new Error("任务内核快照中的任务预留状态无效");
+        }
+        const leaseFieldCount = [job.leaseId, job.leaseOwnerId, job.leasedAt, job.leaseExpiresAt]
+          .filter((value) => value !== undefined).length;
+        if ((job.status === "leased" && leaseFieldCount !== 4)
+          || (job.status === "queued" && leaseFieldCount !== 0)
+          || (leaseFieldCount !== 0 && leaseFieldCount !== 4)) {
+          throw new Error("任务内核快照中的执行租约不完整");
         }
       }
       for (const jobId of stored.jobReservations.keys()) {
@@ -657,17 +824,98 @@ export class InMemoryRunKernel implements RunKernelPort {
     }
   }
 
+  private recoverExpiredLeases(actorId: string): boolean {
+    const now = this.clock();
+    let recovered = false;
+    for (const stored of this.batches.values()) {
+      let batchChanged = false;
+      for (const job of this.latestJobs(stored.aggregate.jobs)) {
+        if (!["leased", "running"].includes(job.status) || !job.leaseExpiresAt) continue;
+        if (Date.parse(job.leaseExpiresAt) > now) continue;
+        if (job.status === "leased") {
+          const {
+            leaseId,
+            leaseOwnerId: _leaseOwnerId,
+            leasedAt: _leasedAt,
+            leaseExpiresAt: _leaseExpiresAt,
+            ...unleased
+          } = job;
+          this.replaceJob(stored.aggregate, { ...unleased, status: "queued" });
+          stored.aggregate.audit.push(this.audit(stored.aggregate.batch, actorId, "job-lease-expired", {
+            jobId: job.id,
+            leaseId: leaseId ?? "missing",
+            action: "requeued-before-start",
+          }));
+        } else {
+          stored.aggregate.audit.push(this.audit(stored.aggregate.batch, actorId, "job-lease-expired", {
+            jobId: job.id,
+            leaseId: job.leaseId ?? "missing",
+            action: "billing-review-after-start",
+          }));
+          this.finishJob(stored, job, "billing-unknown", actorId, "lease-expired-after-start");
+        }
+        recovered = true;
+        batchChanged = true;
+      }
+      if (batchChanged) {
+        this.refreshBatchStatus(stored);
+        stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+      }
+    }
+    return recovered;
+  }
+
+  private activeJobs(): Array<{ batch: RunBatch; job: RunJob }> {
+    const active: Array<{ batch: RunBatch; job: RunJob }> = [];
+    for (const stored of this.batches.values()) {
+      for (const job of this.latestJobs(stored.aggregate.jobs)) {
+        if (["leased", "running"].includes(job.status)) active.push({ batch: stored.aggregate.batch, job });
+      }
+    }
+    return active;
+  }
+
+  private providerLimit(adapterId: string): ProviderExecutionLimitConfig {
+    return this.providerLimits.get(adapterId) ?? {
+      adapterId,
+      maxConcurrentJobs: this.maxConcurrentJobs,
+    };
+  }
+
+  private providerStartsInWindow(adapterId: string, now: number, windowMs: number): RunAuditEvent[] {
+    const windowStart = now - windowMs;
+    return [...this.batches.values()]
+      .flatMap((stored) => stored.aggregate.audit)
+      .filter((event) => event.eventType === "job-leased"
+        && event.metadata.adapterId === adapterId
+        && Date.parse(event.createdAt) > windowStart)
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  }
+
+  private activeRetryAfterMs(active: Array<{ job: RunJob }>, now: number): number {
+    const expiries = active
+      .map(({ job }) => job.leaseExpiresAt ? Date.parse(job.leaseExpiresAt) - now : this.leaseDurationMs)
+      .filter((remaining) => remaining > 0);
+    return Math.max(1, expiries.length > 0 ? Math.min(...expiries) : this.leaseDurationMs);
+  }
+
   private finishJob(
     stored: StoredBatch,
     job: RunJob,
     outcome: "succeeded" | "failed" | "timed-out" | "billing-unknown",
     actorId: string,
+    failureCode?: string,
   ): void {
     const batch = stored.aggregate.batch;
     const finishedAt = new Date(this.clock()).toISOString();
     if (outcome === "billing-unknown") {
       const reservation = stored.jobReservations.get(job.id) ?? 0;
-      this.replaceJob(stored.aggregate, { ...job, status: "billing_unknown", finishedAt });
+      this.replaceJob(stored.aggregate, {
+        ...job,
+        status: "billing_unknown",
+        ...(failureCode ? { failureCode } : {}),
+        finishedAt,
+      });
       stored.aggregate.ledger.push({
         id: `ledger-${randomUUID()}`,
         tenantId: batch.tenantId,
@@ -754,7 +1002,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     let status: RunBatch["status"];
     if (jobs.some((job) => job.status === "billing_unknown")) status = "billing_unknown";
     else if (jobs.some((job) => job.status === "running")) status = "running";
-    else if (jobs.some((job) => job.status === "queued")) status = "queued";
+    else if (jobs.some((job) => ["queued", "leased"].includes(job.status))) status = "queued";
     else if (jobs.length > 0 && jobs.every((job) => job.status === "succeeded")) status = "succeeded";
     else if (jobs.some((job) => job.status === "succeeded")) status = "partial";
     else status = "failed";

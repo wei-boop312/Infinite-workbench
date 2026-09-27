@@ -182,13 +182,17 @@ export const RunJobSchema = z.object({
   executorKind: z.enum(["provider", "mcp", "mock"]),
   adapterId: IdSchema,
   idempotencyKey: IdSchema,
-  status: z.enum(["queued", "running", "succeeded", "failed", "timed_out", "cancelled", "billing_unknown"]),
+  status: z.enum(["queued", "leased", "running", "succeeded", "failed", "timed_out", "cancelled", "billing_unknown"]),
   retryOf: IdSchema.optional(),
   inputAssetIds: z.array(IdSchema),
   outputAssetIds: z.array(IdSchema),
   estimatedCostMinor: z.number().int().nonnegative(),
   actualCostMinor: z.number().int().nonnegative().optional(),
   providerRequestId: z.string().min(1).optional(),
+  leaseId: IdSchema.optional(),
+  leaseOwnerId: IdSchema.optional(),
+  leasedAt: IsoDateSchema.optional(),
+  leaseExpiresAt: IsoDateSchema.optional(),
   failureCode: IdSchema.optional(),
   startedAt: IsoDateSchema.optional(),
   finishedAt: IsoDateSchema.optional(),
@@ -252,6 +256,16 @@ export const RetryRunJobRequestSchema = z.object({
   mockScenario: z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]).default("success"),
 }).strict();
 
+export const ClaimRunJobsRequestSchema = z.object({
+  workerId: IdSchema,
+  maxJobs: z.number().int().min(1).max(20).default(1),
+}).strict();
+
+export const ExecuteRunJobRequestSchema = z.object({
+  workerId: IdSchema,
+  leaseId: IdSchema,
+}).strict();
+
 export const RunAuditEventSchema = z.object({
   id: IdSchema,
   tenantId: IdSchema,
@@ -265,6 +279,9 @@ export const RunAuditEventSchema = z.object({
     "budget-reserved",
     "jobs-created",
     "batch-dispatched",
+    "job-leased",
+    "job-lease-expired",
+    "dispatch-throttled",
     "job-started",
     "job-succeeded",
     "job-failed",
@@ -294,6 +311,22 @@ export const RunBatchAggregateSchema = z.object({
   jobs: z.array(RunJobSchema),
   ledger: z.array(CostLedgerSchema),
   audit: z.array(RunAuditEventSchema),
+}).strict();
+
+export const RunJobLeaseSchema = z.object({
+  jobId: IdSchema,
+  batchId: IdSchema,
+  leaseId: IdSchema,
+  workerId: IdSchema,
+  leasedAt: IsoDateSchema,
+  expiresAt: IsoDateSchema,
+}).strict();
+
+export const RunJobClaimResultSchema = z.object({
+  aggregate: RunBatchAggregateSchema,
+  leases: z.array(RunJobLeaseSchema),
+  throttledBy: z.enum(["project-concurrency", "provider-concurrency", "provider-rate"]).optional(),
+  retryAfterMs: z.number().int().positive().optional(),
 }).strict();
 
 export const RunKernelBudgetStateSchema = z.object({
@@ -356,9 +389,13 @@ export type RunJob = z.infer<typeof RunJobSchema>;
 export type CreateRunBatchRequest = z.infer<typeof CreateRunBatchRequestSchema>;
 export type ConfirmRunBatchRequest = z.infer<typeof ConfirmRunBatchRequestSchema>;
 export type RetryRunJobRequest = z.infer<typeof RetryRunJobRequestSchema>;
+export type ClaimRunJobsRequest = z.infer<typeof ClaimRunJobsRequestSchema>;
+export type ExecuteRunJobRequest = z.infer<typeof ExecuteRunJobRequestSchema>;
 export type RunAuditEvent = z.infer<typeof RunAuditEventSchema>;
 export type ProjectBudgetSnapshot = z.infer<typeof ProjectBudgetSnapshotSchema>;
 export type RunBatchAggregate = z.infer<typeof RunBatchAggregateSchema>;
+export type RunJobLease = z.infer<typeof RunJobLeaseSchema>;
+export type RunJobClaimResult = z.infer<typeof RunJobClaimResultSchema>;
 export type RunKernelBudgetState = z.infer<typeof RunKernelBudgetStateSchema>;
 export type RunKernelStoredBatch = z.infer<typeof RunKernelStoredBatchSchema>;
 export type RunKernelSnapshot = z.infer<typeof RunKernelSnapshotSchema>;

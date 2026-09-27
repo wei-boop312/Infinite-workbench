@@ -33,7 +33,11 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function createKernel(store: RunKernelStateStore, options: { clock?: () => number; maxConcurrentJobs?: number } = {}) {
+function createKernel(store: RunKernelStateStore, options: {
+  clock?: () => number;
+  maxConcurrentJobs?: number;
+  leaseDurationMs?: number;
+} = {}) {
   return new InMemoryRunKernel({
     authorizer: new StaticRunAuthorizer([
       { bearerToken: "owner-token", tenantId: "tenant-a", actorId: "owner", projects: { "project-a": full } },
@@ -43,6 +47,7 @@ function createKernel(store: RunKernelStateStore, options: { clock?: () => numbe
     unitEstimateMinor: 40,
     unitActualMinor: 30,
     maxConcurrentJobs: options.maxConcurrentJobs ?? 2,
+    leaseDurationMs: options.leaseDurationMs,
     jobTimeoutMs: 1_000,
     clock: options.clock,
   });
@@ -130,6 +135,39 @@ describe("阶段 3 任务内核持久化与重启恢复", () => {
     expect(() => restoredKernel.cancelBatch(principal, confirmed.batch.id))
       .toThrowError(expect.objectContaining<Partial<RunKernelError>>({ code: "billing_state_unknown" }));
     expect(store.snapshot?.batches[0].aggregate.jobs).toHaveLength(1);
+  });
+
+  it("未启动租约跨重启保持独占，并只在到期后安全回队列", () => {
+    const store = new MemoryRunKernelStateStore();
+    let now = Date.parse("2026-09-27T19:30:00+08:00");
+    const firstKernel = createKernel(store, { clock: () => now, leaseDurationMs: 1_000 });
+    const confirmed = createConfirmed(firstKernel, request({
+      expectedOutputs: 1,
+      idempotencyKey: "leased-before-restart",
+    }));
+    const firstLease = firstKernel.claimBatch(principal, confirmed.batch.id, {
+      workerId: "worker-before-restart",
+      maxJobs: 1,
+    }).leases[0];
+
+    const restoredKernel = createKernel(store, { clock: () => now, leaseDurationMs: 1_000 });
+    expect(restoredKernel.getBatch(principal, confirmed.batch.id).jobs[0]).toMatchObject({
+      status: "leased",
+      leaseId: firstLease.leaseId,
+    });
+    expect(restoredKernel.claimBatch(principal, confirmed.batch.id, {
+      workerId: "worker-after-restart",
+      maxJobs: 1,
+    }).leases).toEqual([]);
+
+    now += 1_001;
+    const reclaimed = restoredKernel.claimBatch(principal, confirmed.batch.id, {
+      workerId: "worker-after-restart",
+      maxJobs: 1,
+    });
+    expect(reclaimed.leases).toHaveLength(1);
+    expect(reclaimed.leases[0].leaseId).not.toBe(firstLease.leaseId);
+    expect(reclaimed.aggregate.audit.map((event) => event.eventType)).toContain("job-lease-expired");
   });
 
   it("以原子文件快照保存状态，并在文件损坏时拒绝静默重置", () => {
