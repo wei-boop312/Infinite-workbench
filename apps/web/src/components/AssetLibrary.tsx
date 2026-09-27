@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Asset } from "@canvas/contracts";
 import { formatAssetBytes, type AssetUsage } from "../assets/assetRepository";
+import type { RemoteStorageUsage, UploadSession } from "../storage/objectStorage";
 
 type AssetLibraryProps = {
   open: boolean;
@@ -11,12 +12,29 @@ type AssetLibraryProps = {
   referenceCounts: Record<string, number>;
   usage: AssetUsage | null;
   storageQuota: number | null;
+  uploadSessions: Record<string, UploadSession>;
+  remoteUsage: RemoteStorageUsage | null;
+  backupAllBusy: boolean;
   onClose: () => void;
   onAddToCanvas: (asset: Asset) => void;
   onChooseFiles: () => void;
   onRemove: (asset: Asset) => Promise<void>;
   onCleanup: () => Promise<number>;
+  onBackup: (asset: Asset) => Promise<void>;
+  onPauseBackup: (assetId: string) => void;
+  onBackupAll: () => Promise<void>;
 };
+
+function uploadLabel(session: UploadSession | undefined): string {
+  if (!session) return "备份";
+  const progress = session.totalBytes ? Math.round(session.uploadedBytes / session.totalBytes * 100) : 0;
+  if (session.status === "completed") return "已备份";
+  if (session.status === "reused") return "已复用";
+  if (session.status === "paused") return `继续 ${progress}%`;
+  if (session.status === "failed") return "重试";
+  if (session.status === "hashing") return `暂停校验 ${progress}%`;
+  return `暂停 ${progress}%`;
+}
 
 export function AssetLibrary({
   open,
@@ -27,11 +45,17 @@ export function AssetLibrary({
   referenceCounts,
   usage,
   storageQuota,
+  uploadSessions,
+  remoteUsage,
+  backupAllBusy,
   onClose,
   onAddToCanvas,
   onChooseFiles,
   onRemove,
   onCleanup,
+  onBackup,
+  onPauseBackup,
+  onBackupAll,
 }: AssetLibraryProps) {
   const [confirmAssetId, setConfirmAssetId] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -40,6 +64,7 @@ export function AssetLibrary({
   if (!open) return null;
   const confirmAsset = assets.find((asset) => asset.id === confirmAssetId);
   const unusedCount = assets.filter((asset) => (referenceCounts[asset.id] ?? 0) === 0).length;
+  const pendingBackupCount = assets.filter((asset) => !["completed", "reused"].includes(uploadSessions[asset.id]?.status ?? "")).length;
   return (
     <aside className="asset-library" aria-label="项目资产库">
       <header>
@@ -58,10 +83,24 @@ export function AssetLibrary({
           }}>清理未使用 {unusedCount}</button>
         </div>
       )}
+      <div className="remote-backup-summary" aria-label="本地假远端备份">
+        <div>
+          <span>本地假远端 · {remoteUsage?.objectCount ?? 0} 个对象</span>
+          <span>{remoteUsage ? `占用 ${formatAssetBytes(remoteUsage.storedBytes)} · 0 次外网请求` : "正在读取备份状态"}</span>
+        </div>
+        <button disabled={!pendingBackupCount || backupAllBusy} onClick={() => void onBackupAll()}>
+          {backupAllBusy ? "备份中…" : `备份未同步 ${pendingBackupCount}`}
+        </button>
+      </div>
       {(error || removeError) && <p className="asset-error" role="alert">{removeError || error}</p>}
       {!assets.length && <p className="asset-empty">导入后的原文件保存在浏览器资产库中，画布文档只记录 assetId。</p>}
       <div className="asset-grid">
-        {assets.map((asset) => (
+        {assets.map((asset) => {
+          const session = uploadSessions[asset.id];
+          const transferActive = ["queued", "hashing", "uploading"].includes(session?.status ?? "");
+          const transferFinished = ["completed", "reused"].includes(session?.status ?? "");
+          const locallyProtected = (referenceCounts[asset.id] ?? 0) > 0;
+          return (
           <article key={asset.id} className="asset-card">
             <div className="asset-thumb">
               {previewUrls[asset.id]
@@ -70,18 +109,29 @@ export function AssetLibrary({
               <em>{asset.purpose === "mask" ? "蒙版" : asset.kind === "video" ? "视频" : "图片"}</em>
             </div>
             <strong title={asset.originalName}>{asset.originalName}</strong>
-            <small>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "尺寸未知"} · {formatAssetBytes(asset.byteSize)}</small>
+            <small>
+              <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "尺寸未知"} · {formatAssetBytes(asset.byteSize)}</span>
+              <span className={`remote-state state-${session?.status ?? "local"}`}>
+                {session?.status === "failed" ? `备份失败：${session.error ?? "可重试"}` : uploadLabel(session)}
+              </span>
+            </small>
             <div className="asset-card-actions">
               <button onClick={() => onAddToCanvas(asset)}>添加到画布</button>
               <button
+                className="backup"
+                disabled={transferFinished}
+                onClick={() => transferActive ? onPauseBackup(asset.id) : void onBackup(asset)}
+              >{uploadLabel(session)}</button>
+              <button
                 className="remove"
-                disabled={(referenceCounts[asset.id] ?? 0) > 0}
-                title={(referenceCounts[asset.id] ?? 0) > 0 ? "先删除画布节点或引用该蒙版的约束快照" : "移除本地原文件和预览"}
+                disabled={locallyProtected || transferActive}
+                title={locallyProtected ? "先删除画布节点或引用该蒙版的约束快照" : transferActive ? "请先暂停当前备份" : "移除本地原文件和预览"}
                 onClick={() => setConfirmAssetId(asset.id)}
-              >{(referenceCounts[asset.id] ?? 0) > 0 ? `使用中 ${referenceCounts[asset.id]}` : "移除"}</button>
+              >{locallyProtected ? `使用中 ${referenceCounts[asset.id]}` : transferActive ? "备份中" : "移除"}</button>
             </div>
           </article>
-        ))}
+          );
+        })}
       </div>
       {confirmAsset && (
         <section className="asset-remove-confirm" role="alertdialog" aria-label="确认移除资产">

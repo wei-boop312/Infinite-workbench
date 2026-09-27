@@ -4,7 +4,7 @@ test("真实鼠标可拖动节点，500 节点按视口裁剪，假任务不访�
   const externalRequests: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") externalRequests.push(request.url());
+    if (["http:", "https:"].includes(url.protocol) && url.hostname !== "127.0.0.1" && url.hostname !== "localhost") externalRequests.push(request.url());
   });
 
   await page.goto("/");
@@ -275,6 +275,35 @@ test("在底图上绘制蒙版并把蒙版版本写入约束快照", async ({ pa
   await page.getByRole("button", { name: "资产库 2" }).click();
   const maskCard = page.getByRole("complementary", { name: "项目资产库" }).locator(".asset-card").filter({ hasText: "蒙版" });
   await expect(maskCard.getByRole("button", { name: "使用中 1" })).toBeDisabled();
+});
+
+test("本地假远端可分片备份并跨项目复用同一内容", async ({ page }) => {
+  const externalRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (["http:", "https:"].includes(url.protocol) && url.hostname !== "127.0.0.1" && url.hostname !== "localhost") externalRequests.push(request.url());
+  });
+  await page.goto("/");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "backup-source.png", mimeType: "image/png", buffer: png });
+  const library = page.getByRole("complementary", { name: "项目资产库" });
+  const firstCard = library.locator(".asset-card").filter({ hasText: "backup-source.png" });
+  await firstCard.getByRole("button", { name: "备份", exact: true }).click();
+  await expect(firstCard.getByRole("button", { name: "已备份" })).toBeDisabled();
+  await expect(library.getByLabel("本地假远端备份")).toContainText("1 个对象");
+  await expect(library.getByLabel("本地假远端备份")).toContainText("0 次外网请求");
+
+  await page.getByLabel("切换项目").selectOption("phase-1-campaign");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "backup-copy.png", mimeType: "image/png", buffer: png });
+  const reusedCard = library.locator(".asset-card").filter({ hasText: "backup-copy.png" });
+  await reusedCard.getByRole("button", { name: "备份", exact: true }).click();
+  await expect(reusedCard.getByRole("button", { name: "已复用" })).toBeDisabled();
+  await expect(library.getByLabel("本地假远端备份")).toContainText("1 个对象");
+  expect(externalRequests).toEqual([]);
+
+  await page.reload();
+  await page.getByRole("button", { name: "资产库 1" }).click();
+  await expect(page.getByRole("complementary", { name: "项目资产库" }).getByRole("button", { name: "已复用" })).toBeDisabled();
 });
 
 test("项目包可导出并作为独立副本完整导入", async ({ page }) => {

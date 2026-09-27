@@ -72,6 +72,12 @@ import {
   registerImportedProject,
   type ImportedProject,
 } from "./projects/projectRegistry";
+import { mockObjectStorage } from "./storage/mockObjectStorage";
+import {
+  ResumableUploadManager,
+  type RemoteStorageUsage,
+  type UploadSession,
+} from "./storage/objectStorage";
 
 const KIND_LABEL: Record<StudioKind, string> = {
   image: "图片资产",
@@ -153,6 +159,7 @@ const BUILT_IN_PROJECTS = [
   { documentId: "phase-1-campaign", projectId: "project-campaign", label: "活动套图工作台" },
 ] as const;
 const ACTIVE_DOCUMENT_KEY = "ai-commerce-canvas.active-document";
+const uploadManager = new ResumableUploadManager(mockObjectStorage);
 
 type SaveState = "loading" | "dirty" | "saving" | "saved" | "conflict" | "error";
 
@@ -182,6 +189,9 @@ function CanvasKernel() {
   const [assetError, setAssetError] = useState("");
   const [assetUsage, setAssetUsage] = useState<AssetUsage | null>(null);
   const [storageQuota, setStorageQuota] = useState<number | null>(null);
+  const [uploadSessions, setUploadSessions] = useState<Record<string, UploadSession>>({});
+  const [remoteUsage, setRemoteUsage] = useState<RemoteStorageUsage | null>(null);
+  const [backupAllBusy, setBackupAllBusy] = useState(false);
   const [constraintSnapshots, setConstraintSnapshots] = useState<ConstraintSnapshot[]>([]);
   const [pendingMaskAssetIds, setPendingMaskAssetIds] = useState<Set<string>>(() => new Set());
   const [pendingProjectPackage, setPendingProjectPackage] = useState<PortableProject | null>(null);
@@ -190,6 +200,8 @@ function CanvasKernel() {
   const clipboardRef = useRef<CanvasSnapshot | null>(null);
   const assetInputRef = useRef<HTMLInputElement>(null);
   const packageInputRef = useRef<HTMLInputElement>(null);
+  const uploadControllersRef = useRef(new Map<string, AbortController>());
+  const activeProjectIdRef = useRef("");
   const lastSavedFingerprint = useRef("");
   const currentRef = useRef({ snapshot: history.present, viewport, revision: savedRevision });
   const repository = useMemo(() => new LocalCanvasRepository(documentId), [documentId]);
@@ -200,6 +212,7 @@ function CanvasKernel() {
 
   const { nodes, edges } = history.present;
   currentRef.current = { snapshot: history.present, viewport, revision: savedRevision };
+  activeProjectIdRef.current = projectId;
 
   useEffect(() => {
     localStorage.setItem(ACTIVE_DOCUMENT_KEY, documentId);
@@ -239,6 +252,33 @@ function CanvasKernel() {
   useEffect(() => {
     setConstraintSnapshots(constraintRepository.list(projectId));
     setPendingMaskAssetIds(new Set());
+  }, [projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    for (const controller of uploadControllersRef.current.values()) controller.abort();
+    uploadControllersRef.current.clear();
+    setUploadSessions({});
+    setBackupAllBusy(false);
+    void Promise.all([
+      mockObjectStorage.listSessions(projectId),
+      mockObjectStorage.usage(),
+    ]).then(async ([sessions, usage]) => {
+      if (cancelled) return;
+      const normalized = await Promise.all(sessions.map((session) => ["queued", "hashing", "uploading"].includes(session.status)
+        ? mockObjectStorage.setStatus(session.id, "paused")
+        : Promise.resolve(session)));
+      if (cancelled) return;
+      setUploadSessions(Object.fromEntries(normalized.map((session) => [session.assetId, session])));
+      setRemoteUsage(usage);
+    }).catch(() => {
+      if (!cancelled) setRemoteUsage(null);
+    });
+    return () => {
+      cancelled = true;
+      for (const controller of uploadControllersRef.current.values()) controller.abort();
+      uploadControllersRef.current.clear();
+    };
   }, [projectId]);
 
   useEffect(() => {
@@ -453,6 +493,119 @@ function CanvasKernel() {
     setLastAction(`已创建不可变蒙版资产 ${mask.id.slice(-8)}；保存约束快照后才会进入任务输入`);
     return mask;
   }, [projectId]);
+
+  const backupAsset = useCallback(async (asset: Asset) => {
+    if (uploadControllersRef.current.has(asset.id)) return;
+    const blob = await assetRepository.getBlob(asset.id, "original");
+    if (!blob) {
+      setLastAction(`无法备份 ${asset.originalName}：本地原文件不存在`);
+      return;
+    }
+    if (activeProjectIdRef.current !== asset.projectId) return;
+    const controller = new AbortController();
+    uploadControllersRef.current.set(asset.id, controller);
+    const now = new Date().toISOString();
+    setUploadSessions((current) => current[asset.id] ? current : {
+      ...current,
+      [asset.id]: {
+        id: `pending-${asset.id}`,
+        projectId: asset.projectId,
+        assetId: asset.id,
+        fingerprint: asset.contentFingerprint ?? "",
+        mimeType: asset.mimeType,
+        totalBytes: blob.size,
+        chunkSize: 4 * 1024 * 1024,
+        totalParts: Math.ceil(blob.size / (4 * 1024 * 1024)),
+        uploadedParts: [],
+        uploadedBytes: 0,
+        status: asset.contentFingerprint ? "queued" : "hashing",
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    try {
+      const result = await uploadManager.upload(asset, blob, {
+        signal: controller.signal,
+        onHashProgress: (processedBytes, totalBytes) => {
+          if (activeProjectIdRef.current !== asset.projectId) return;
+          setUploadSessions((current) => ({
+            ...current,
+            [asset.id]: {
+              ...(current[asset.id] ?? {
+                id: `pending-${asset.id}`,
+                projectId: asset.projectId,
+                assetId: asset.id,
+                fingerprint: "",
+                mimeType: asset.mimeType,
+                chunkSize: 4 * 1024 * 1024,
+                totalParts: Math.ceil(totalBytes / (4 * 1024 * 1024)),
+                uploadedParts: [],
+                createdAt: now,
+              }),
+              totalBytes,
+              uploadedBytes: processedBytes,
+              status: "hashing",
+              updatedAt: new Date().toISOString(),
+            },
+          }));
+        },
+        onProgress: (session) => {
+          if (activeProjectIdRef.current !== asset.projectId) return;
+          setUploadSessions((current) => ({ ...current, [asset.id]: session }));
+        },
+      });
+      if (activeProjectIdRef.current === asset.projectId) {
+        setLastAction(result.status === "reused"
+          ? `假远端已复用相同内容：${asset.originalName}，未重复写入对象`
+          : result.status === "paused"
+            ? `已暂停 ${asset.originalName}，完成的分片会在继续时复用`
+            : `已完成 ${asset.originalName} 的分片备份；0 次外网请求`);
+      }
+    } catch (error) {
+      if (activeProjectIdRef.current !== asset.projectId) return;
+      const message = error instanceof Error ? error.message : "分片备份失败";
+      if (controller.signal.aborted) {
+        setUploadSessions((current) => ({
+          ...current,
+          [asset.id]: { ...current[asset.id], status: "paused", error: undefined, updatedAt: new Date().toISOString() },
+        }));
+        setLastAction(`已暂停 ${asset.originalName}；如仍在内容校验阶段，继续时会重新校验`);
+      } else {
+        setUploadSessions((current) => ({
+          ...current,
+          [asset.id]: current[asset.id]
+            ? { ...current[asset.id], status: "failed", error: message, updatedAt: new Date().toISOString() }
+            : current[asset.id],
+        }));
+        setLastAction(`备份失败：${message}；已完成分片不会丢失，可直接重试`);
+      }
+    } finally {
+      uploadControllersRef.current.delete(asset.id);
+      try {
+        const usage = await mockObjectStorage.usage();
+        if (activeProjectIdRef.current === asset.projectId) setRemoteUsage(usage);
+      } catch {
+        // 备份结果已持久化；配额摘要可在下次打开资产库时恢复。
+      }
+    }
+  }, []);
+
+  const pauseAssetBackup = useCallback((assetId: string) => {
+    uploadControllersRef.current.get(assetId)?.abort();
+  }, []);
+
+  const backupAllAssets = useCallback(async () => {
+    setBackupAllBusy(true);
+    try {
+      for (const asset of assets) {
+        const status = uploadSessions[asset.id]?.status;
+        if (status === "completed" || status === "reused") continue;
+        await backupAsset(asset);
+      }
+    } finally {
+      setBackupAllBusy(false);
+    }
+  }, [assets, backupAsset, uploadSessions]);
 
   const selectedClosure = useCallback(() => {
     const selectedIds = new Set(nodes.filter((node) => node.selected).map((node) => node.id));
@@ -953,11 +1106,17 @@ function CanvasKernel() {
           referenceCounts={assetReferenceCounts}
           usage={assetUsage}
           storageQuota={storageQuota}
+          uploadSessions={uploadSessions}
+          remoteUsage={remoteUsage}
+          backupAllBusy={backupAllBusy}
           onClose={() => setAssetLibraryOpen(false)}
           onChooseFiles={() => assetInputRef.current?.click()}
           onAddToCanvas={addAssetToCanvas}
           onRemove={removeAsset}
           onCleanup={cleanupUnusedAssets}
+          onBackup={backupAsset}
+          onPauseBackup={pauseAssetBackup}
+          onBackupAll={backupAllAssets}
         />
 
         {selectedText && (
