@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   CanvasDocumentSchema,
   LineageEdgeSchema,
+  ObjectStorageGrantSchema,
+  ObjectStorageGrantRequestSchema,
   ProviderConnectionSchema,
 } from "./index";
 
@@ -55,6 +57,51 @@ describe("阶段 0 数据合同", () => {
       apiKey: "should-not-be-here",
       capabilities: ["image-generate"],
       enabled: true,
+    })).toThrow();
+  });
+
+  it("对象存储上传签名必须绑定项目、资产、大小和完整摘要", () => {
+    expect(ObjectStorageGrantRequestSchema.parse({
+      action: "upload",
+      projectId: "project-1",
+      assetId: "asset-1",
+      mimeType: "image/png",
+      byteSize: 4,
+      checksumSha256: `sha256:${"a".repeat(64)}`,
+    })).toMatchObject({ action: "upload", byteSize: 4 });
+    expect(() => ObjectStorageGrantRequestSchema.parse({
+      action: "upload",
+      projectId: "project-1",
+      assetId: "asset-1",
+      mimeType: "image/png",
+      byteSize: 4,
+    })).toThrow();
+  });
+
+  it("下载签名不接受客户端伪造上传元数据", () => {
+    expect(() => ObjectStorageGrantRequestSchema.parse({
+      action: "download",
+      projectId: "project-1",
+      assetId: "asset-1",
+      objectKey: "tenants/t-1/projects/project-1/assets/asset-1/object",
+      byteSize: 1,
+    })).toThrow();
+  });
+
+  it("上传和下载凭证的方法不能互换", () => {
+    expect(() => ObjectStorageGrantSchema.parse({
+      grantId: "grant-1",
+      action: "upload",
+      method: "GET",
+      tenantId: "tenant-1",
+      projectId: "project-1",
+      assetId: "asset-1",
+      objectKey: "tenants/tenant-1/projects/project-1/assets/asset-1/object",
+      transferPath: "/v1/storage/transfers/grant.signature",
+      expiresAt: "2026-09-27T00:00:00+08:00",
+      maxBytes: 1,
+      requiredHeaders: {},
+      singleUse: true,
     })).toThrow();
   });
 });

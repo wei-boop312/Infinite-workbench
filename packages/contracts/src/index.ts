@@ -95,6 +95,47 @@ export const AssetSchema = z.object({
   createdAt: IsoDateSchema,
 }).strict();
 
+export const ObjectStoragePermissionSchema = z.enum(["asset:read", "asset:write"]);
+
+const UploadObjectGrantRequestSchema = z.object({
+  action: z.literal("upload"),
+  projectId: IdSchema,
+  assetId: IdSchema,
+  mimeType: z.string().regex(/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i),
+  byteSize: z.number().int().nonnegative(),
+  checksumSha256: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+}).strict();
+
+const DownloadObjectGrantRequestSchema = z.object({
+  action: z.literal("download"),
+  projectId: IdSchema,
+  assetId: IdSchema,
+  objectKey: z.string().trim().min(1).max(1024),
+}).strict();
+
+export const ObjectStorageGrantRequestSchema = z.discriminatedUnion("action", [
+  UploadObjectGrantRequestSchema,
+  DownloadObjectGrantRequestSchema,
+]);
+
+const ObjectStorageGrantBaseSchema = z.object({
+  grantId: IdSchema,
+  tenantId: IdSchema,
+  projectId: IdSchema,
+  assetId: IdSchema,
+  objectKey: z.string().trim().min(1).max(1024),
+  transferPath: z.string().startsWith("/v1/storage/transfers/"),
+  expiresAt: IsoDateSchema,
+  maxBytes: z.number().int().nonnegative(),
+  requiredHeaders: z.record(z.string(), z.string()),
+  singleUse: z.literal(true),
+}).strict();
+
+export const ObjectStorageGrantSchema = z.discriminatedUnion("action", [
+  ObjectStorageGrantBaseSchema.extend({ action: z.literal("upload"), method: z.literal("PUT") }).strict(),
+  ObjectStorageGrantBaseSchema.extend({ action: z.literal("download"), method: z.literal("GET") }).strict(),
+]);
+
 export const ConstraintSnapshotSchema = z.object({
   id: IdSchema,
   projectId: IdSchema,
@@ -196,6 +237,9 @@ export const MockRunResultSchema = z.object({
 
 export type CanvasDocument = z.infer<typeof CanvasDocumentSchema>;
 export type Asset = z.infer<typeof AssetSchema>;
+export type ObjectStoragePermission = z.infer<typeof ObjectStoragePermissionSchema>;
+export type ObjectStorageGrantRequest = z.infer<typeof ObjectStorageGrantRequestSchema>;
+export type ObjectStorageGrant = z.infer<typeof ObjectStorageGrantSchema>;
 export type ConstraintSnapshot = z.infer<typeof ConstraintSnapshotSchema>;
 export type RunBatch = z.infer<typeof RunBatchSchema>;
 export type RunJob = z.infer<typeof RunJobSchema>;

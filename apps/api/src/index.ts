@@ -1,13 +1,19 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { MockRunRequestSchema } from "@canvas/contracts";
+import { MockRunRequestSchema, ObjectStorageGrantRequestSchema } from "@canvas/contracts";
 import type { CanvasDocument } from "@canvas/contracts";
 import { migrateCanvasDocument } from "@canvas/canvas-schema";
 import { executeMockRun } from "@canvas/testing";
+import { ObjectStorageGatewayError, type SignedObjectGateway } from "./objectStorageGateway";
 
 const MAX_RUN_BODY_BYTES = 64 * 1024;
 const MAX_CANVAS_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_STORAGE_GRANT_BODY_BYTES = 16 * 1024;
+
+export type ApiServerOptions = {
+  objectStorageGateway?: SignedObjectGateway;
+};
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, {
@@ -37,16 +43,86 @@ function parseExpectedRevision(value: string | undefined): number | null {
   return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
 }
 
-export function createApiServer() {
+export function createApiServer(options: ApiServerOptions = {}) {
   const documents = new Map<string, CanvasDocument>();
 
   return createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/health") {
-      sendJson(response, 200, { ok: true, mode: "phase-2", realExecutorsEnabled: false });
+      sendJson(response, 200, {
+        ok: true,
+        mode: "phase-2",
+        realExecutorsEnabled: false,
+        objectStorageSigningEnabled: Boolean(options.objectStorageGateway),
+      });
       return;
     }
 
     const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    if (pathname === "/v1/storage/grants" && request.method === "POST") {
+      const gateway = options.objectStorageGateway;
+      if (!gateway) {
+        sendJson(response, 503, { error: "storage_signing_not_configured" });
+        return;
+      }
+      const principal = gateway.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "storage_authentication_required" });
+        return;
+      }
+      try {
+        const input = ObjectStorageGrantRequestSchema.parse(await readJson(request, MAX_STORAGE_GRANT_BODY_BYTES));
+        sendJson(response, 201, gateway.issueGrant(principal, input));
+      } catch (error) {
+        if (error instanceof ObjectStorageGatewayError) {
+          sendJson(response, error.status, { error: error.code });
+          return;
+        }
+        const code = error instanceof Error && error.message === "REQUEST_TOO_LARGE" ? 413 : 400;
+        sendJson(response, code, { error: code === 413 ? "request_too_large" : "invalid_storage_grant_request" });
+      }
+      return;
+    }
+
+    const transferMatch = pathname.match(/^\/v1\/storage\/transfers\/([^/]+)$/);
+    if (transferMatch) {
+      const gateway = options.objectStorageGateway;
+      if (!gateway) {
+        sendJson(response, 503, { error: "storage_signing_not_configured" });
+        return;
+      }
+      try {
+        const token = decodeURIComponent(transferMatch[1]);
+        if (request.method === "PUT") {
+          const object = await gateway.upload(token, request);
+          response.setHeader("x-object-key", object.objectKey);
+          response.setHeader("x-content-sha256", object.checksumSha256);
+          response.writeHead(201, { "cache-control": "no-store", "x-content-type-options": "nosniff" });
+          response.end();
+          return;
+        }
+        if (request.method === "GET") {
+          const object = gateway.download(token);
+          response.writeHead(200, {
+            "content-type": object.mimeType,
+            "content-length": String(object.body.byteLength),
+            "x-content-sha256": object.checksumSha256,
+            "cache-control": "private, no-store",
+            "x-content-type-options": "nosniff",
+          });
+          response.end(object.body);
+          return;
+        }
+        sendJson(response, 405, { error: "storage_transfer_method_not_allowed" });
+      } catch (error) {
+        if (error instanceof ObjectStorageGatewayError) {
+          sendJson(response, error.status, { error: error.code });
+        } else {
+          sendJson(response, 400, { error: "invalid_storage_transfer" });
+        }
+      }
+      return;
+    }
+
     const canvasMatch = pathname.match(/^\/v1\/canvases\/([^/]+)$/);
     if (canvasMatch) {
       const documentId = decodeURIComponent(canvasMatch[1]);
