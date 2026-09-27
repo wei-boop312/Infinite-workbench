@@ -156,12 +156,18 @@ export const ConstraintSnapshotSchema = z.object({
 
 export const RunBatchSchema = z.object({
   id: IdSchema,
+  tenantId: IdSchema,
   projectId: IdSchema,
   constraintSnapshotId: IdSchema,
+  tool: z.literal("product-retouch"),
+  adapterId: IdSchema,
+  inputAssetIds: z.array(IdSchema).min(1).max(20),
+  idempotencyKey: IdSchema,
   status: z.enum(["draft", "awaiting_confirmation", "queued", "running", "partial", "succeeded", "failed", "cancelled"]),
   expectedOutputs: z.number().int().positive(),
+  estimatedCostMinor: z.number().int().nonnegative(),
   maxCostMinor: z.number().int().nonnegative(),
-  currency: z.string().length(3),
+  currency: z.string().regex(/^[A-Z]{3}$/),
   confirmedBy: IdSchema.optional(),
   confirmedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
@@ -203,15 +209,68 @@ export const McpConnectionSchema = z.object({
 
 export const CostLedgerSchema = z.object({
   id: IdSchema,
+  tenantId: IdSchema,
   projectId: IdSchema,
   batchId: IdSchema,
   jobId: IdSchema.optional(),
-  currency: z.string().length(3),
+  currency: z.string().regex(/^[A-Z]{3}$/),
   estimatedMinor: z.number().int().nonnegative(),
   reservedMinor: z.number().int().nonnegative(),
   actualMinor: z.number().int().nonnegative().optional(),
-  settlement: z.enum(["reserved", "settled", "released", "unknown"]),
+  settlement: z.enum(["estimated", "reserved", "settled", "released", "unknown"]),
   createdAt: IsoDateSchema,
+}).strict();
+
+export const CreateRunBatchRequestSchema = z.object({
+  projectId: IdSchema,
+  constraintSnapshotId: IdSchema,
+  tool: z.literal("product-retouch"),
+  inputAssetIds: z.array(IdSchema).min(1).max(20).refine((items) => new Set(items).size === items.length, "输入资产不能重复"),
+  expectedOutputs: z.number().int().min(1).max(20),
+  maxCostMinor: z.number().int().nonnegative(),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  idempotencyKey: IdSchema,
+}).strict();
+
+export const ConfirmRunBatchRequestSchema = z.object({
+  expectedEstimatedCostMinor: z.number().int().nonnegative(),
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/),
+}).strict();
+
+export const RunAuditEventSchema = z.object({
+  id: IdSchema,
+  tenantId: IdSchema,
+  projectId: IdSchema,
+  batchId: IdSchema,
+  actorId: IdSchema,
+  eventType: z.enum([
+    "batch-created",
+    "confirmation-rejected",
+    "batch-confirmed",
+    "budget-reserved",
+    "jobs-created",
+    "batch-cancelled",
+    "budget-released",
+  ]),
+  metadata: z.record(z.string(), z.string()),
+  createdAt: IsoDateSchema,
+}).strict();
+
+export const ProjectBudgetSnapshotSchema = z.object({
+  tenantId: IdSchema,
+  projectId: IdSchema,
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  limitMinor: z.number().int().nonnegative(),
+  reservedMinor: z.number().int().nonnegative(),
+  spentMinor: z.number().int().nonnegative(),
+  availableMinor: z.number().int().nonnegative(),
+}).strict();
+
+export const RunBatchAggregateSchema = z.object({
+  batch: RunBatchSchema,
+  jobs: z.array(RunJobSchema),
+  ledger: z.array(CostLedgerSchema),
+  audit: z.array(RunAuditEventSchema),
 }).strict();
 
 export const MockRunRequestSchema = z.object({
@@ -243,6 +302,11 @@ export type ObjectStorageGrant = z.infer<typeof ObjectStorageGrantSchema>;
 export type ConstraintSnapshot = z.infer<typeof ConstraintSnapshotSchema>;
 export type RunBatch = z.infer<typeof RunBatchSchema>;
 export type RunJob = z.infer<typeof RunJobSchema>;
+export type CreateRunBatchRequest = z.infer<typeof CreateRunBatchRequestSchema>;
+export type ConfirmRunBatchRequest = z.infer<typeof ConfirmRunBatchRequestSchema>;
+export type RunAuditEvent = z.infer<typeof RunAuditEventSchema>;
+export type ProjectBudgetSnapshot = z.infer<typeof ProjectBudgetSnapshotSchema>;
+export type RunBatchAggregate = z.infer<typeof RunBatchAggregateSchema>;
 export type ProviderConnection = z.infer<typeof ProviderConnectionSchema>;
 export type McpConnection = z.infer<typeof McpConnectionSchema>;
 export type CostLedger = z.infer<typeof CostLedgerSchema>;

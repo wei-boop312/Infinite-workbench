@@ -1,11 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { MockRunRequestSchema, ObjectStorageGrantRequestSchema } from "@canvas/contracts";
+import {
+  ConfirmRunBatchRequestSchema,
+  CreateRunBatchRequestSchema,
+  MockRunRequestSchema,
+  ObjectStorageGrantRequestSchema,
+} from "@canvas/contracts";
 import type { CanvasDocument } from "@canvas/contracts";
 import { migrateCanvasDocument } from "@canvas/canvas-schema";
 import { executeMockRun } from "@canvas/testing";
 import { ObjectStorageGatewayError, type SignedObjectGateway } from "./objectStorageGateway";
+import { RunKernelError, type RunKernelPort } from "./runKernel";
 
 const MAX_RUN_BODY_BYTES = 64 * 1024;
 const MAX_CANVAS_BODY_BYTES = 2 * 1024 * 1024;
@@ -13,6 +19,7 @@ const MAX_STORAGE_GRANT_BODY_BYTES = 16 * 1024;
 
 export type ApiServerOptions = {
   objectStorageGateway?: SignedObjectGateway;
+  runKernel?: RunKernelPort;
 };
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -50,14 +57,114 @@ export function createApiServer(options: ApiServerOptions = {}) {
     if (request.method === "GET" && request.url === "/health") {
       sendJson(response, 200, {
         ok: true,
-        mode: "phase-2",
+        mode: "phase-3",
         realExecutorsEnabled: false,
         objectStorageSigningEnabled: Boolean(options.objectStorageGateway),
+        runKernelEnabled: Boolean(options.runKernel),
       });
       return;
     }
 
     const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    if (pathname === "/v1/run-batches" && request.method === "POST") {
+      const kernel = options.runKernel;
+      if (!kernel) {
+        sendJson(response, 503, { error: "run_kernel_not_configured" });
+        return;
+      }
+      const principal = kernel.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "run_authentication_required" });
+        return;
+      }
+      try {
+        const input = CreateRunBatchRequestSchema.parse(await readJson(request, MAX_RUN_BODY_BYTES));
+        sendJson(response, 201, kernel.createBatch(principal, input));
+      } catch (error) {
+        if (error instanceof RunKernelError) {
+          sendJson(response, error.status, { error: error.code });
+          return;
+        }
+        const code = error instanceof Error && error.message === "REQUEST_TOO_LARGE" ? 413 : 400;
+        sendJson(response, code, { error: code === 413 ? "request_too_large" : "invalid_run_batch_request" });
+      }
+      return;
+    }
+
+    const runActionMatch = pathname.match(/^\/v1\/run-batches\/([^/]+)\/(confirm|cancel)$/);
+    if (runActionMatch && request.method === "POST") {
+      const kernel = options.runKernel;
+      if (!kernel) {
+        sendJson(response, 503, { error: "run_kernel_not_configured" });
+        return;
+      }
+      const principal = kernel.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "run_authentication_required" });
+        return;
+      }
+      try {
+        const batchId = decodeURIComponent(runActionMatch[1]);
+        const action = runActionMatch[2];
+        if (action === "confirm") {
+          const confirmation = ConfirmRunBatchRequestSchema.parse(await readJson(request, MAX_RUN_BODY_BYTES));
+          sendJson(response, 200, kernel.confirmBatch(principal, batchId, confirmation));
+        } else {
+          sendJson(response, 200, kernel.cancelBatch(principal, batchId));
+        }
+      } catch (error) {
+        if (error instanceof RunKernelError) {
+          sendJson(response, error.status, { error: error.code });
+          return;
+        }
+        const code = error instanceof Error && error.message === "REQUEST_TOO_LARGE" ? 413 : 400;
+        sendJson(response, code, { error: code === 413 ? "request_too_large" : "invalid_run_batch_action" });
+      }
+      return;
+    }
+
+    const runBatchMatch = pathname.match(/^\/v1\/run-batches\/([^/]+)$/);
+    if (runBatchMatch && request.method === "GET") {
+      const kernel = options.runKernel;
+      if (!kernel) {
+        sendJson(response, 503, { error: "run_kernel_not_configured" });
+        return;
+      }
+      const principal = kernel.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "run_authentication_required" });
+        return;
+      }
+      try {
+        sendJson(response, 200, kernel.getBatch(principal, decodeURIComponent(runBatchMatch[1])));
+      } catch (error) {
+        if (error instanceof RunKernelError) sendJson(response, error.status, { error: error.code });
+        else sendJson(response, 400, { error: "invalid_run_batch_request" });
+      }
+      return;
+    }
+
+    const projectBudgetMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/budget$/);
+    if (projectBudgetMatch && request.method === "GET") {
+      const kernel = options.runKernel;
+      if (!kernel) {
+        sendJson(response, 503, { error: "run_kernel_not_configured" });
+        return;
+      }
+      const principal = kernel.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "run_authentication_required" });
+        return;
+      }
+      try {
+        sendJson(response, 200, kernel.getBudget(principal, decodeURIComponent(projectBudgetMatch[1])));
+      } catch (error) {
+        if (error instanceof RunKernelError) sendJson(response, error.status, { error: error.code });
+        else sendJson(response, 400, { error: "invalid_budget_request" });
+      }
+      return;
+    }
+
     if (pathname === "/v1/storage/grants" && request.method === "POST") {
       const gateway = options.objectStorageGateway;
       if (!gateway) {
@@ -189,6 +296,6 @@ const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(resolve
 if (isDirectRun) {
   const port = Number(process.env.PORT ?? 4100);
   createApiServer().listen(port, "127.0.0.1", () => {
-    console.log(`Phase 2 API listening on http://127.0.0.1:${port}`);
+    console.log(`Phase 3 API listening on http://127.0.0.1:${port}`);
   });
 }
