@@ -111,7 +111,7 @@ export class LocalVerifiedAssets implements VerifiedAssetPort {
           if (replay.checksumSha256 !== actualChecksum || replay.registeredMetadataSha256 !== metadataHash) reject("verified_asset_version_conflict", "资产版本冲突", 409);
           return this.requireImage(principal.tenantId, projectId, assetId);
         }
-        if (this.options.stateStore.verifiedImageBytes(principal.tenantId, projectId) + bytes > (this.options.maxProjectBytes ?? 512 * 1024 * 1024)) {
+        if (this.options.stateStore.localImageBinaryBytes(principal.tenantId, projectId) + bytes > (this.options.maxProjectBytes ?? 512 * 1024 * 1024)) {
           reject("verified_asset_project_quota", "项目图片镜像空间不足", 413);
         }
         let sourceChecksumSha256: string | undefined;

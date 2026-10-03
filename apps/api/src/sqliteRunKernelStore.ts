@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { GeneratedImageRecordSchema, ImagePreparationRecordSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
@@ -38,7 +38,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
       this.transaction(() => {
         const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version);
-        if (![0, 1, 2, 3, 4].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
+        if (![0, 1, 2, 3, 4, 5].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
         this.database.exec(`CREATE TABLE IF NOT EXISTS kernel_state (
           kind TEXT PRIMARY KEY CHECK (kind IN ('runs', 'catalog')),
           revision INTEGER NOT NULL CHECK (revision > 0),
@@ -85,7 +85,16 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
           tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, id TEXT NOT NULL, action_key TEXT NOT NULL,
           PRIMARY KEY (tenant_id, project_id, id), UNIQUE (tenant_id, project_id, action_key)
         ) STRICT;
-        PRAGMA user_version = 4`);
+        CREATE TABLE IF NOT EXISTS image_fixture_responses (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, job_id TEXT NOT NULL,
+          record TEXT NOT NULL, record_sha256 TEXT NOT NULL, body BLOB NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, job_id)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS image_fixture_response_presence (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, job_id TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, job_id)
+        ) STRICT;
+        PRAGMA user_version = 5`);
       });
     } catch (error) {
       this.database.close();
@@ -268,8 +277,38 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     return Number(this.database.prepare("SELECT COUNT(*) AS count FROM image_preparation_presence WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.count ?? 0);
   }
   imageMetadataBytes(tenantId: string, projectId: string): number {
-    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
-      .get(tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
+    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
+      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
+  }
+  imageFixtureResponseBytes(tenantId: string, projectId: string): number {
+    return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);
+  }
+  localImageBinaryBytes(tenantId: string, projectId: string): number {
+    return this.verifiedImageBytes(tenantId, projectId) + this.imageFixtureResponseBytes(tenantId, projectId);
+  }
+  loadImageFixtureResponse(tenantId: string, projectId: string, jobId: string): { record: Extract<ImageFixtureResult, { kind: "returned" }>; body: Buffer } | null {
+    try {
+      const row = this.database.prepare("SELECT record, record_sha256, length(body) AS body_bytes FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ? AND job_id = ?").get(tenantId, projectId, jobId);
+      const marker = this.database.prepare("SELECT job_id FROM image_fixture_response_presence WHERE tenant_id = ? AND project_id = ? AND job_id = ?").get(tenantId, projectId, jobId);
+      if (!row && !marker) return null;
+      if (!row || !marker || typeof row.body_bytes !== "number" || row.body_bytes < 0 || row.body_bytes > 32 * 1024 * 1024) throw new Error("图片响应证据缺失或超限");
+      const record = ImageFixtureResultSchema.parse(this.readImageMetadata(row));
+      const bytes = this.database.prepare("SELECT body FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ? AND job_id = ?").get(tenantId, projectId, jobId)?.body;
+      if (!(bytes instanceof Uint8Array)) throw new Error("图片响应正文缺失");
+      const body = Buffer.from(bytes);
+      if (record.kind !== "returned" || record.outcome.tenantId !== tenantId || record.outcome.projectId !== projectId || record.outcome.jobId !== jobId
+        || body.byteLength !== record.bodyByteSize || createHash("sha256").update(body).digest("hex") !== record.bodyChecksumSha256) throw new Error("图片响应归属或正文损坏");
+      return { record, body };
+    } catch (error) { throw databaseError(error); }
+  }
+  saveImageFixtureResponse(incoming: ImageFixtureResult, body: Buffer): void {
+    if (this.depth === 0) throw new Error("必须在事务中保存图片响应");
+    const record = ImageFixtureResultSchema.parse(incoming);
+    if (record.kind !== "returned" || body.byteLength !== record.bodyByteSize || createHash("sha256").update(body).digest("hex") !== record.bodyChecksumSha256) throw new Error("图片响应提交不一致");
+    const payload = this.imageMetadataPayload(record), { tenantId, projectId, jobId } = record.outcome;
+    this.database.prepare("INSERT INTO image_fixture_responses(tenant_id, project_id, job_id, record, record_sha256, body) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(tenantId, projectId, jobId, payload, createHash("sha256").update(payload).digest("hex"), body);
+    this.database.prepare("INSERT INTO image_fixture_response_presence(tenant_id, project_id, job_id) VALUES (?, ?, ?)").run(tenantId, projectId, jobId);
   }
   private imageMetadataPayload(value: unknown): string {
     const payload = JSON.stringify(value);

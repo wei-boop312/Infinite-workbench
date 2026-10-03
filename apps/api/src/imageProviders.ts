@@ -13,6 +13,7 @@ import { prepareOpenAiImageRequest } from "./openaiImageProtocol";
 import { prepareCompatibleImageRequest } from "./compatibleImageProtocol";
 import { prepareGoogleImageRequest } from "./googleImageProtocol";
 import type { TrustedImageBytes } from "./imageRequestPayload";
+import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 
 // Fail fast instead of accumulating unbounded decoded inputs in this process.
 // This is not a cross-process resource limit or an untrusted-code sandbox.
@@ -253,9 +254,7 @@ export class LocalImageProviders {
   private now(): string { return new Date((this.options.clock ?? Date.now)()).toISOString(); }
   private checkMetadataQuota(tenantId: string, projectId: string, record: unknown) {
     const size = Buffer.byteLength(JSON.stringify(record), "utf8");
-    const executionBytes = (this.options.stateStore.load()?.batches ?? []).filter((item) => item.aggregate.batch.tenantId === tenantId && item.aggregate.batch.projectId === projectId)
-      .reduce((total, item) => total + (item.imageExecution ? Buffer.byteLength(JSON.stringify(item.imageExecution), "utf8") : 0)
-        + (item.imageDispatchIntent ? Buffer.byteLength(JSON.stringify(item.imageDispatchIntent), "utf8") : 0), 0);
+    const executionBytes = imageTaskMetadataBytes(this.options.stateStore.load(), tenantId, projectId);
     if (size > 512 * 1024 || this.options.stateStore.imageMetadataBytes(tenantId, projectId) + executionBytes + size > (this.options.maxMetadataBytes ?? 16 * 1024 * 1024)) reject("image_metadata_quota", 413);
   }
   private database<T>(action: () => T): T {

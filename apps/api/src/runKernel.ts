@@ -8,6 +8,8 @@ import {
   ClaimRunJobsRequestSchema,
   ExecuteRunJobRequestSchema,
   ImageDispatchIntentSchema,
+  ImageFixtureAttemptSchema, ImageFixtureResultSchema,
+  type ImageFixtureAttempt, type ImageFixtureResult,
   type ImageDispatchIntent,
   type ConfirmedImageExecution,
   type ConfirmRunBatchRequest,
@@ -113,6 +115,10 @@ type StoredBatch = {
   imageExecution?: ConfirmedImageExecution;
   imageDispatchIntent?: ImageDispatchIntent;
   imageDispatchIntentFingerprint?: string;
+  imageFixtureAttempt?: ImageFixtureAttempt;
+  imageFixtureAttemptFingerprint?: string;
+  imageFixtureResult?: ImageFixtureResult;
+  imageFixtureResultFingerprint?: string;
   requestFingerprint: string;
   reservedMinor: number;
   actualMinor: number;
@@ -129,7 +135,7 @@ export type RunKernelOptions = {
   validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
-  validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent) => undefined;
+  validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent, additionalMetadataBytes?: number) => undefined;
   unitEstimateMinor?: number;
   unitActualMinor?: number;
   maxConcurrentJobs?: number;
@@ -763,6 +769,49 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.copy(stored.aggregate);
   }
 
+  // INTERNAL only. Called by the first-start continuation, never by a replay.
+  beginImageFixtureAttempt(principal: RunPrincipal, jobId: string, lease: ExecuteRunJobRequest, prepared: {
+    body: Buffer; contentType: string; requestFingerprint: string; payloadChecksumSha256: string; transformedInputs: ConfirmedImageExecution["transformedInputs"];
+  }): ImageFixtureAttempt {
+    lease = ExecuteRunJobRequestSchema.parse(lease);
+    const { stored, job } = this.findJob(principal, jobId), execution = this.requireImageExecution(stored), intent = stored.imageDispatchIntent;
+    this.assertAllowed(principal, execution.request.projectId, "run:execute");
+    if (!intent || intent.actorId !== principal.actorId || intent.workerId !== lease.workerId || intent.leaseId !== lease.leaseId) throw new RunKernelError(409, "run_job_lease_mismatch", "本地传输没有对应首次启动租约");
+    if (stored.imageFixtureAttempt || stored.imageFixtureResult) throw new RunKernelError(409, "image_fixture_already_attempted", "本地传输不能重复尝试");
+    if (job.status !== "running" || !job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= this.clock()) throw new RunKernelError(409, "run_job_not_leased", "本地传输租约已失效");
+    if (!Buffer.isBuffer(prepared.body) || prepared.body.byteLength !== execution.payloadByteSize || prepared.contentType !== execution.contentType
+      || prepared.requestFingerprint !== execution.requestFingerprint || prepared.payloadChecksumSha256 !== execution.payloadChecksumSha256
+      || createHash("sha256").update(prepared.body).digest("hex") !== execution.payloadChecksumSha256
+      || imageSnapshotFingerprint(prepared.transformedInputs) !== imageSnapshotFingerprint(execution.transformedInputs)) throw new RunKernelError(409, "image_dispatch_payload_mismatch", "本地发送字节与确认不一致");
+    this.validateImageTask(principal, stored);
+    const attempt = ImageFixtureAttemptSchema.parse({ schemaVersion: 1, mode: "local-fixture", transport: "local-fixture", status: "attempted",
+      id: `fixture-attempt-${randomUUID()}`, jobId, batchId: job.batchId, intentId: intent.id, actorId: principal.actorId, workerId: lease.workerId, leaseId: lease.leaseId,
+      executionFingerprint: stored.requestFingerprint, payloadChecksumSha256: execution.payloadChecksumSha256, attemptedAt: new Date(this.clock()).toISOString() });
+    this.validateImageTask(principal, stored, undefined, Buffer.byteLength(JSON.stringify(attempt)));
+    if (Date.parse(job.leaseExpiresAt) <= this.clock()) throw new RunKernelError(409, "run_job_not_leased", "本地传输最终核验时租约到期");
+    stored.imageFixtureAttempt = attempt; stored.imageFixtureAttemptFingerprint = imageSnapshotFingerprint(attempt);
+    stored.aggregate.audit.push(this.audit(stored.aggregate.batch, principal.actorId, "image-fixture-attempted", { jobId, attemptId: attempt.id, intentId: intent.id }));
+    this.assertStateConsistent(); this.persist(); return ImageFixtureAttemptSchema.parse(attempt);
+  }
+
+  recordImageFixtureResult(principal: RunPrincipal, jobId: string, incoming: ImageFixtureResult): RunBatchAggregate {
+    const result = ImageFixtureResultSchema.parse(incoming), { stored, job } = this.findJob(principal, jobId), execution = this.requireImageExecution(stored), attempt = stored.imageFixtureAttempt;
+    this.assertAllowed(principal, execution.request.projectId, "run:execute");
+    if (!attempt || attempt.actorId !== principal.actorId || result.attemptId !== attempt.id || result.outcome.jobId !== jobId) throw new RunKernelError(409, "image_fixture_attempt_mismatch", "响应缺少对应本地传输证据");
+    if (stored.imageFixtureResult) {
+      if (imageSnapshotFingerprint(result) !== stored.imageFixtureResultFingerprint) throw new RunKernelError(409, "image_fixture_result_conflict", "本地响应证据不可覆盖");
+      return this.copy(stored.aggregate);
+    }
+    stored.imageFixtureResult = result; stored.imageFixtureResultFingerprint = imageSnapshotFingerprint(result);
+    stored.aggregate.audit.push(this.audit(stored.aggregate.batch, principal.actorId, result.kind === "returned" ? "image-fixture-returned" : "image-fixture-interrupted", { jobId, attemptId: attempt.id, resultId: result.id }));
+    if (job.status === "running") this.finishJob(stored, job, "billing-unknown", principal.actorId, result.outcome.failureCode ?? "image-artifact-not-yet-validated");
+    if (result.outcome.providerRequestId) {
+      const current = stored.aggregate.jobs.find((item) => item.id === jobId)!;
+      this.replaceJob(stored.aggregate, { ...current, providerRequestId: result.outcome.providerRequestId });
+    }
+    this.refreshBatchStatus(stored); this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
+  }
+
   dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
     const workerId = `compat-${createHash("sha256").update(`${principal.tenantId}:${principal.actorId}`).digest("hex")}`;
     const claim = this.claimBatch(principal, batchId, { workerId, maxJobs: this.maxConcurrentJobs });
@@ -1142,6 +1191,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         imageExecution: serialized.imageExecution,
         imageDispatchIntent: serialized.imageDispatchIntent,
         imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
+        imageFixtureAttempt: serialized.imageFixtureAttempt, imageFixtureAttemptFingerprint: serialized.imageFixtureAttemptFingerprint,
+        imageFixtureResult: serialized.imageFixtureResult, imageFixtureResultFingerprint: serialized.imageFixtureResultFingerprint,
         requestFingerprint: serialized.requestFingerprint,
         reservedMinor: serialized.reservedMinor,
         actualMinor: serialized.actualMinor,
@@ -1215,6 +1266,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         aggregate: this.copy(stored.aggregate),
         ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
         ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
+        ...(stored.imageFixtureAttempt ? { imageFixtureAttempt: stored.imageFixtureAttempt, imageFixtureAttemptFingerprint: stored.imageFixtureAttemptFingerprint } : {}),
+        ...(stored.imageFixtureResult ? { imageFixtureResult: stored.imageFixtureResult, imageFixtureResultFingerprint: stored.imageFixtureResultFingerprint } : {}),
         requestFingerprint: stored.requestFingerprint,
         reservedMinor: stored.reservedMinor,
         actualMinor: stored.actualMinor,
@@ -1235,7 +1288,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
+        if (stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
+          || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else {
         const execution = stored.imageExecution;
         if (!execution) throw new Error("图片任务缺少服务端确认快照");
@@ -1260,6 +1314,7 @@ export class InMemoryRunKernel implements RunKernelPort {
           throw new Error("图片任务确认、预留或关闭执行闸门不一致");
         }
         this.assertImageIntent(stored, execution, job);
+        this.assertImageFixtureEvidence(stored, execution, job);
       }
       const jobsById = new Map(jobs.map((job) => [job.id, job]));
       if (jobsById.size !== jobs.length) throw new Error("任务内核快照中的任务编号重复");
@@ -1617,11 +1672,11 @@ export class InMemoryRunKernel implements RunKernelPort {
     if (typeof this.options.validateImageTask !== "function") throw new RunKernelError(503, "image_lease_policy_not_configured", "尚未配置可信图片租约政策");
     return stored.imageExecution;
   }
-  private validateImageTask(principal: RunPrincipal, stored: StoredBatch, intent?: ImageDispatchIntent): void {
+  private validateImageTask(principal: RunPrincipal, stored: StoredBatch, intent?: ImageDispatchIntent, additionalMetadataBytes = 0): void {
     const execution = this.requireImageExecution(stored);
     try {
       validateImageProviderRequest(execution.preparation.connection, execution.request, new Date(this.clock()).toISOString());
-      if (this.options.validateImageTask!(principal, ConfirmedImageExecutionSchema.parse(execution), intent ? ImageDispatchIntentSchema.parse(intent) : undefined) !== undefined) {
+      if (this.options.validateImageTask!(principal, ConfirmedImageExecutionSchema.parse(execution), intent ? ImageDispatchIntentSchema.parse(intent) : undefined, additionalMetadataBytes) !== undefined) {
         throw new RunKernelError(403, "image_lease_policy_invalid", "图片租约政策必须同步确认权威状态");
       }
       validateImageProviderRequest(execution.preparation.connection, execution.request, new Date(this.clock()).toISOString());
@@ -1649,6 +1704,27 @@ export class InMemoryRunKernel implements RunKernelPort {
       || !stored.aggregate.audit.some((event) => event.eventType === "job-started" && event.actorId === intent.actorId && event.metadata.imageDispatchIntentId === intent.id
         && event.metadata.jobId === job.id && event.metadata.leaseId === intent.leaseId && event.metadata.workerId === intent.workerId
         && event.metadata.payloadChecksumSha256 === intent.payloadChecksumSha256 && event.metadata.transport === "not-connected")) throw new Error("图片派发意图、租约或审计不一致");
+  }
+  private assertImageFixtureEvidence(stored: StoredBatch, execution: ConfirmedImageExecution, job: RunJob): void {
+    const intent = stored.imageDispatchIntent, attempt = stored.imageFixtureAttempt, result = stored.imageFixtureResult;
+    if (!attempt) {
+      if (stored.imageFixtureAttemptFingerprint || result || stored.imageFixtureResultFingerprint) throw new Error("图片本地响应缺少传输尝试");
+      return;
+    }
+    if (!intent || stored.imageFixtureAttemptFingerprint !== imageSnapshotFingerprint(attempt) || attempt.intentId !== intent.id
+      || attempt.actorId !== intent.actorId || attempt.workerId !== intent.workerId || attempt.leaseId !== intent.leaseId || attempt.jobId !== job.id || attempt.batchId !== job.batchId
+      || attempt.executionFingerprint !== stored.requestFingerprint || attempt.payloadChecksumSha256 !== execution.payloadChecksumSha256
+      || Date.parse(attempt.attemptedAt) < Date.parse(intent.recordedAt) || Date.parse(attempt.attemptedAt) >= Date.parse(job.leaseExpiresAt!)
+      || Date.parse(attempt.attemptedAt) >= Date.parse(execution.request.quote.expiresAt)
+      || !stored.aggregate.audit.some((event) => event.eventType === "image-fixture-attempted" && event.actorId === attempt.actorId && event.metadata.jobId === job.id && event.metadata.attemptId === attempt.id && event.metadata.intentId === intent.id)) throw new Error("图片本地传输证据错配");
+    if (!result) { if (stored.imageFixtureResultFingerprint) throw new Error("图片响应摘要孤立"); return; }
+    const outcome = result.outcome;
+    if (stored.imageFixtureResultFingerprint !== imageSnapshotFingerprint(result) || result.attemptId !== attempt.id || Date.parse(result.receivedAt) < Date.parse(attempt.attemptedAt)
+      || outcome.tenantId !== execution.request.tenantId || outcome.projectId !== execution.request.projectId || outcome.jobId !== job.id || outcome.connectionId !== execution.request.connectionId
+      || outcome.requestFingerprint !== execution.requestFingerprint || outcome.billing.state !== "unknown" || job.providerRequestId !== outcome.providerRequestId
+      || !["billing_unknown", "failed"].includes(job.status)
+      || (result.kind === "interrupted" && (outcome.providerStatus !== "unknown" || outcome.artifactStatus !== "absent" || outcome.failureCode !== result.failureCode))
+      || !stored.aggregate.audit.some((event) => event.eventType === `image-fixture-${result.kind}` && event.actorId === attempt.actorId && event.metadata.jobId === job.id && event.metadata.attemptId === attempt.id && event.metadata.resultId === result.id)) throw new Error("图片本地响应证据错配");
   }
   private assertFrozenImageExecution(input: ConfirmedImageExecution): void {
     const execution = ConfirmedImageExecutionSchema.parse(input);

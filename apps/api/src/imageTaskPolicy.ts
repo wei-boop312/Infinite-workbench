@@ -4,6 +4,7 @@ import { imageSnapshotFingerprint } from "./imageProviderContract";
 import { validateLocalImageAssetPolicy } from "./imageAssetPolicy";
 import { RunKernelError, type RunKernelOptions } from "./runKernel";
 import type { SqliteRunKernelStateStore } from "./sqliteRunKernelStore";
+import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 
 // A trusted synchronous validator, not an authorization flag supplied by clients.
 // Uses the same transaction store as the task kernel; does not resolve secrets.
@@ -14,7 +15,7 @@ export function createImageTaskValidator(options: {
 }): NonNullable<RunKernelOptions["validateImageTask"]> {
   const quota = options.maxMetadataBytes ?? 16 * 1024 * 1024;
   if (!Number.isSafeInteger(quota) || quota < 0 || quota > 16 * 1024 * 1024) throw new Error("图片任务元数据额度无效");
-  return (principal, execution, intent) => options.stateStore.transaction(() => {
+  return (principal, execution, intent, additionalMetadataBytes = 0) => options.stateStore.transaction(() => {
     const { request, preparation } = execution;
     if (principal.tenantId !== options.tenantId || request.tenantId !== principal.tenantId
       || !options.providerAuthorizer.allows(principal, request.projectId, "provider:read")
@@ -27,13 +28,11 @@ export function createImageTaskValidator(options: {
       .filter((item) => item.connection.id === request.connectionId).at(-1)?.connection;
     if (!current || imageSnapshotFingerprint(current) !== imageSnapshotFingerprint(preparation.connection)) throw new RunKernelError(409, "image_connection_changed", "图片连接需要重新确认");
     validateLocalImageAssetPolicy(options.stateStore, request);
-    if (intent) {
+    if (intent || additionalMetadataBytes) {
       const snapshot = options.stateStore.load();
-      const size = Buffer.byteLength(JSON.stringify(intent), "utf8");
-      const existing = (snapshot?.batches ?? []).filter((item) => item.aggregate.batch.tenantId === principal.tenantId && item.aggregate.batch.projectId === request.projectId)
-        .reduce((total, item) => total + (item.imageExecution ? Buffer.byteLength(JSON.stringify(item.imageExecution), "utf8") : 0)
-          + (item.imageDispatchIntent ? Buffer.byteLength(JSON.stringify(item.imageDispatchIntent), "utf8") : 0), 0);
-      if (size > 512 * 1024 || existing + size + options.stateStore.imageMetadataBytes(principal.tenantId, request.projectId) > quota) {
+      const size = (intent ? Buffer.byteLength(JSON.stringify(intent), "utf8") : 0) + additionalMetadataBytes;
+      const existing = imageTaskMetadataBytes(snapshot, principal.tenantId, request.projectId);
+      if (!Number.isSafeInteger(size) || size < 0 || size > 512 * 1024 || existing + size + options.stateStore.imageMetadataBytes(principal.tenantId, request.projectId) > quota) {
         throw new RunKernelError(413, "image_metadata_quota", "图片任务元数据额度不足，未留下派发意图");
       }
     }

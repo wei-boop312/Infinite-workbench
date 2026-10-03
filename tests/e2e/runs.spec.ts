@@ -52,6 +52,23 @@ test("浏览器目录不自动添加模型，准备入口拒绝伪报价且不�
   expect(external).toEqual([]);
 });
 
+test("浏览器没有本地假传输或原始响应入口，伪尝试不预留预算", async ({ page }) => {
+  const panel = await prepare(page);
+  const created = page.waitForResponse((reply) => reply.url().endsWith("/studio-api/v1/run-batches") && reply.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const checks = await page.evaluate(async ({ projectId }) => {
+    const headers = { "x-canvas-local": "1", "content-type": "application/json" }, base = `/studio-api/v1/projects/${encodeURIComponent(projectId)}`;
+    const before = await (await fetch(`${base}/budget`, { headers })).json();
+    const attempt = await fetch("/studio-api/v1/run-jobs/client-self-reported/fixture-execute", { method: "POST", headers, body: JSON.stringify({ confirmed: true, transport: "local-fixture" }) });
+    const raw = await fetch("/studio-api/v1/run-jobs/client-self-reported/fixture-response", { headers });
+    const health = await (await fetch("/studio-api/health", { headers })).json();
+    return { before, after: await (await fetch(`${base}/budget`, { headers })).json(), statuses: [attempt.status, raw.status], health };
+  }, { projectId: batch.batch.projectId });
+  expect(checks.statuses).toEqual([404, 404]); expect(checks.after).toEqual(checks.before); expect(checks.after).toMatchObject({ reservedMinor: 0, spentMinor: 0 });
+  expect(checks.health).toMatchObject({ realExecutorsEnabled: false });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
+});
+
 test("图片确认入口拒绝自报授权/任务/发送摘要，不预留预算", async ({ page }) => {
   const panel = await prepare(page);
   const created = page.waitForResponse((response) => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");

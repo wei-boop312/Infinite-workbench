@@ -2,6 +2,8 @@
 
 日期：2026-10-04（上海）。状态：**5B2B1 本地验收完成**。这是 5B2B 的有限第一步，不是整个 5B2B 或里程碑 5 完成。没有供应商请求、响应、产物授权、资产回流或生产 Worker。
 
+后续更新：5B2B2A 已加入显式本地假传输、写前尝试及原始响应/任务未知账本原子保存，见 `image-fixture-execution.md`。本文件下文保留 5B2B1 的原验收边界；not-connected 意图不被改写，新独立证据也未接通 5A 产物授权。
+
 ## 权威租约边界
 
 统一任务内核增加仅服务端内部的 claimImageBatch、inspectImageLease、startImageJob、reconcileImageBatch。必须显式配置同步可信 validateImageTask；缺失则失败关闭。LocalImageTaskLeases 与 SqliteRunKernel 必须共用同一个事务存储实例。
@@ -42,9 +44,9 @@ createImageTaskValidator 从本机数据库重新核对原准备单完整摘要�
 
 测试仅用自有临时 SQLite 和独立 4173 工作台状态；未写用户状态目录或强制重启 5173。没有读密钥、付费请求、推送、部署或账号变更。
 
-## 下一步 5B2B2
+## 后续 5B2B2A / 当前下一步 5B2B2B
 
-在现有派发意图上加入显式本地假响应传输及持久化发送/响应证据。只允许首次有效启动触发一次，崩溃/重复不得盲目重发；不能将 not-connected 意图改名为已发送。
+5B2B2A 已在现有意图上加入显式假传输及持久化尝试/原始响应。仅活的首次启动续接调用一次；attempted 不保证已送达，not-connected 意图保持不变，崩溃/重复不盲目重发。默认桥接和新 HTTP 路由仍未开放，详见 `image-fixture-execution.md`。
 
 再以实际服务端任务、运行租约、完整确认及发送/响应证据实现 5A 必填 authorizeCommit，目前仍只有测试夹具。将完整候选验证/真实 BLOB/收据/谱系与任务产物状态在同一事务中原子且可恢复地绑定；好图、坏图、保存失败分别保留产物与未知费用证据，不能释放未知扣费预留。不接受客户端自报授权或 queued/意图状态作为入库许可。
 

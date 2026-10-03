@@ -103,7 +103,7 @@ export class LocalGeneratedImages {
       return this.database(() => this.options.stateStore.transaction(() => {
         const current = preflight();
         if (current.existing) return current.existing;
-        if (this.options.stateStore.verifiedImageBytes(request.tenantId, request.projectId) + body.byteLength > (this.options.maxProjectBytes ?? 512 * 1024 * 1024)) reject("image_output_project_quota", 413);
+        if (this.options.stateStore.localImageBinaryBytes(request.tenantId, request.projectId) + body.byteLength > (this.options.maxProjectBytes ?? 512 * 1024 * 1024)) reject("image_output_project_quota", 413);
         if (current.project.assets.length >= 10_000) reject("image_output_catalog_full", 413);
         const assetId = `generated-${randomUUID()}`;
         const at = new Date((this.options.clock ?? Date.now)()).toISOString();

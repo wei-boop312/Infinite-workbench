@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { ImageFixtureResultSchema, type ImageFixtureResult } from "@canvas/contracts";
 import { InMemoryRunKernel, RunKernelError, type ProjectBudgetConfig, type RunKernelOptions, type RunKernelPort, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
@@ -17,6 +18,28 @@ export class SqliteRunKernel implements RunKernelPort {
   startImageJob: InMemoryRunKernel["startImageJob"] = (...args) => this.run((kernel) => kernel.startImageJob(...args));
   inspectImageLease: InMemoryRunKernel["inspectImageLease"] = (...args) => this.run((kernel) => kernel.inspectImageLease(...args));
   reconcileImageBatch: InMemoryRunKernel["reconcileImageBatch"] = (...args) => this.run((kernel) => kernel.reconcileImageBatch(...args));
+  beginImageFixtureAttempt: InMemoryRunKernel["beginImageFixtureAttempt"] = (...args) => this.run((kernel) => kernel.beginImageFixtureAttempt(...args));
+  // Returned evidence cannot commit without its raw body, even if another
+  // trusted server caller forgets the executor's outer transaction.
+  recordImageFixtureResult(principal: RunPrincipal, jobId: string, incoming: ImageFixtureResult, body?: Buffer) {
+    const result = ImageFixtureResultSchema.parse(incoming);
+    if (result.kind === "returned" && !Buffer.isBuffer(body)) throw new RunKernelError(409, "image_fixture_response_body_required", "返回证据必须与原始正文一同保存");
+    return this.options.stateStore.transaction(() => {
+      const aggregate = this.run((kernel) => {
+        const value = kernel.recordImageFixtureResult(principal, jobId, result);
+        if (result.kind === "returned") {
+          const { tenantId, projectId } = result.outcome;
+          const existing = this.options.stateStore.loadImageFixtureResponse(tenantId, projectId, jobId);
+          if (existing) {
+            if (JSON.stringify(existing.record) !== JSON.stringify(result) || !existing.body.equals(body!)) throw new RunKernelError(409, "image_fixture_result_conflict", "原始响应证据不可覆盖");
+          } else this.options.stateStore.saveImageFixtureResponse(result, body!);
+        }
+        return value;
+      });
+      this.getBatch(principal, aggregate.batch.id);
+      return aggregate;
+    });
+  }
   getBatch: RunKernelPort["getBatch"] = (...args) => this.run((kernel) => kernel.getBatch(...args));
   listBatches: RunKernelPort["listBatches"] = (...args) => this.run((kernel) => kernel.listBatches(...args));
   confirmBatch: RunKernelPort["confirmBatch"] = (...args) => this.run((kernel) => kernel.confirmBatch(...args));
@@ -46,6 +69,12 @@ export class SqliteRunKernel implements RunKernelPort {
             maxStartsPerWindow: limit.maxStartsPerWindow ?? null, windowMs: limit.windowMs ?? null })).sort((a, b) => a.adapterId.localeCompare(b.adapterId)),
         });
         let snapshot = this.options.stateStore.load();
+        for (const stored of snapshot?.batches ?? []) {
+          const batch = stored.aggregate.batch, result = stored.imageFixtureResult;
+          if (!stored.imageFixtureAttempt && !result) continue;
+          const response = this.options.stateStore.loadImageFixtureResponse(batch.tenantId, batch.projectId, stored.aggregate.jobs[0].id);
+          if (result?.kind === "returned" ? !response || JSON.stringify(response.record) !== JSON.stringify(result) : response !== null) throw new Error("本地响应正文与任务证据不一致");
+        }
         if (!snapshot) {
           snapshot = { schemaVersion: 1, savedAt: new Date((this.options.clock ?? Date.now)()).toISOString(),
             budgets: this.options.budgets.map((budget) => ({ ...budget, reservedMinor: 0, spentMinor: 0 })), batches: [] };

@@ -257,6 +257,26 @@ export const ImageDispatchIntentSchema = z.object({
 }).strict();
 export type ImageDispatchIntent = z.infer<typeof ImageDispatchIntentSchema>;
 
+// Server-only append-only evidence. "attempted" is not delivered/accepted.
+export const ImageFixtureAttemptSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.literal("local-fixture"), transport: z.literal("local-fixture"), status: z.literal("attempted"),
+  id: IdSchema, jobId: IdSchema, batchId: IdSchema, intentId: IdSchema, actorId: IdSchema, workerId: IdSchema, leaseId: IdSchema,
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/), payloadChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/), attemptedAt: IsoDateSchema,
+}).strict();
+export type ImageFixtureAttempt = z.infer<typeof ImageFixtureAttemptSchema>;
+const ImageFixtureResultBaseSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.literal("local-fixture"), id: IdSchema, attemptId: IdSchema, receivedAt: IsoDateSchema,
+  outcome: ImageProviderOutcomeSchema,
+}).strict();
+export const ImageFixtureResultSchema = z.discriminatedUnion("kind", [
+  ImageFixtureResultBaseSchema.extend({ kind: z.literal("returned"), status: z.number().int().min(100).max(599),
+    contentType: z.string().min(1).max(256).regex(/^[\x20-\x7e]+$/), requestId: IdSchema.optional(),
+    bodyChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/), bodyByteSize: z.number().int().nonnegative().max(32 * 1024 * 1024),
+  }).strict(),
+  ImageFixtureResultBaseSchema.extend({ kind: z.literal("interrupted"), failureCode: z.enum(["fixture-timeout", "fixture-transport-error", "fixture-response-invalid", "fixture-response-save-failed"]) }).strict(),
+]);
+export type ImageFixtureResult = z.infer<typeof ImageFixtureResultSchema>;
+
 // Immutable server output/provenance, never a client-submitted verification.
 export const GeneratedImageRecordSchema = z.object({
   schemaVersion: z.literal(1),
@@ -500,6 +520,9 @@ export const RunAuditEventSchema = z.object({
     "job-lease-expired",
     "dispatch-throttled",
     "job-started",
+    "image-fixture-attempted",
+    "image-fixture-returned",
+    "image-fixture-interrupted",
     "job-succeeded",
     "job-failed",
     "job-timed-out",
@@ -581,6 +604,10 @@ export const RunKernelStoredBatchSchema = z.object({
   imageExecution: ConfirmedImageExecutionSchema.optional(),
   imageDispatchIntent: ImageDispatchIntentSchema.optional(),
   imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  imageFixtureAttempt: ImageFixtureAttemptSchema.optional(),
+  imageFixtureAttemptFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  imageFixtureResult: ImageFixtureResultSchema.optional(),
+  imageFixtureResultFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   reservedMinor: z.number().int().nonnegative(),
   actualMinor: z.number().int().nonnegative(),

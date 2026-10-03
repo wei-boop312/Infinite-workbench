@@ -252,7 +252,7 @@ describe("持久化供应商目录与未确认图片准备单（不启动任务�
     const db = new DatabaseSync(fixture.path); db.exec("DROP TABLE image_provider_revisions; DROP TABLE image_provider_heads; DROP TABLE image_preparations; DROP TABLE image_preparation_presence; PRAGMA user_version = 3"); db.close();
     const migrated = setup({ path: fixture.path }); expect(migrated.store.load()).toEqual(before); expect(migrated.store.loadCatalog()).toEqual(catalog); expect(migrated.store.loadVerifiedImage(principal.tenantId, "project-a", "source")).toEqual(image); expect(migrated.service.list(principal, "project-a")).toEqual([]);
     expect(migrated.kernel.getBudget(principal, "project-a")).toMatchObject({ reservedMinor: 25, spentMinor: 0 }); expect(migrated.kernel.getBatch(principal, draft.batch.id).jobs[0].status).toBe("billing_unknown");
-    const future = new DatabaseSync(fixture.path); future.exec("PRAGMA user_version = 5"); future.close(); expect(() => new SqliteRunKernelStateStore(fixture.path)).toThrow(expect.objectContaining({ code: "run_state_unavailable" }));
+    const future = new DatabaseSync(fixture.path); future.exec("PRAGMA user_version = 6"); future.close(); expect(() => new SqliteRunKernelStateStore(fixture.path)).toThrow(expect.objectContaining({ code: "run_state_unavailable" }));
   });
   it("HTTP 默认关闭/拒绝匿名，只读目录和准备操作不开放配置写入或执行", async () => {
     const disabled = await listen(); expect((await call(disabled, "image-providers")).status).toBe(503);
