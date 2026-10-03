@@ -1,6 +1,6 @@
 # 阶段 4 多供应商图片 API 接入计划
 
-日期：2026-10-03。状态：**里程碑 1 合同/闸门及里程碑 2 官方纯协议/本地假响应已验收，尚无任何真实供应商接入验收**。阶段 3 本机零费用验收基线为 `d1c0246`。
+日期：2026-10-03。状态：**里程碑 1 合同/闸门、里程碑 2 官方纯协议、里程碑 3 兼容中转差异已通过本地验收，尚无任何真实供应商接入验收**。阶段 3 本机零费用验收基线为 `d1c0246`。
 
 接入顺序遵循冻结路线图：一个官方图片 API → 一个 OpenAI 兼容中转协议 → 一个非 OpenAI 协议。画布不直接访问这些服务，全部由统一任务、预算、权限与资产层承接。
 
@@ -36,4 +36,4 @@ OpenAI 的 Image API 提供生成和编辑端点；Responses 还可以通过图�
 
 ## 下一次实施入口
 
-先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，然后进入里程碑 3 的兼容中转差异配置及本地假响应。里程碑 1 见 `docs/image-provider-contract.md`，里程碑 2 见 `docs/openai-image-protocol.md`；最新 151 项单元/集成、29 项 Chrome 回归、6 个工作区构建通过。现有 `ProviderConnectionSchema` 只是阶段 0 占位；新严格合同和纯协议模块也不代表真实供应商、生产网络或凭证管理已经验收。
+先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，然后进入里程碑 4 的非 OpenAI 原生协议及本地假响应；优先核对冻结路线图已有 Google 方向的当前官方合同，不选择用户付费模型或费用。里程碑 1 见 `docs/image-provider-contract.md`，里程碑 2 见 `docs/openai-image-protocol.md`，里程碑 3 见 `docs/compatible-image-protocol.md`；最新 167 项单元/集成、29 项 Chrome 回归、6 个工作区构建通过。现有 `ProviderConnectionSchema` 只是阶段 0 占位；新严格合同和纯协议模块也不代表真实供应商、生产网络或凭证管理已经验收。

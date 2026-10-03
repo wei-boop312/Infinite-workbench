@@ -11,6 +11,39 @@ const Format = z.enum(["png", "jpeg", "webp"]);
 const Dimensions = z.object({ width: Edge, height: Edge }).strict();
 const unique = <T>(values: T[]) => new Set(values).size === values.length;
 
+const reservedParameters = new Set(["model", "prompt", "n", "size", "quality", "background", "input_fidelity", "output_format", "output_compression", "image", "images", "mask", "stream", "response_format", "user", "url", "base_url", "headers", "authorization", "api_key", "apikey", "credential", "constructor", "prototype"]);
+const ExtraName = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).refine((value) => !reservedParameters.has(value), "不能覆盖受保护参数");
+const ProviderParameters = z.preprocess((value, context) => {
+  // Zod intentionally ignores prototype-related record keys; reject them before
+  // parsing so they cannot be silently discarded from a confirmation snapshot.
+  if (value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).some((key) => !ExtraName.safeParse(key).success)) {
+    context.addIssue({ code: "custom", message: "额外参数包含受保护或不合法的键" });
+    return z.NEVER;
+  }
+  return value;
+}, z.record(ExtraName, z.union([z.string().min(1).max(120), z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER), z.boolean()]))
+  .refine((value) => Object.keys(value).length <= 16, "额外参数过多"));
+const ExtraBase = { name: ExtraName, operations: z.array(z.enum(["generate", "edit"])).min(1).max(2).refine(unique) };
+export const ImageExtraParameterRuleSchema = z.discriminatedUnion("type", [
+  z.object({ ...ExtraBase, type: z.literal("enum"), values: z.array(z.string().min(1).max(120)).min(1).max(20).refine(unique) }).strict(),
+  z.object({ ...ExtraBase, type: z.literal("integer"), minimum: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER), maximum: z.number().int().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER) }).strict().refine((value) => value.minimum <= value.maximum, "参数区间无效"),
+  z.object({ ...ExtraBase, type: z.literal("boolean") }).strict(),
+]);
+const RelativeEndpoint = z.string().max(160).regex(/^\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/);
+export const ImageCompatibilityProfileSchema = z.object({
+  version: Id,
+  endpoints: z.object({ generate: RelativeEndpoint, edit: RelativeEndpoint }).strict(),
+  editEncoding: z.enum(["json-images", "multipart-image-array", "multipart-image-single"]),
+  auth: z.discriminatedUnion("scheme", [
+    z.object({ scheme: z.literal("bearer") }).strict(),
+    z.object({ scheme: z.literal("header"), headerName: z.enum(["x-api-key", "api-key", "x-access-token"]) }).strict(),
+  ]),
+  // Only the explicitly supported response shape; no scripts/JSONPath/eval.
+  responseEncoding: z.literal("images-b64-json-v1"),
+  extraParameters: z.array(ImageExtraParameterRuleSchema).max(16).refine((rules) => unique(rules.map((rule) => rule.name))),
+}).strict();
+
 export const ImageProtocolSchema = z.enum(["openai", "openai-compatible", "google", "custom"]);
 export const ImageCapabilityEvidenceSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("declared") }).strict(),
@@ -79,13 +112,17 @@ export const ImageProviderConnectionSchema = z.object({
   // Opaque server-side reference only. Never expose it through a public view.
   credentialRef: Id,
   enabled: z.boolean(),
+  compatibility: ImageCompatibilityProfileSchema.optional(),
   models: z.array(ImageModelCapabilitySchema).min(1).max(100),
   diagnostic: z.discriminatedUnion("state", [
     z.object({ state: z.literal("not-run") }).strict(),
     z.object({ state: z.literal("reachable"), evidenceRef: Id, checkedAt: DateTime }).strict(),
     z.object({ state: z.literal("failed"), errorCode: Id, checkedAt: DateTime }).strict(),
   ]),
-}).strict().refine((value) => unique(value.models.map((model) => model.model)), "模型不能重复");
+}).strict().superRefine((value, context) => {
+  if (!unique(value.models.map((model) => model.model))) context.addIssue({ code: "custom", message: "模型不能重复", path: ["models"] });
+  if (value.compatibility && value.protocol !== "openai-compatible") context.addIssue({ code: "custom", message: "兼容差异配置仅适用于中转协议", path: ["compatibility"] });
+});
 
 export const ImageInputReferenceSchema = z.object({
   assetId: Id, checksumSha256: Hash, mimeType: Mime,
@@ -120,6 +157,7 @@ const RequestBase = {
   constraintSnapshotId: Id, constraintChecksumSha256: Hash,
   protection: z.enum(["none", "pixel-exact"]),
   parameters: ImageParametersSchema,
+  providerParameters: ProviderParameters.optional(),
   quote: ImageQuoteSchema,
 };
 export const ImageExecutionRequestSchema = z.discriminatedUnion("operation", [
@@ -156,3 +194,4 @@ export type ImageProviderConnection = z.infer<typeof ImageProviderConnectionSche
 export type ImageModelCapability = z.infer<typeof ImageModelCapabilitySchema>;
 export type ImageExecutionRequest = z.infer<typeof ImageExecutionRequestSchema>;
 export type ImageProviderOutcome = z.infer<typeof ImageProviderOutcomeSchema>;
+export type ImageCompatibilityProfile = z.infer<typeof ImageCompatibilityProfileSchema>;

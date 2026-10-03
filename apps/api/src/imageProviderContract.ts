@@ -39,6 +39,13 @@ export function validateImageProviderRequest(connectionInput: unknown, requestIn
   if (!capability.operations.includes(request.operation)) reject("image_operation_unsupported");
   if (!Number.isFinite(Date.parse(now)) || Date.parse(request.quote.expiresAt) <= Date.parse(now)) reject("image_quote_expired");
   if (request.protection === "pixel-exact") reject("image_pixel_protection_not_configured");
+  for (const [name, value] of Object.entries(request.providerParameters ?? {})) {
+    const rule = connection.protocol === "openai-compatible" ? connection.compatibility?.extraParameters.find((item) => item.name === name) : undefined;
+    if (!rule || !rule.operations.includes(request.operation)) reject("image_extra_parameter_unsupported");
+    if ((rule.type === "enum" && (typeof value !== "string" || !rule.values.includes(value)))
+      || (rule.type === "integer" && (typeof value !== "number" || value < rule.minimum || value > rule.maximum))
+      || (rule.type === "boolean" && typeof value !== "boolean")) reject("image_extra_parameter_invalid");
+  }
 
   const params = request.parameters;
   if (params.prompt.length > capability.maxPromptCharacters) reject("image_prompt_too_long");

@@ -6,11 +6,11 @@ import {
 } from "../../apps/api/src/openaiImageProtocol";
 
 // TEST-ONLY, in-memory transport. This is not the durable worker/idempotency layer.
-export class LocalImageProtocolSession {
+export class LocalImageProtocolSession<TPrepared extends Pick<PreparedImageProtocolRequest, "body" | "requestFingerprint" | "payloadChecksumSha256"> = PreparedImageProtocolRequest> {
   private readonly entries = new Map<string, { fingerprint: string; payloadHash: string; result: Promise<ParsedImageProtocolResponse> }>();
-  constructor(private readonly fixture: (prepared: PreparedImageProtocolRequest, signal: AbortSignal) => Promise<ImageProtocolResponse>, private readonly timeoutMs = 50) {}
+  constructor(private readonly fixture: (prepared: TPrepared, signal: AbortSignal) => Promise<ImageProtocolResponse>, private readonly timeoutMs = 50) {}
 
-  run(request: ImageExecutionRequest, prepared: PreparedImageProtocolRequest): Promise<ParsedImageProtocolResponse> {
+  run(request: ImageExecutionRequest, prepared: TPrepared): Promise<ParsedImageProtocolResponse> {
     if (createHash("sha256").update(prepared.body).digest("hex") !== prepared.payloadChecksumSha256) throw new Error("fixture_payload_changed");
     const key = JSON.stringify([request.tenantId, request.projectId, request.jobId, request.idempotencyKey]);
     const existing = this.entries.get(key);

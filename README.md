@@ -2,7 +2,7 @@
 
 阶段 1 可靠画布内核、阶段 2 资产/约束及存储安全边界、阶段 3 单人本机任务与成本内核的假执行器验收已完成；下一阶段是多供应商图片 API。默认仍只运行假执行器，不连接模型、不读取供应商密钥、不产生费用。阶段 3 验收证据与生产边界见 `docs/phase3-acceptance.md`。
 
-阶段 4 的严格供应商图片合同、默认关闭闸门，以及官方图片纯协议/本地假响应已通过验收，尚未接入真实供应商或画布模型选择界面；边界与证据见 `docs/image-provider-contract.md` 和 `docs/openai-image-protocol.md`，实施顺序见 `docs/phase4-provider-plan.md`。
+阶段 4 的严格供应商图片合同、默认关闭闸门、官方图片纯协议和兼容中转差异/本地假响应已通过验收，尚未接入真实供应商或画布模型选择界面；边界与证据见 `docs/image-provider-contract.md`、`docs/openai-image-protocol.md` 和 `docs/compatible-image-protocol.md`，实施顺序见 `docs/phase4-provider-plan.md`。
 
 ## 目录
 
