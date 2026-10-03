@@ -1,17 +1,15 @@
-import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 import {
-  ImageExecutionRequestSchema, ImageProviderOutcomeSchema, ImageUsageSchema,
+  ImageExecutionRequestSchema, ImageUsageSchema,
   type ImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome,
 } from "@canvas/contracts";
 import { ImageProviderContractError, validateImageProviderRequest } from "./imageProviderContract";
 import { encodeImageJson, imagePayloadSha256, prepareImagePayloadParts, type ImageInputTransform, type TrustedImageBytes } from "./imageRequestPayload";
 export { MAX_IMAGE_PROTOCOL_REQUEST_BYTES } from "./imageRequestPayload";
 export type { TrustedImageBytes } from "./imageRequestPayload";
-
-export const MAX_IMAGE_PROTOCOL_RESPONSE_BYTES = 32 * 1024 * 1024;
-export const MAX_IMAGE_PROTOCOL_OUTPUT_BYTES = 20 * 1024 * 1024;
-const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+import { decodeImageCandidate, imageProtocolOutcome as outcome, MAX_IMAGE_PROTOCOL_RESPONSE_BYTES, type ImageProtocolResponse, type ParsedImageProtocolResponse } from "./imageProtocolResponse";
+export { MAX_IMAGE_PROTOCOL_RESPONSE_BYTES, MAX_IMAGE_PROTOCOL_OUTPUT_BYTES, unknownImageResponse } from "./imageProtocolResponse";
+export type { ImageProtocolResponse, ParsedImageProtocolResponse } from "./imageProtocolResponse";
 function reject(code: string): never { throw new ImageProviderContractError(code); }
 
 export type PreparedImageProtocolRequest = {
@@ -38,16 +36,6 @@ export async function prepareOpenAiImageRequest(connection: ImageProviderConnect
     requestFingerprint: validated.fingerprint, payloadChecksumSha256: imagePayloadSha256(body), transformedInputs: parts.transformedInputs };
 }
 
-export type ImageProtocolResponse = { status: number; contentType: string; requestId?: string; body: Buffer };
-export type ParsedImageProtocolResponse = { outcome: ImageProviderOutcome; candidate?: { body: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp"; checksumSha256: string } };
-
-function outcome(request: ImageExecutionRequest, fingerprint: string, extra: Partial<ImageProviderOutcome>): ImageProviderOutcome {
-  return ImageProviderOutcomeSchema.parse({ schemaVersion: 1, tenantId: request.tenantId, projectId: request.projectId, jobId: request.jobId,
-    connectionId: request.connectionId, requestFingerprint: fingerprint, providerStatus: "unknown", artifactStatus: "absent", usage: { source: "unavailable" }, billing: { state: "unknown" }, ...extra });
-}
-export function unknownImageResponse(request: ImageExecutionRequest, fingerprint: string, failureCode: string): ParsedImageProtocolResponse {
-  return { outcome: outcome(ImageExecutionRequestSchema.parse(request), fingerprint, { failureCode }) };
-}
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const safeInt = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
@@ -80,17 +68,10 @@ export function parseOpenAiImageResponse(input: ImageExecutionRequest, fingerpri
   extra.usage = usage;
   const encoded = json.data[0].b64_json;
   if (typeof encoded !== "string" || !encoded.length) return failed("image_base64_required", "returned");
-  if (encoded.length > 4 * Math.ceil(MAX_IMAGE_PROTOCOL_OUTPUT_BYTES / 3)) return failed("image_output_too_large", "returned", "invalid");
-  // No nested repeating regexp over multi-megabyte untrusted strings.
-  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return failed("image_base64_invalid", "returned", "invalid");
-  const body = Buffer.from(encoded, "base64");
-  if (body.byteLength > MAX_IMAGE_PROTOCOL_OUTPUT_BYTES || body.toString("base64") !== encoded) return failed("image_base64_invalid", "returned", "invalid");
   const format = request.parameters.outputFormat;
   if (json.output_format !== undefined && json.output_format !== format) return failed("image_output_format_changed", "returned", "invalid");
-  const magic = format === "png" ? body.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-    : format === "jpeg" ? body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff
-      : body.toString("ascii", 0, 4) === "RIFF" && body.toString("ascii", 8, 12) === "WEBP";
-  if (!magic) return failed("image_output_magic_invalid", "returned", "invalid");
+  const decoded = decodeImageCandidate(encoded, format);
+  if ("failureCode" in decoded) return failed(decoded.failureCode, "returned", "invalid");
   return { outcome: outcome(request, fingerprint, { ...extra, providerStatus: "returned", artifactStatus: "pending-validation" }),
-    candidate: { body, mimeType: `image/${format}`, checksumSha256: sha256(body) } };
+    candidate: decoded.candidate };
 }

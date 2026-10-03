@@ -44,6 +44,23 @@ export const ImageCompatibilityProfileSchema = z.object({
   extraParameters: z.array(ImageExtraParameterRuleSchema).max(16).refine((rules) => unique(rules.map((rule) => rule.name))),
 }).strict();
 
+// Native GenerateContent, not an OpenAI-compatible URL or arbitrary template.
+const GoogleModel = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/);
+export const GoogleImageProfileSchema = z.object({
+  version: Id,
+  apiVersion: z.literal("v1"),
+  requestEncoding: z.literal("generate-content-response-format-v1"),
+  modelMappings: z.array(z.object({
+    model: GoogleModel,
+    sizes: z.array(z.object({
+      width: Edge, height: Edge,
+      aspectRatio: z.enum(["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "1:4", "4:1", "1:8", "8:1"]),
+      imageSize: z.enum(["512", "1K", "2K", "4K"]),
+    }).strict()).max(100).refine((sizes) => unique(sizes.map((size) => `${size.width}x${size.height}`))
+      && unique(sizes.map((size) => `${size.aspectRatio}/${size.imageSize}`))),
+  }).strict()).min(1).max(100).refine((models) => unique(models.map((model) => model.model))),
+}).strict();
+
 export const ImageProtocolSchema = z.enum(["openai", "openai-compatible", "google", "custom"]);
 export const ImageCapabilityEvidenceSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("declared") }).strict(),
@@ -113,6 +130,7 @@ export const ImageProviderConnectionSchema = z.object({
   credentialRef: Id,
   enabled: z.boolean(),
   compatibility: ImageCompatibilityProfileSchema.optional(),
+  googleNative: GoogleImageProfileSchema.optional(),
   models: z.array(ImageModelCapabilitySchema).min(1).max(100),
   diagnostic: z.discriminatedUnion("state", [
     z.object({ state: z.literal("not-run") }).strict(),
@@ -122,6 +140,9 @@ export const ImageProviderConnectionSchema = z.object({
 }).strict().superRefine((value, context) => {
   if (!unique(value.models.map((model) => model.model))) context.addIssue({ code: "custom", message: "模型不能重复", path: ["models"] });
   if (value.compatibility && value.protocol !== "openai-compatible") context.addIssue({ code: "custom", message: "兼容差异配置仅适用于中转协议", path: ["compatibility"] });
+  if (value.googleNative && (value.protocol !== "google" || value.googleNative.modelMappings.some((mapping) => !value.models.some((model) => model.model === mapping.model)))) {
+    context.addIssue({ code: "custom", message: "Google 原生配置与连接模型不一致", path: ["googleNative"] });
+  }
 });
 
 export const ImageInputReferenceSchema = z.object({
@@ -165,7 +186,8 @@ export const ImageExecutionRequestSchema = z.discriminatedUnion("operation", [
   z.object({ ...RequestBase, operation: z.literal("edit"), inputs: z.array(ImageInputReferenceSchema).min(1).max(20).refine((inputs) => unique(inputs.map((input) => input.assetId))), mask: ImageInputReferenceSchema.optional() }).strict(),
 ]);
 
-const Metrics = z.object({ inputTokens: Integer.optional(), outputTokens: Integer.optional(), totalTokens: Integer.optional(), images: Integer.optional() })
+// Reasoning is not silently folded into outputTokens or converted to money.
+const Metrics = z.object({ inputTokens: Integer.optional(), outputTokens: Integer.optional(), reasoningTokens: Integer.optional(), cachedInputTokens: Integer.optional(), toolInputTokens: Integer.optional(), totalTokens: Integer.optional(), images: Integer.optional() })
   .strict().refine((value) => Object.keys(value).length > 0, "实报用量不能为空");
 export const ImageUsageSchema = z.discriminatedUnion("source", [
   z.object({ source: z.literal("unavailable") }).strict(),
@@ -195,3 +217,4 @@ export type ImageModelCapability = z.infer<typeof ImageModelCapabilitySchema>;
 export type ImageExecutionRequest = z.infer<typeof ImageExecutionRequestSchema>;
 export type ImageProviderOutcome = z.infer<typeof ImageProviderOutcomeSchema>;
 export type ImageCompatibilityProfile = z.infer<typeof ImageCompatibilityProfileSchema>;
+export type GoogleImageProfile = z.infer<typeof GoogleImageProfileSchema>;

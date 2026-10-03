@@ -8,7 +8,8 @@ import {
 // TEST-ONLY, in-memory transport. This is not the durable worker/idempotency layer.
 export class LocalImageProtocolSession<TPrepared extends Pick<PreparedImageProtocolRequest, "body" | "requestFingerprint" | "payloadChecksumSha256"> = PreparedImageProtocolRequest> {
   private readonly entries = new Map<string, { fingerprint: string; payloadHash: string; result: Promise<ParsedImageProtocolResponse> }>();
-  constructor(private readonly fixture: (prepared: TPrepared, signal: AbortSignal) => Promise<ImageProtocolResponse>, private readonly timeoutMs = 50) {}
+  constructor(private readonly fixture: (prepared: TPrepared, signal: AbortSignal) => Promise<ImageProtocolResponse>, private readonly timeoutMs = 50,
+    private readonly parseResponse = parseOpenAiImageResponse) {}
 
   run(request: ImageExecutionRequest, prepared: TPrepared): Promise<ParsedImageProtocolResponse> {
     if (createHash("sha256").update(prepared.body).digest("hex") !== prepared.payloadChecksumSha256) throw new Error("fixture_payload_changed");
@@ -24,7 +25,7 @@ export class LocalImageProtocolSession<TPrepared extends Pick<PreparedImageProto
         controller.abort(); resolve(unknownImageResponse(request, prepared.requestFingerprint, "image_response_timeout"));
       }, this.timeoutMs);
       Promise.resolve().then(() => this.fixture(prepared, controller.signal)).then(
-        (response) => { clearTimeout(timer); if (!controller.signal.aborted) resolve(parseOpenAiImageResponse(request, prepared.requestFingerprint, response)); },
+        (response) => { clearTimeout(timer); if (!controller.signal.aborted) resolve(this.parseResponse(request, prepared.requestFingerprint, response)); },
         () => { clearTimeout(timer); resolve(unknownImageResponse(request, prepared.requestFingerprint, "image_transport_uncertain")); },
       ).catch(() => { clearTimeout(timer); resolve(unknownImageResponse(request, prepared.requestFingerprint, "image_response_unparseable")); });
     });
