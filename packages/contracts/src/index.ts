@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export * from "./imageProviders.ts";
+
 export const CURRENT_CANVAS_SCHEMA_VERSION = 2 as const;
 
 const IdSchema = z.string().trim().min(1).max(160);

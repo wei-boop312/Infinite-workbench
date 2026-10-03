@@ -67,6 +67,7 @@ export function createApiServer(options: ApiServerOptions = {}) {
         ok: true,
         mode: "phase-3",
         realExecutorsEnabled: false,
+        imageProviderMode: "contracts-only",
         objectStorageSigningEnabled: Boolean(options.objectStorageGateway),
         runKernelEnabled: Boolean(options.runKernel),
         assetVerificationEnabled: Boolean(options.verifiedAssets),

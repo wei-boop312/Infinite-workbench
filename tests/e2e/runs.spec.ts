@@ -16,6 +16,20 @@ async function prepare(page: Page) {
   return panel;
 }
 
+test("图片供应商处于合同阶段，真实执行闸门在浏览器访问后仍关闭", async ({ page }) => {
+  const external: string[] = [];
+  page.on("request", (request) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(request.url())) external.push(request.url()); });
+  const panel = await prepare(page);
+  const health = await page.evaluate(async () => {
+    const response = await fetch("/studio-api/health", { headers: { "x-canvas-local": "1" } });
+    return { status: response.status, cacheControl: response.headers.get("cache-control"), body: await response.json() };
+  });
+  expect(health).toMatchObject({ status: 200, cacheControl: "no-store", body: { realExecutorsEnabled: false, imageProviderMode: "contracts-only", runKernelEnabled: true } });
+  await expect(panel.getByRole("button", { name: "查看批次预估" })).toBeEnabled();
+  await expect(panel.getByRole("button", { name: "确认模拟成本并排队" })).toHaveCount(0);
+  expect(external).toEqual([]);
+});
+
 async function prepareOverage(page: Page) {
   const panel = await prepare(page);
   await panel.getByLabel("任务输出数量").fill("1");
