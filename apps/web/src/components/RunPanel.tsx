@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Asset, ConstraintSnapshot, CreateRunBatchRequest, ProjectBudgetSnapshot,
   ResolveBillingUnknownRequest, RunBatchAggregate, RunJob, BillingOverage,
 } from "@canvas/contracts";
 import { money, parseMoney, RUN_STATUS_LABEL, StudioRunClient } from "../runs/runClient";
 import { assetRepository } from "../assets/assetRepository";
+import ImagePreparationPanel from "./ImagePreparationPanel";
 import "./RunPanel.css";
 
 type Props = {
@@ -43,7 +44,11 @@ const AUDIT_LABEL: Record<string, string> = {
 };
 
 export default function RunPanel(props: Props) {
-  const { projectId, assets, constraints, missingOriginalAssetIds } = props;
+  const { projectId, missingOriginalAssetIds } = props;
+  // The App's async asset/constraint reload can briefly retain the previous
+  // project's arrays. Never register those under the newly mounted project.
+  const assets = useMemo(() => props.assets.filter((asset) => asset.projectId === projectId), [projectId, props.assets]);
+  const constraints = useMemo(() => props.constraints.filter((item) => item.projectId === projectId), [projectId, props.constraints]);
   const [batches, setBatches] = useState<RunBatchAggregate[]>([]);
   const [budget, setBudget] = useState<ProjectBudgetSnapshot | null>(null);
   const [selectedBatchId, setSelectedBatchId] = useState("");
@@ -286,6 +291,7 @@ export default function RunPanel(props: Props) {
       <button className="run-secondary" disabled={busy} onClick={() => void run(async (client) => {
         await client.register(contextRef.current); setReady(true); await refresh(client);
       }, false)}>{busy ? "正在同步…" : "刷新任务记录"}</button>
+      {ready && <ImagePreparationPanel projectId={projectId} assets={assets} constraints={constraints} missingOriginalAssetIds={missingOriginalAssetIds} disabled={busy || Boolean(decision)} />}
       <fieldset disabled={busy || !ready || Boolean(decision)} className="run-form">
         <legend>新建产品精修批次</legend>
         <label>商品图片<select aria-label="任务商品图片" value={assetId} onChange={(event) => setAssetId(event.target.value)}>

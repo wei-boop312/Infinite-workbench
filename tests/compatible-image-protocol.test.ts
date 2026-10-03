@@ -149,11 +149,13 @@ describe("兼容中转显式差异与零费用假响应", () => {
     ]) expect(() => requireImageConfirmation(change, input, prepared.requestFingerprint, now)).toThrow("image_confirmation_changed");
     expect(() => requireImageConfirmation(config, { ...input, providerParameters: { watermark: false } }, prepared.requestFingerprint, now)).toThrow("image_confirmation_changed");
   });
-  it("白名单变更或跨项目不能复用旧参数，公开视图不含差异配置和凭证", async () => {
+  it("白名单变更或跨项目不能复用旧参数，公开视图仅暴露受控参数规则，不含地址/鉴权", async () => {
     const config = connection(); config.compatibility!.extraParameters = [];
     await expect(prepareCompatibleImageRequest(config, { ...request(), providerParameters: { seed: 0 } }, [], now)).rejects.toThrow("image_extra_parameter_unsupported");
     await expect(prepareCompatibleImageRequest(connection(), { ...request(), projectId: "foreign" }, [], now)).rejects.toThrow("image_connection_not_found");
-    expect(JSON.stringify(imageProviderPublicView(connection()))).not.toMatch(/server-ref|gateway|extraParameters|x-api-key/);
+    const visible = imageProviderPublicView(connection());
+    expect(visible.extraParameters).toEqual(connection().compatibility!.extraParameters);
+    expect(JSON.stringify(visible)).not.toMatch(/server-ref|gateway|x-api-key|editEncoding|endpoints|credentialRef|baseUrl/);
     const official = { ...connection(), protocol: "openai" as const, compatibility: undefined };
     expect(() => validateImageProviderRequest(official, { ...request(), providerParameters: { seed: 0 } }, now)).toThrow("image_extra_parameter_unsupported");
   });

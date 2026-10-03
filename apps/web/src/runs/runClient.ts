@@ -3,6 +3,8 @@ import {
   RunBatchAggregateSchema,
   RunBatchListSchema,
   VerifiedImageSchema,
+  CreateImagePreparationSchema, ImageProviderListSchema, ImagePreparationPublicSchema,
+  type CreateImagePreparation,
   type CreateRunBatchRequest,
   type RegisterRunContextRequest,
   type ResolveBillingUnknownRequest,
@@ -65,6 +67,18 @@ const ERROR_LABELS: Record<string, string> = {
   invalid_billing_overage: "申请或审批字段不完整，请填写金额、理由和证据引用。",
   invalid_billing_resolution: "请填写有效的核账金额和证据引用。",
   local_studio_origin_denied: "本地任务服务仅接受当前工作台的请求。",
+  image_provider_catalog_not_configured: "供应商目录尚未启用；请正常重启更新后的本地工作台，不会自动添加模型。",
+  image_connection_not_found: "没有当前项目的供应商读取权限，或连接已不存在。",
+  image_connection_changed: "连接修订已变化，请刷新目录并明确重新选择，旧动作不会自动换供应商。",
+  image_connection_disabled: "所选供应商已停用，未创建新准备单。",
+  image_preparation_not_found: "准备单不存在或无权读取，请保留原动作编号核对。",
+  image_preparation_idempotency_conflict: "原动作已绑定另一组选项，不能覆盖；请查看原准备单或明确开始新动作。",
+  image_preparation_permission_denied: "当前身份无权创建本地准备单。",
+  image_quote_expired: "报价已过期；历史恢复不会重新估价，请明确开始新的准备动作。",
+  image_pixel_protection_not_configured: "原生图片暂不能兑现商品像素锁；不会移除锁定或降级生成。",
+  image_output_dimensions_exceeded: "输出超过本机 1600 万像素或单边 8192 限制，未估价。",
+  image_protocol_not_implemented: "自定义协议没有适配器，不能准备。",
+  image_output_constraint_changed: "原约束快照已变化，请核对后创建新动作。",
 };
 
 export function money(minor: number): string { return `¥${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`; }
@@ -93,7 +107,7 @@ export function localStudioFetch(path: string, options: RequestInit): Promise<Re
 export class StudioRunClient {
   constructor(private readonly signal: AbortSignal) {}
 
-  private async request<T>(path: string, schema: { parse(value: unknown): T }, body?: unknown, upload?: { blob: Blob; mimeType: string; checksum: string }): Promise<T> {
+  private async request<T>(path: string, schema: { parse(value: unknown): T }, body?: unknown, upload?: { blob: Blob; mimeType: string; checksum: string }, maxBytes?: number): Promise<T> {
     let response: Response;
     try {
       response = await localStudioFetch(path, {
@@ -101,19 +115,43 @@ export class StudioRunClient {
         headers: { "x-canvas-local": "1", ...(upload ? { "content-type": upload.mimeType, "x-content-sha256": upload.checksum }
           : body === undefined ? {} : { "content-type": "application/json" }) },
         body: upload ? upload.blob : body === undefined ? undefined : JSON.stringify(body),
-        signal: this.signal,
+        signal: maxBytes ? AbortSignal.any([this.signal, AbortSignal.timeout(30_000)]) : this.signal,
+        cache: "no-store", redirect: "error", credentials: "same-origin",
       });
     } catch (error) {
       if (this.signal.aborted) throw error;
       throw new Error("本地任务服务暂时不可用，未确认收到的请求可安全重试。");
     }
     let payload: unknown;
-    try { payload = await response.json(); }
+    try {
+      if (!maxBytes) payload = await response.json();
+      else {
+        if (response.redirected || !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")
+          || !response.headers.get("cache-control")?.includes("no-store") || Number(response.headers.get("content-length")) > maxBytes) throw new Error();
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error();
+        const chunks: Uint8Array[] = []; let length = 0; let fragments = 0;
+        try {
+          while (true) {
+            const chunk = await reader.read(); if (chunk.done) break;
+            if (!chunk.value.length) continue;
+            length += chunk.value.length;
+            if (length > maxBytes || ++fragments > 4096 || this.signal.aborted) throw new Error();
+            chunks.push(chunk.value);
+          }
+        } catch (failure) { await reader.cancel().catch(() => undefined); throw failure; }
+        finally { reader.releaseLock(); }
+        const bytes = new Uint8Array(length); let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+        payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      }
+    }
     catch { throw new Error("任务服务没有返回有效数据；请通过本地开发工作台打开面板。"); }
     if (!response.ok) {
       const code = payload && typeof payload === "object" && "error" in payload ? String(payload.error) : "";
       throw new Error(ERROR_LABELS[code] ?? `任务操作失败（${code || response.status}），请刷新记录。`);
     }
+    if (this.signal.aborted) throw new DOMException("操作已取消", "AbortError");
     try { return schema.parse(payload); }
     catch { throw new Error("任务服务没有返回符合合同的有效数据，未继续执行；请刷新记录。"); }
   }
@@ -136,6 +174,30 @@ export class StudioRunClient {
   }
   budget(projectId: string) {
     return this.request(`/v1/projects/${encodeURIComponent(projectId)}/budget`, ProjectBudgetSnapshotSchema);
+  }
+  imageProviders(projectId: string) {
+    return this.request(`/v1/projects/${encodeURIComponent(projectId)}/image-providers`, ImageProviderListSchema, undefined, undefined, 2 * 1024 * 1024);
+  }
+  async prepareImage(input: CreateImagePreparation) {
+    const selection = CreateImagePreparationSchema.parse(input);
+    if (new TextEncoder().encode(JSON.stringify(selection)).length > 128 * 1024) throw new Error("准备参数过大，未提交。");
+    const record = await this.request(`/v1/projects/${encodeURIComponent(selection.projectId)}/image-preparations`, ImagePreparationPublicSchema, selection, undefined, 512 * 1024);
+    const template = record.requestTemplate;
+    if (record.projectId !== selection.projectId || template.tenantId !== "local-studio" || template.connectionId !== selection.connectionId
+      || template.connectionRevision !== selection.connectionRevision || template.model !== selection.model || template.capabilityVersion !== selection.capabilityVersion
+      || template.constraintSnapshotId !== selection.constraintSnapshotId || template.operation !== selection.operation
+      || JSON.stringify(template.parameters) !== JSON.stringify(selection.parameters)
+      || JSON.stringify(template.providerParameters ?? {}) !== JSON.stringify(selection.providerParameters ?? {})
+      || JSON.stringify(template.inputs.map((ref) => ref.assetId)) !== JSON.stringify(selection.inputAssetIds)
+      || (template.operation === "edit" ? template.mask?.assetId : undefined) !== (selection.operation === "edit" ? selection.maskAssetId : undefined)) {
+      throw new Error("准备单与本次人工选择不一致，保留原动作编号，未继续执行。");
+    }
+    return record;
+  }
+  async imagePreparation(projectId: string, preparationId: string) {
+    const record = await this.request(`/v1/projects/${encodeURIComponent(projectId)}/image-preparations/${encodeURIComponent(preparationId)}`, ImagePreparationPublicSchema, undefined, undefined, 512 * 1024);
+    if (record.projectId !== projectId || record.id !== preparationId || record.requestTemplate.tenantId !== "local-studio") throw new Error("历史准备单不属于当前项目或编号，未恢复。");
+    return record;
   }
   async cacheImage(projectId: string, assetId: string) {
     const { cacheGeneratedAsset } = await import("../assets/generatedAssetCache");

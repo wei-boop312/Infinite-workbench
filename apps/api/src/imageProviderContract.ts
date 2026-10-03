@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  ImageExecutionRequestSchema, ImageProviderConnectionSchema, VerifiedImageSchema,
+  ImageExecutionRequestSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, VerifiedImageSchema,
   type ImageExecutionRequest, type ImageProviderConnection, type VerifiedImage,
 } from "@canvas/contracts";
 
@@ -115,10 +115,11 @@ export function assertRealImageExecutionAllowed(): never { return reject("real_i
 
 export function imageProviderPublicView(input: ImageProviderConnection) {
   const connection = ImageProviderConnectionSchema.parse(input);
-  return {
+  return ImageProviderPublicSchema.parse({
     id: connection.id, name: connection.name, protocol: connection.protocol, revision: connection.revision,
     enabled: connection.enabled, configuration: "valid" as const, diagnostic: connection.diagnostic,
     realExecutionEnabled: false as const,
-    models: connection.models.map((model) => ({ model: model.model, capabilityVersion: model.version, operations: model.operations, evidence: model.evidence })),
-  };
+    models: connection.models.map(({ version, ...capabilities }) => ({ ...capabilities, capabilityVersion: version })),
+    extraParameters: connection.compatibility?.extraParameters ?? [],
+  });
 }

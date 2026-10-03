@@ -210,6 +210,41 @@ export const LocalImageQuoteSchema = z.object({
   mode: z.literal("local-fixture"), evidenceRef: Id, quote: ImageQuoteSchema,
 }).strict();
 
+// Public allowlist: no endpoints, authentication or credential references.
+export const ImagePublicModelSchema = z.object(ImageModelCapabilitySchema.shape).omit({ version: true })
+  .extend({ capabilityVersion: Id }).strict().superRefine(({ capabilityVersion, ...model }, context) => {
+    const checked = ImageModelCapabilitySchema.safeParse({ ...model, version: capabilityVersion });
+    if (!checked.success) for (const issue of checked.error.issues) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+  });
+export const ImageProviderPublicSchema = z.object({
+  id: Id, name: z.string().trim().min(1).max(120), protocol: ImageProtocolSchema,
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), enabled: z.boolean(),
+  configuration: z.literal("valid"), diagnostic: ImageProviderConnectionSchema.shape.diagnostic,
+  realExecutionEnabled: z.literal(false), models: z.array(ImagePublicModelSchema).min(1).max(100)
+    .refine((models) => unique(models.map((model) => model.model))),
+  extraParameters: z.array(ImageExtraParameterRuleSchema).max(16).refine((rules) => unique(rules.map((rule) => rule.name))),
+}).strict();
+export const ImageProviderListSchema = z.array(ImageProviderPublicSchema).max(64);
+export const ImagePreparationPublicSchema = z.object({
+  id: Id, projectId: Id, status: z.literal("unconfirmed"), executionAuthorized: z.literal(false),
+  protocolPreparation: z.literal("not-run"), mode: z.literal("local-fixture"), createdAt: DateTime,
+  snapshotFingerprint: Hash, connection: ImageProviderPublicSchema,
+  requestTemplate: ImageRequestTemplateSchema, pricing: LocalImageQuoteSchema,
+}).strict().superRefine((record, context) => {
+  const template = record.requestTemplate;
+  const model = record.connection.models.find((item) => item.model === template.model);
+  if (template.projectId !== record.projectId || template.connectionId !== record.connection.id
+    || template.connectionRevision !== record.connection.revision || !model || model.capabilityVersion !== template.capabilityVersion
+    || template.protection !== "none" || !model.operations.includes(template.operation)
+    || JSON.stringify(template.quote) !== JSON.stringify(record.pricing.quote)) {
+    context.addIssue({ code: "custom", message: "公开准备单关系不一致" });
+  }
+});
+// A browser recovery pointer is a selection, never a quote or authorization.
+export const ImagePreparationRecoverySchema = z.object({
+  schemaVersion: z.literal(1), selection: CreateImagePreparationSchema, preparationId: Id.optional(),
+}).strict();
+
 // Reasoning is not silently folded into outputTokens or converted to money.
 const Metrics = z.object({ inputTokens: Integer.optional(), outputTokens: Integer.optional(), reasoningTokens: Integer.optional(), cachedInputTokens: Integer.optional(), toolInputTokens: Integer.optional(), totalTokens: Integer.optional(), images: Integer.optional() })
   .strict().refine((value) => Object.keys(value).length > 0, "实报用量不能为空");
@@ -251,3 +286,7 @@ export type ImageRequestTemplate = z.infer<typeof ImageRequestTemplateSchema>;
 export type CreateImagePreparation = z.infer<typeof CreateImagePreparationSchema>;
 export type ImageProviderRevision = z.infer<typeof ImageProviderRevisionSchema>;
 export type LocalImageQuote = z.infer<typeof LocalImageQuoteSchema>;
+export type ImageProviderPublic = z.infer<typeof ImageProviderPublicSchema>;
+export type ImagePublicModel = z.infer<typeof ImagePublicModelSchema>;
+export type ImagePreparationPublic = z.infer<typeof ImagePreparationPublicSchema>;
+export type ImagePreparationRecovery = z.infer<typeof ImagePreparationRecoverySchema>;
