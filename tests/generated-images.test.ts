@@ -58,9 +58,9 @@ function setup(options: { path?: string; quota?: number; snapshot?: ConstraintSn
   const frozen = new Map<string, { fingerprint: string; payloadHash: string; binding: string }>();
   const authorizer = { authenticate: () => null, allows: (principal: typeof actor, project: string, permission: string) => principal.tenantId === actor.tenantId && project === "project-a"
     && (principal.actorId === "writer" ? (permission !== "asset:write" || writeAllowed) : principal.actorId === "reader" && permission === "asset:read") };
-  const authorizeCommit = vi.fn((input: ImageExecutionRequest, fingerprint: string, payloadHash: string, binding: unknown): undefined => {
+  const authorizeCommit = vi.fn((input: ImageExecutionRequest, fingerprint: string, payloadHash: string, binding: { confirmedAt: string; transformedInputs: unknown }): undefined => {
     const job = frozen.get(input.jobId);
-    if (!executionAllowed || !job || job.fingerprint !== fingerprint || job.payloadHash !== payloadHash || job.binding !== JSON.stringify(binding)) throw new Error("fixture-execution-not-authorized");
+    if (!executionAllowed || !job || job.fingerprint !== fingerprint || job.payloadHash !== payloadHash || job.binding !== JSON.stringify({ confirmedAt: binding.confirmedAt, transformedInputs: binding.transformedInputs })) throw new Error("fixture-execution-not-authorized");
     return undefined;
   });
   const service = new LocalGeneratedImages({ tenantId: actor.tenantId, stateStore: store, authorizer, authorizeCommit, maxProjectBytes: options.quota,

@@ -32,6 +32,8 @@ const AUDIT_LABEL: Record<string, string> = {
   "budget-reserved": "预留预算", "jobs-created": "创建输出任务", "batch-dispatched": "执行排队任务",
   "job-leased": "领取任务", "job-lease-expired": "任务租约到期", "dispatch-throttled": "等待执行额度",
   "job-started": "任务开始", "job-succeeded": "任务成功", "job-failed": "任务失败", "job-timed-out": "任务超时",
+  "image-fixture-attempted": "本地图片传输尝试", "image-fixture-returned": "本地原始响应已保存", "image-fixture-interrupted": "本地响应中断",
+  "image-artifact-verified": "已验证图片绑定任务", "image-artifact-rejected": "图片验证或保存被拒绝",
   "billing-unknown": "计费待核对", "billing-resolution-rejected": "核账被拒绝", "billing-resolved-charged": "确认已扣费",
   "billing-resolved-not-charged": "确认未扣费", "cost-settled": "成本结算", "job-retry-created": "人工重试",
   "batch-cancelled": "取消批次", "budget-released": "释放预算",
@@ -322,13 +324,14 @@ export default function RunPanel(props: Props) {
           {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "queued") && batch.batch.status !== "billing_unknown" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "dispatch"))}>执行排队任务</button>}
           {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "running") && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "reconcile"))}>检查运行状态</button>}
           {["awaiting_confirmation", "queued"].includes(batch.batch.status) && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "cancel"))}>取消批次</button>}
-          {batch.jobs.some((job) => job.status === "succeeded") && <button disabled={busy} onClick={() => { props.onAddResults(batch); setMessage("已把模拟结果记录添加到画布，未生成图片文件。"); }}>结果回到画布</button>}
+          {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "succeeded") && <button disabled={busy} onClick={() => { props.onAddResults(batch); setMessage("已把模拟结果记录添加到画布，未生成图片文件。"); }}>结果回到画布</button>}
         </div>
         {batch.jobs.length > 0 && <div className="run-progress" role="status">输出进度：{latestJobs(batch.jobs).filter((job) => job.status === "succeeded").length} / {batch.batch.expectedOutputs} 成功</div>}
         <div className="run-jobs">{latestJobs(batch.jobs).map((job) => <article className={`run-job status-${job.status}`} key={job.id} aria-label={`输出 ${job.outputIndex + 1} 任务`}>
           <div><strong>输出 {job.outputIndex + 1} · 第 {job.attempt} 次</strong><span>{RUN_STATUS_LABEL[job.status]}</span></div>
           <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(reservationMinor(batch, job))}`}</small>
           {job.billingEvidenceRef && <small>核账证据：{job.billingEvidenceRef}</small>}
+          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length > 0 && <small>已验证资产已绑定；二进制回读尚未开放，暂不能回到画布。</small>}
           {batch.batch.tool === "product-retouch" && ["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
           {job.status === "billing_unknown" && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")
             ? <small>超额申请待审批，原预留保持冻结。</small>

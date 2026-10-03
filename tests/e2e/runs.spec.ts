@@ -154,6 +154,28 @@ test("图片 running UI 不轮询旧模拟检查入口，也不暴露旧执行�
   await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0); await expect(current.getByRole("button", { name: "取消批次" })).toHaveCount(0);
 });
 
+for (const status of ["billing_unknown", "succeeded"] as const) test(`已绑定图片 ${status} 合同显示资产提示，不走旧模拟回画布`, async ({ page }) => {
+  // Public-task UI contract only; it does not seed an image, provider or private
+  // response into the normal studio database or claim binary readback is ready.
+  const at = "2026-10-04T00:00:00.000Z";
+  await page.route("**/studio-api/v1/projects/*/run-batches", async (route) => {
+    const response = await route.fetch(), projectId = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2)!);
+    const fixture = { batch: { id: "image-verified-ui", tenantId: "local-studio", projectId, constraintSnapshotId: "image-fixture-constraint", tool: "image-generate",
+      adapterId: "image-fixture-adapter", inputAssetIds: [], idempotencyKey: "image-verified-confirm", status, expectedOutputs: 1, estimatedCostMinor: 25, maxCostMinor: 30, currency: "CNY",
+      confirmedBy: "local-designer", confirmedAt: at, createdAt: at }, jobs: [{ id: "image-verified-job", batchId: "image-verified-ui", outputIndex: 0, attempt: 1, executorKind: "provider",
+      adapterId: "image-fixture-adapter", idempotencyKey: "image-verified-key", status, inputAssetIds: [], outputAssetIds: ["generated-private-fixture"], estimatedCostMinor: 25,
+      ...(status === "succeeded" ? { actualCostMinor: 27, billingResolutionId: "manual-ui", billingResolvedBy: "local-designer", billingResolvedAt: at, billingEvidenceRef: "ui-fixture" } : {}), createdAt: at }], ledger: [], audit: [], billingOverages: [] };
+    await route.fulfill({ response, json: [fixture, ...await response.json()] });
+  });
+  const panel = await prepare(page), current = panel.getByRole("region", { name: "当前批次" });
+  await expect(current).toContainText("已验证资产已绑定；二进制回读尚未开放");
+  await expect(current.getByRole("button", { name: "结果回到画布" })).toHaveCount(0);
+  await expect(current.getByRole("button", { name: "人工重试输出 1" })).toHaveCount(0);
+  await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);
+  if (status === "billing_unknown") { await expect(current).toContainText("预留 ¥0.30"); await expect(current.getByRole("button", { name: "核对输出 1 计费" })).toBeEnabled(); }
+  else { await expect(current).toContainText("实际模拟成本 ¥0.27"); await expect(current.getByRole("button", { name: "核对输出 1 计费" })).toHaveCount(0); }
+});
+
 async function prepareOverage(page: Page) {
   const panel = await prepare(page);
   await panel.getByLabel("任务输出数量").fill("1");

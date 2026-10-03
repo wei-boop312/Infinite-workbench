@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { GeneratedImageRecordSchema, ImageInputTransformSchema, ImageProviderOutcomeSchema, VerifiedImageSchema,
   type GeneratedImageRecord, type ImageExecutionRequest, type ImageProviderConnection } from "@canvas/contracts";
 import type { ObjectStorageAuthorizer, StoragePrincipal } from "./objectStorageGateway";
-import { requireImageConfirmation, validateImageProviderRequest } from "./imageProviderContract";
+import { imageSnapshotFingerprint, requireImageConfirmation, validateImageProviderRequest } from "./imageProviderContract";
 import { imagePayloadSha256, MAX_IMAGE_PROTOCOL_REQUEST_BYTES, type ImageInputTransform } from "./imageRequestPayload";
 import { MAX_IMAGE_PROTOCOL_OUTPUT_BYTES, type ParsedImageProtocolResponse } from "./imageProtocolResponse";
 import { decodeStaticImage } from "./staticImageDecoder";
@@ -20,7 +20,7 @@ function reject(code: string, status = 422): never { throw new RunKernelError(st
 
 // Trusted server service only. No HTTP upload/result endpoint is enabled here.
 // The synchronous execution-authority port is mandatory and fails closed; the
-// production task/lease/budget integration must implement it in the next step.
+// optional commit hook runs synchronously in the SAME asset/catalog transaction.
 export class LocalGeneratedImages {
   private active = 0;
   constructor(private readonly options: {
@@ -28,7 +28,8 @@ export class LocalGeneratedImages {
     stateStore: SqliteRunKernelStateStore;
     authorizer: ObjectStorageAuthorizer;
     authorizeCommit: (request: ImageExecutionRequest, requestFingerprint: string, payloadChecksumSha256: string,
-      binding: { confirmedAt: string; transformedInputs: readonly ImageInputTransform[] }) => undefined;
+      binding: { confirmedAt: string; transformedInputs: readonly ImageInputTransform[]; candidateChecksumSha256: string; outcomeFingerprint: string }) => undefined;
+    onVerifiedCommit?: (record: GeneratedImageRecord) => undefined;
     maxProjectBytes?: number;
     clock?: () => number;
   }) {
@@ -78,7 +79,9 @@ export class LocalGeneratedImages {
       if (transforms.length !== refs.length || refs.some((ref, index) => transforms[index]?.assetId !== ref.assetId || transforms[index]?.originalChecksumSha256 !== ref.checksumSha256)) reject("image_output_input_lineage_changed");
       const preflight = () => {
         if (actor.tenantId !== this.options.tenantId || request.tenantId !== actor.tenantId || !this.options.authorizer.allows(actor, request.projectId, "asset:write")) reject("image_output_permission_denied", 403);
-        if (typeof this.options.authorizeCommit !== "function" || this.options.authorizeCommit(request, fingerprint, payloadHash, { confirmedAt, transformedInputs: transforms }) !== undefined) reject("image_output_execution_not_authorized", 403);
+        if (typeof this.options.authorizeCommit !== "function" || this.options.authorizeCommit(request, fingerprint, payloadHash, {
+          confirmedAt, transformedInputs: transforms, candidateChecksumSha256: checksum, outcomeFingerprint: imageSnapshotFingerprint(outcome),
+        }) !== undefined) reject("image_output_execution_not_authorized", 403);
         if (refs.length && !this.options.authorizer.allows(actor, request.projectId, "asset:read")) reject("image_output_permission_denied", 403);
         const { catalog, project, constraint } = validateLocalImageAssetPolicy(this.options.stateStore, request);
         const existing = this.options.stateStore.loadGeneratedImage(request.tenantId, request.projectId, request.jobId);
@@ -119,7 +122,9 @@ export class LocalGeneratedImages {
         this.options.stateStore.saveGeneratedImage(record, body);
         current.project.assets.push(image.asset);
         this.options.stateStore.saveCatalog(current.catalog);
-        // No financial/job mutation; a verified artifact is NOT settled billing.
+        if (this.options.onVerifiedCommit && this.options.onVerifiedCommit(record) !== undefined) reject("image_output_commit_policy_invalid", 403);
+        // Standalone 5A has no hook. Integrated artifact binding still NEVER
+        // settles unknown billing or dispatches another provider request.
         return record;
       }));
     } finally { this.active -= 1; }

@@ -1,5 +1,7 @@
 import type { IncomingMessage } from "node:http";
-import { ImageFixtureResultSchema, type ImageFixtureResult } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImageFixtureResultSchema, type GeneratedImageRecord, type ImageFixtureResult } from "@canvas/contracts";
+import { imageSnapshotFingerprint } from "./imageProviderContract";
+import { assetMetadataFingerprint } from "./verifiedAssets";
 import { InMemoryRunKernel, RunKernelError, type ProjectBudgetConfig, type RunKernelOptions, type RunKernelPort, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
@@ -19,6 +21,17 @@ export class SqliteRunKernel implements RunKernelPort {
   inspectImageLease: InMemoryRunKernel["inspectImageLease"] = (...args) => this.run((kernel) => kernel.inspectImageLease(...args));
   reconcileImageBatch: InMemoryRunKernel["reconcileImageBatch"] = (...args) => this.run((kernel) => kernel.reconcileImageBatch(...args));
   beginImageFixtureAttempt: InMemoryRunKernel["beginImageFixtureAttempt"] = (...args) => this.run((kernel) => kernel.beginImageFixtureAttempt(...args));
+  inspectImageArtifact: InMemoryRunKernel["inspectImageArtifact"] = (...args) => this.run((kernel) => kernel.inspectImageArtifact(...args));
+  recordImageArtifactFailure: InMemoryRunKernel["recordImageArtifactFailure"] = (...args) => this.run((kernel) => kernel.recordImageArtifactFailure(...args));
+  attachImageArtifact(principal: RunPrincipal, incoming: GeneratedImageRecord) {
+    const record = GeneratedImageRecordSchema.parse(incoming);
+    return this.run((kernel) => {
+      const saved = this.options.stateStore.loadGeneratedImage(record.request.tenantId, record.request.projectId, record.request.jobId);
+      this.assertGeneratedArtifact(record);
+      if (!saved || imageSnapshotFingerprint(saved) !== imageSnapshotFingerprint(record)) throw new RunKernelError(409, "image_output_record_not_committed", "产物须在同一事务先保存完整正文与谱系");
+      return kernel.attachImageArtifact(principal, record);
+    });
+  }
   // Returned evidence cannot commit without its raw body, even if another
   // trusted server caller forgets the executor's outer transaction.
   recordImageFixtureResult(principal: RunPrincipal, jobId: string, incoming: ImageFixtureResult, body?: Buffer) {
@@ -74,6 +87,20 @@ export class SqliteRunKernel implements RunKernelPort {
           if (!stored.imageFixtureAttempt && !result) continue;
           const response = this.options.stateStore.loadImageFixtureResponse(batch.tenantId, batch.projectId, stored.aggregate.jobs[0].id);
           if (result?.kind === "returned" ? !response || JSON.stringify(response.record) !== JSON.stringify(result) : response !== null) throw new Error("本地响应正文与任务证据不一致");
+          const artifact = stored.imageTaskArtifact;
+          if (artifact) {
+            const generated = this.options.stateStore.loadGeneratedImage(batch.tenantId, batch.projectId, stored.aggregate.jobs[0].id);
+            if (!generated || imageSnapshotFingerprint(generated) !== artifact.generatedRecordFingerprint || generated.image.asset.id !== artifact.assetId || generated.image.checksumSha256 !== artifact.checksumSha256) throw new Error("任务产物与生成记录不一致");
+            const execution = stored.imageExecution;
+            if (!execution || result?.kind !== "returned" || imageSnapshotFingerprint(generated.request) !== imageSnapshotFingerprint(execution.request)
+              || generated.requestFingerprint !== execution.requestFingerprint || generated.payloadChecksumSha256 !== execution.payloadChecksumSha256
+              || generated.confirmedAt !== execution.confirmedAt || generated.protocol !== execution.preparation.connection.protocol
+              || imageSnapshotFingerprint(generated.constraint) !== imageSnapshotFingerprint(execution.preparation.constraint)
+              || imageSnapshotFingerprint(generated.transformedInputs) !== imageSnapshotFingerprint(execution.transformedInputs)
+              || imageSnapshotFingerprint(generated.providerOutcome) !== imageSnapshotFingerprint(result.outcome)
+              || generated.image.verifiedAt !== artifact.committedAt) throw new Error("任务产物谱系与完整确认或原始响应不一致");
+            this.assertGeneratedArtifact(generated);
+          }
         }
         if (!snapshot) {
           snapshot = { schemaVersion: 1, savedAt: new Date((this.options.clock ?? Date.now)()).toISOString(),
@@ -108,5 +135,10 @@ export class SqliteRunKernel implements RunKernelPort {
       const code = error instanceof SqliteStateStoreError ? error.code : "run_state_unavailable";
       throw new RunKernelError(503, code, "任务数据库暂不可用，请保持原动作编号后重试");
     }
+  }
+
+  private assertGeneratedArtifact(record: GeneratedImageRecord): void {
+    const asset = this.options.stateStore.loadCatalog()?.projects.find((item) => item.projectId === record.request.projectId)?.assets.find((item) => item.id === record.image.asset.id);
+    if (!asset || assetMetadataFingerprint(asset) !== record.image.registeredMetadataSha256) throw new RunKernelError(503, "run_state_unavailable", "任务产物目录或正文缺失");
   }
 }

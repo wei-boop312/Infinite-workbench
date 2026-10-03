@@ -9,6 +9,7 @@ import { parseGoogleImageResponse } from "./googleImageProtocol";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 import { RunKernelError, type RunPrincipal } from "./runKernel";
 import type { SqliteRunKernel } from "./sqliteRunKernel";
+import type { LocalImageTaskArtifacts } from "./imageTaskArtifacts";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
 export type LocalFixtureTransport = {
@@ -24,16 +25,25 @@ export class LocalFixtureImageExecutor {
   private readonly metadataQuota: number;
   private readonly binaryQuota: number;
   constructor(private readonly options: { stateStore: SqliteRunKernelStateStore; runKernel: SqliteRunKernel; transport: LocalFixtureTransport;
-    clock?: () => number; timeoutMs?: number; maxMetadataBytes?: number; maxProjectBytes?: number }) {
+    clock?: () => number; timeoutMs?: number; maxMetadataBytes?: number; maxProjectBytes?: number; artifacts?: LocalImageTaskArtifacts }) {
     if (options.transport?.mode !== "local-fixture" || options.transport.realExecutionEnabled !== false || typeof options.transport.send !== "function") throw new Error("必须显式配置零费用本地假传输");
     this.timeout = options.timeoutMs ?? 5000; this.metadataQuota = options.maxMetadataBytes ?? 16 * 1024 * 1024; this.binaryQuota = options.maxProjectBytes ?? 512 * 1024 * 1024;
     if (!Number.isSafeInteger(this.timeout) || this.timeout < 1 || this.timeout > 30000 || !Number.isSafeInteger(this.metadataQuota) || this.metadataQuota < 0 || this.metadataQuota > 16 * 1024 * 1024
       || !Number.isSafeInteger(this.binaryQuota) || this.binaryQuota < 0 || this.binaryQuota > 512 * 1024 * 1024) throw new Error("本地传输容量或超时配置无效");
     this.leases = new LocalImageTaskLeases(options);
+    if (options.artifacts && !options.artifacts.usesStateStore(options.stateStore)) throw new Error("传输与产物必须共用同一事务存储实例");
   }
   async execute(principal: RunPrincipal, jobId: string, lease: ExecuteRunJobRequest) {
     if (this.options.transport.mode !== "local-fixture" || this.options.transport.realExecutionEnabled !== false) throw new RunKernelError(503, "image_fixture_transport_disabled", "本地假传输配置已改变");
-    return this.leases.withFirstStart(principal, jobId, lease, (context) => this.firstAttempt(principal, lease, context));
+    const started = await this.leases.withFirstStart(principal, jobId, lease, (context) => this.firstAttempt(principal, lease, context));
+    // Artifact failure must never rewrite an already-durable returned response
+    // into a transport interruption. Recovery invokes ingest, not execute/send.
+    if (started.started && this.options.artifacts) {
+      const result = this.options.stateStore.load()?.batches.find((item) => item.aggregate.batch.id === started.aggregate.batch.id)?.imageFixtureResult;
+      if (result?.kind === "returned") await this.options.artifacts.ingest(principal, jobId);
+      return { ...started, aggregate: this.options.runKernel.getBatch(principal, started.aggregate.batch.id) };
+    }
+    return started;
   }
   private async firstAttempt(principal: RunPrincipal, lease: ExecuteRunJobRequest, context: FirstImageStart): Promise<void> {
     const { execution, prepared } = context, request = execution.request;

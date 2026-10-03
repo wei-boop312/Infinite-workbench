@@ -277,6 +277,22 @@ export const ImageFixtureResultSchema = z.discriminatedUnion("kind", [
 ]);
 export type ImageFixtureResult = z.infer<typeof ImageFixtureResultSchema>;
 
+// Private artifact evidence; billing remains a separate, append-only decision.
+export const ImageTaskArtifactSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.literal("local-fixture"), jobId: IdSchema, batchId: IdSchema,
+  attemptId: IdSchema, resultId: IdSchema, assetId: IdSchema,
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/), resultFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  generatedRecordFingerprint: z.string().regex(/^[a-f0-9]{64}$/), checksumSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  committedBy: IdSchema, committedAt: IsoDateSchema,
+}).strict();
+export type ImageTaskArtifact = z.infer<typeof ImageTaskArtifactSchema>;
+export const ImageTaskArtifactFailureSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.literal("local-fixture"), jobId: IdSchema, resultId: IdSchema,
+  resultFingerprint: z.string().regex(/^[a-f0-9]{64}$/), stage: z.enum(["validation", "commit"]),
+  code: z.string().regex(/^image_output_[a-z_]+$/).max(160), recordedBy: IdSchema, recordedAt: IsoDateSchema,
+}).strict();
+export type ImageTaskArtifactFailure = z.infer<typeof ImageTaskArtifactFailureSchema>;
+
 // Immutable server output/provenance, never a client-submitted verification.
 export const GeneratedImageRecordSchema = z.object({
   schemaVersion: z.literal(1),
@@ -523,6 +539,8 @@ export const RunAuditEventSchema = z.object({
     "image-fixture-attempted",
     "image-fixture-returned",
     "image-fixture-interrupted",
+    "image-artifact-verified",
+    "image-artifact-rejected",
     "job-succeeded",
     "job-failed",
     "job-timed-out",
@@ -608,6 +626,9 @@ export const RunKernelStoredBatchSchema = z.object({
   imageFixtureAttemptFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   imageFixtureResult: ImageFixtureResultSchema.optional(),
   imageFixtureResultFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  imageTaskArtifact: ImageTaskArtifactSchema.optional(),
+  imageTaskArtifactFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  imageTaskArtifactFailures: z.array(ImageTaskArtifactFailureSchema).max(16).optional(),
   requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   reservedMinor: z.number().int().nonnegative(),
   actualMinor: z.number().int().nonnegative(),

@@ -196,7 +196,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       const row = this.database.prepare("SELECT asset_id, record, record_sha256 FROM generated_images WHERE tenant_id = ? AND project_id = ? AND job_id = ?").get(tenantId, projectId, jobId);
       if (!row && !marker) return null;
       if (!row || !marker || typeof row.record !== "string" || createHash("sha256").update(row.record).digest("hex") !== row.record_sha256) throw new Error("生成图片谱系已丢失或损坏");
-      const record = GeneratedImageRecordSchema.parse(JSON.parse(row.record));
+      const record = GeneratedImageRecordSchema.parse(this.readImageMetadata(row));
       const image = this.loadVerifiedImage(tenantId, projectId, record.image.asset.id);
       if (record.request.tenantId !== tenantId || record.request.projectId !== projectId || record.request.jobId !== jobId || record.image.asset.id !== row.asset_id
         || !image || JSON.stringify(image) !== JSON.stringify(record.image)) throw new Error("生成图片正文或证明与谱系不一致");
@@ -210,7 +210,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     // Atomic only within caller transaction; identifier replay is decided by the
     // trusted output service and never implemented as INSERT OR REPLACE.
     this.saveVerifiedImage(record.image, body);
-    const payload = JSON.stringify(record);
+    const payload = this.imageMetadataPayload(record);
     const { tenantId, projectId, jobId } = record.request;
     this.database.prepare("INSERT INTO generated_images(tenant_id, project_id, job_id, asset_id, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
       .run(tenantId, projectId, jobId, record.image.asset.id, payload, createHash("sha256").update(payload).digest("hex"));
@@ -277,8 +277,8 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     return Number(this.database.prepare("SELECT COUNT(*) AS count FROM image_preparation_presence WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.count ?? 0);
   }
   imageMetadataBytes(tenantId: string, projectId: string): number {
-    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
-      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
+    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM generated_images WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
+      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
   }
   imageFixtureResponseBytes(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);

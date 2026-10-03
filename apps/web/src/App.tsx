@@ -974,6 +974,7 @@ function CanvasKernel() {
 
   const addRunResults = useCallback((record: RunBatchAggregate) => {
     if (record.batch.projectId !== activeProjectIdRef.current) return;
+    if (record.batch.tool !== "product-retouch") { setLastAction("生成资产尚未开放二进制回读，不能转换为模拟画布结果"); return; }
     const current = currentRef.current.snapshot;
     const existingIds = new Set(current.nodes.map((node) => node.id));
     const results = record.jobs.filter((job) => job.status === "succeeded" && !existingIds.has(`run-result-${job.id}`));

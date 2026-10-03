@@ -6,6 +6,7 @@ import { ImageProviderConnectionSchema, VerifiedImageSchema, type Asset, type Im
 import { LocalImageProviders } from "../../apps/api/src/imageProviders";
 import { LocalImageTaskLeases } from "../../apps/api/src/imageTaskLeases";
 import { createImageTaskValidator } from "../../apps/api/src/imageTaskPolicy";
+import { createImageArtifactValidator } from "../../apps/api/src/imageArtifactPolicy";
 import { SqliteRunKernel } from "../../apps/api/src/sqliteRunKernel";
 import { SqliteRunKernelStateStore } from "../../apps/api/src/sqliteRunKernelStore";
 import { assetMetadataFingerprint } from "../../apps/api/src/verifiedAssets";
@@ -41,7 +42,8 @@ export function setupImageTask(options: { path?: string; policy?: boolean; quota
   const clock = () => now;
   const kernel = new SqliteRunKernel({ stateStore: store, authorizer: runAuthorizer,
     budgets: [{ tenantId: principal.tenantId, projectId: "project-a", currency: "CNY", limitMinor: 1000 }], clock,
-    ...(options.policy === false ? {} : { validateImageTask: createImageTaskValidator({ tenantId: principal.tenantId, stateStore: store, providerAuthorizer: authorizer, assetAuthorizer, maxMetadataBytes: options.quota }) }),
+    ...(options.policy === false ? {} : { validateImageTask: createImageTaskValidator({ tenantId: principal.tenantId, stateStore: store, providerAuthorizer: authorizer, assetAuthorizer, maxMetadataBytes: options.quota }),
+      validateImageArtifact: createImageArtifactValidator({ tenantId: principal.tenantId, stateStore: store, providerAuthorizer: authorizer, assetAuthorizer, maxMetadataBytes: options.quota }) }),
     ...options.kernel });
   const service = new LocalImageProviders({ tenantId: principal.tenantId, stateStore: store, authorizer, assetAuthorizer, runAuthorizer, runKernel: kernel, clock,
     estimate: (_config, _request, time) => ({ mode: "local-fixture", evidenceRef: "no-real-price-or-call", quote: {
@@ -64,7 +66,7 @@ export function setupImageTask(options: { path?: string; policy?: boolean; quota
       registeredMetadataSha256: assetMetadataFingerprint(asset), decoder: "sharp-full-decode-v1", verifiedAt: at, verifiedBy: "trusted-fixture" });
     store.transaction(() => { store.saveVerifiedImage(receipt, png); const catalog = store.loadCatalog()!; catalog.projects[0].assets.push(asset); store.saveCatalog(catalog); });
   };
-  return { store, path, kernel, service, leases, register, confirm, source, clock, advance: (ms: number) => { now += ms; },
+  return { store, path, kernel, service, leases, assetAuthorizer, register, confirm, source, clock, advance: (ms: number) => { now += ms; },
     revokeProvider: () => { providerAllowed = false; }, revokeAsset: () => { assetAllowed = false; }, denyRun: (permission: RunPermission) => denied.add(permission),
     cleanup: () => { store.close(); if (directory) rmSync(directory, { recursive: true, force: true }); } };
 }

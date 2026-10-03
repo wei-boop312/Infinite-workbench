@@ -9,6 +9,8 @@ import {
   ExecuteRunJobRequestSchema,
   ImageDispatchIntentSchema,
   ImageFixtureAttemptSchema, ImageFixtureResultSchema,
+  ImageTaskArtifactSchema, ImageTaskArtifactFailureSchema, GeneratedImageRecordSchema,
+  type ImageTaskArtifact, type ImageTaskArtifactFailure, type GeneratedImageRecord,
   type ImageFixtureAttempt, type ImageFixtureResult,
   type ImageDispatchIntent,
   type ConfirmedImageExecution,
@@ -119,6 +121,9 @@ type StoredBatch = {
   imageFixtureAttemptFingerprint?: string;
   imageFixtureResult?: ImageFixtureResult;
   imageFixtureResultFingerprint?: string;
+  imageTaskArtifact?: ImageTaskArtifact;
+  imageTaskArtifactFingerprint?: string;
+  imageTaskArtifactFailures?: ImageTaskArtifactFailure[];
   requestFingerprint: string;
   reservedMinor: number;
   actualMinor: number;
@@ -136,6 +141,9 @@ export type RunKernelOptions = {
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
   validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent, additionalMetadataBytes?: number) => undefined;
+  // Separate persisted-response authority. It must not reuse current quote
+  // expiry as a reason to discard an already-dispatched response.
+  validateImageArtifact?: (principal: RunPrincipal, execution: ConfirmedImageExecution, result: Extract<ImageFixtureResult, { kind: "returned" }>, record?: GeneratedImageRecord, additionalMetadataBytes?: number) => undefined;
   unitEstimateMinor?: number;
   unitActualMinor?: number;
   maxConcurrentJobs?: number;
@@ -812,6 +820,56 @@ export class InMemoryRunKernel implements RunKernelPort {
     this.refreshBatchStatus(stored); this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
   }
 
+  // INTERNAL: no caller confirmation flag, no queued/intent-only authorization.
+  inspectImageArtifact(principal: RunPrincipal, jobId: string) {
+    const { stored, job } = this.findJob(principal, jobId), execution = this.requireImageExecution(stored), result = stored.imageFixtureResult;
+    this.assertAllowed(principal, execution.request.projectId, "run:read");
+    this.assertAllowed(principal, execution.request.projectId, "run:execute");
+    if (!stored.imageFixtureAttempt || result?.kind !== "returned" || stored.imageFixtureAttempt.actorId !== principal.actorId
+      || !["billing_unknown", "failed", "succeeded"].includes(job.status)) throw new RunKernelError(409, "image_output_response_not_authorized", "任务缺少实际本地返回与原运行租约证据");
+    this.validateImageArtifact(principal, stored);
+    return { execution: ConfirmedImageExecutionSchema.parse(execution), result: ImageFixtureResultSchema.parse(result) as Extract<ImageFixtureResult, { kind: "returned" }>,
+      artifact: stored.imageTaskArtifact ? ImageTaskArtifactSchema.parse(stored.imageTaskArtifact) : undefined };
+  }
+
+  attachImageArtifact(principal: RunPrincipal, incoming: GeneratedImageRecord): RunBatchAggregate {
+    const record = GeneratedImageRecordSchema.parse(incoming), inspected = this.inspectImageArtifact(principal, record.request.jobId);
+    const { stored, job } = this.findJob(principal, record.request.jobId), execution = inspected.execution;
+    const artifact = ImageTaskArtifactSchema.parse({ schemaVersion: 1, mode: "local-fixture", jobId: job.id, batchId: job.batchId,
+      attemptId: stored.imageFixtureAttempt!.id, resultId: inspected.result.id, assetId: record.image.asset.id, executionFingerprint: stored.requestFingerprint,
+      resultFingerprint: stored.imageFixtureResultFingerprint, generatedRecordFingerprint: imageSnapshotFingerprint(record), checksumSha256: record.image.checksumSha256,
+      committedBy: principal.actorId, committedAt: record.image.verifiedAt });
+    if (stored.imageTaskArtifact) {
+      if (imageSnapshotFingerprint(artifact) !== stored.imageTaskArtifactFingerprint) throw new RunKernelError(409, "image_output_version_conflict", "产物不可变记录不能覆盖");
+      this.validateImageArtifact(principal, stored, record); return this.copy(stored.aggregate);
+    }
+    if (JSON.stringify(record.request) !== JSON.stringify(execution.request) || record.requestFingerprint !== execution.requestFingerprint
+      || record.payloadChecksumSha256 !== execution.payloadChecksumSha256 || record.confirmedAt !== execution.confirmedAt
+      || record.protocol !== execution.preparation.connection.protocol || imageSnapshotFingerprint(record.constraint) !== imageSnapshotFingerprint(execution.preparation.constraint)
+      || JSON.stringify(record.transformedInputs) !== JSON.stringify(execution.transformedInputs) || JSON.stringify(record.providerOutcome) !== JSON.stringify(inspected.result.outcome)) {
+      throw new RunKernelError(409, "image_output_execution_mismatch", "产物与实际确认或响应不匹配");
+    }
+    this.validateImageArtifact(principal, stored, record, Buffer.byteLength(JSON.stringify(artifact)));
+    stored.imageTaskArtifact = artifact; stored.imageTaskArtifactFingerprint = imageSnapshotFingerprint(artifact);
+    this.replaceJob(stored.aggregate, { ...job, outputAssetIds: [artifact.assetId], status: job.billingResolutionId ? "succeeded" : "billing_unknown", failureCode: undefined });
+    stored.aggregate.audit.push(this.audit(stored.aggregate.batch, principal.actorId, "image-artifact-verified", { jobId: job.id, assetId: artifact.assetId, resultId: artifact.resultId, generatedRecordFingerprint: artifact.generatedRecordFingerprint }));
+    this.refreshBatchStatus(stored); this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
+  }
+
+  recordImageArtifactFailure(principal: RunPrincipal, jobId: string, stage: ImageTaskArtifactFailure["stage"], code: string): RunBatchAggregate {
+    const inspected = this.inspectImageArtifact(principal, jobId), { stored, job } = this.findJob(principal, jobId);
+    const failure = ImageTaskArtifactFailureSchema.parse({ schemaVersion: 1, mode: "local-fixture", jobId, resultId: inspected.result.id,
+      resultFingerprint: stored.imageFixtureResultFingerprint, stage, code, recordedBy: principal.actorId, recordedAt: new Date(this.clock()).toISOString() });
+    const failures = stored.imageTaskArtifactFailures ?? [];
+    if (stored.imageTaskArtifact || failures.some((item) => item.stage === stage && item.code === code)) return this.copy(stored.aggregate);
+    if (failures.length >= 16) throw new RunKernelError(413, "image_output_failure_history_full", "产物失败历史已达本机上限，不删除旧证据");
+    this.validateImageArtifact(principal, stored, undefined, Buffer.byteLength(JSON.stringify(failure)) + 2);
+    stored.imageTaskArtifactFailures = [...failures, failure];
+    if (job.status === "billing_unknown") this.replaceJob(stored.aggregate, { ...job, failureCode: code });
+    stored.aggregate.audit.push(this.audit(stored.aggregate.batch, principal.actorId, "image-artifact-rejected", { jobId, resultId: failure.resultId, stage, code }));
+    this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
+  }
+
   dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
     const workerId = `compat-${createHash("sha256").update(`${principal.tenantId}:${principal.actorId}`).digest("hex")}`;
     const claim = this.claimBatch(principal, batchId, { workerId, maxJobs: this.maxConcurrentJobs });
@@ -1065,9 +1123,9 @@ export class InMemoryRunKernel implements RunKernelPort {
     const resolvedAt = new Date(this.clock()).toISOString();
     const resolved: RunJob = {
       ...job,
-      status: "failed",
+      status: stored.imageTaskArtifact ? "succeeded" : "failed",
       actualCostMinor,
-      failureCode: request.resolution === "charged" ? "billing-resolved-charged" : "billing-resolved-not-charged",
+      failureCode: stored.imageTaskArtifact ? undefined : request.resolution === "charged" ? "billing-resolved-charged" : "billing-resolved-not-charged",
       billingResolutionId: request.resolutionId,
       billingResolvedAt: resolvedAt,
       billingResolvedBy: principal.actorId,
@@ -1193,6 +1251,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
         imageFixtureAttempt: serialized.imageFixtureAttempt, imageFixtureAttemptFingerprint: serialized.imageFixtureAttemptFingerprint,
         imageFixtureResult: serialized.imageFixtureResult, imageFixtureResultFingerprint: serialized.imageFixtureResultFingerprint,
+        imageTaskArtifact: serialized.imageTaskArtifact, imageTaskArtifactFingerprint: serialized.imageTaskArtifactFingerprint,
+        imageTaskArtifactFailures: serialized.imageTaskArtifactFailures,
         requestFingerprint: serialized.requestFingerprint,
         reservedMinor: serialized.reservedMinor,
         actualMinor: serialized.actualMinor,
@@ -1268,6 +1328,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
         ...(stored.imageFixtureAttempt ? { imageFixtureAttempt: stored.imageFixtureAttempt, imageFixtureAttemptFingerprint: stored.imageFixtureAttemptFingerprint } : {}),
         ...(stored.imageFixtureResult ? { imageFixtureResult: stored.imageFixtureResult, imageFixtureResultFingerprint: stored.imageFixtureResultFingerprint } : {}),
+        ...(stored.imageTaskArtifact ? { imageTaskArtifact: stored.imageTaskArtifact, imageTaskArtifactFingerprint: stored.imageTaskArtifactFingerprint } : {}),
+        ...(stored.imageTaskArtifactFailures ? { imageTaskArtifactFailures: stored.imageTaskArtifactFailures } : {}),
         requestFingerprint: stored.requestFingerprint,
         reservedMinor: stored.reservedMinor,
         actualMinor: stored.actualMinor,
@@ -1289,7 +1351,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
         if (stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
-          || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
+          || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
+          || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else {
         const execution = stored.imageExecution;
         if (!execution) throw new Error("图片任务缺少服务端确认快照");
@@ -1306,15 +1369,17 @@ export class InMemoryRunKernel implements RunKernelPort {
           || batch.currency !== request.quote.currency || jobs.length !== 1 || !job || job.id !== request.jobId || job.idempotencyKey !== request.idempotencyKey
           || job.executorKind !== "provider" || job.adapterId !== request.adapterId || job.estimatedCostMinor !== request.quote.estimatedCostMinor
           || JSON.stringify(batch.inputAssetIds) !== JSON.stringify(ids) || JSON.stringify(job.inputAssetIds) !== JSON.stringify(ids)
-          || stored.jobScenarios.size !== 0 || job.outputAssetIds.length !== 0
-          || !["queued", "leased", "running", "billing_unknown", "cancelled", "failed"].includes(job.status)
-          || !["queued", "running", "billing_unknown", "cancelled", "failed"].includes(batch.status)
+          || stored.jobScenarios.size !== 0 || JSON.stringify(job.outputAssetIds) !== JSON.stringify(stored.imageTaskArtifact ? [stored.imageTaskArtifact.assetId] : [])
+          || !["queued", "leased", "running", "billing_unknown", "cancelled", "failed", "succeeded"].includes(job.status)
+          || !["queued", "running", "billing_unknown", "cancelled", "failed", "succeeded"].includes(batch.status)
           || (["queued", "leased", "running", "billing_unknown"].includes(job.status) && (stored.jobReservations.get(job.id) !== request.quote.maxCostMinor || job.actualCostMinor !== undefined))
-          || (job.status === "failed" && (!job.billingResolutionId || job.actualCostMinor === undefined))) {
+          || (["failed", "succeeded"].includes(job.status) && (!job.billingResolutionId || job.actualCostMinor === undefined))
+          || (job.status === "succeeded" && !stored.imageTaskArtifact) || (job.status === "failed" && stored.imageTaskArtifact)) {
           throw new Error("图片任务确认、预留或关闭执行闸门不一致");
         }
         this.assertImageIntent(stored, execution, job);
         this.assertImageFixtureEvidence(stored, execution, job);
+        this.assertImageArtifactEvidence(stored, job);
       }
       const jobsById = new Map(jobs.map((job) => [job.id, job]));
       if (jobsById.size !== jobs.length) throw new Error("任务内核快照中的任务编号重复");
@@ -1389,7 +1454,7 @@ export class InMemoryRunKernel implements RunKernelPort {
           job.billingEvidenceRef,
         ].filter((value) => value !== undefined).length;
         if ((billingResolutionFieldCount !== 0 && billingResolutionFieldCount !== 4)
-          || (billingResolutionFieldCount === 4 && job.status !== "failed")) {
+          || (billingResolutionFieldCount === 4 && job.status !== "failed" && !(job.status === "succeeded" && stored.imageTaskArtifact))) {
           throw new Error("任务内核快照中的计费核账状态不完整");
         }
         if (billingResolutionFieldCount === 4) {
@@ -1691,7 +1756,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (stored.imageDispatchIntentFingerprint || !["queued", "leased", "cancelled"].includes(job.status)) throw new Error("图片任务缺少派发意图");
       return;
     }
-    if (stored.imageDispatchIntentFingerprint !== imageSnapshotFingerprint(intent) || !["running", "billing_unknown", "failed"].includes(job.status)
+    if (stored.imageDispatchIntentFingerprint !== imageSnapshotFingerprint(intent) || !["running", "billing_unknown", "failed", "succeeded"].includes(job.status)
       || intent.jobId !== job.id || intent.batchId !== job.batchId || intent.workerId !== job.leaseOwnerId || intent.leaseId !== job.leaseId
       || intent.recordedAt !== job.startedAt || Date.parse(intent.recordedAt) < Date.parse(execution.confirmedAt)
       || !job.leasedAt || !job.leaseExpiresAt || Date.parse(intent.recordedAt) < Date.parse(job.leasedAt)
@@ -1722,9 +1787,38 @@ export class InMemoryRunKernel implements RunKernelPort {
     if (stored.imageFixtureResultFingerprint !== imageSnapshotFingerprint(result) || result.attemptId !== attempt.id || Date.parse(result.receivedAt) < Date.parse(attempt.attemptedAt)
       || outcome.tenantId !== execution.request.tenantId || outcome.projectId !== execution.request.projectId || outcome.jobId !== job.id || outcome.connectionId !== execution.request.connectionId
       || outcome.requestFingerprint !== execution.requestFingerprint || outcome.billing.state !== "unknown" || job.providerRequestId !== outcome.providerRequestId
-      || !["billing_unknown", "failed"].includes(job.status)
+      || !["billing_unknown", "failed", "succeeded"].includes(job.status)
       || (result.kind === "interrupted" && (outcome.providerStatus !== "unknown" || outcome.artifactStatus !== "absent" || outcome.failureCode !== result.failureCode))
       || !stored.aggregate.audit.some((event) => event.eventType === `image-fixture-${result.kind}` && event.actorId === attempt.actorId && event.metadata.jobId === job.id && event.metadata.attemptId === attempt.id && event.metadata.resultId === result.id)) throw new Error("图片本地响应证据错配");
+  }
+  private validateImageArtifact(principal: RunPrincipal, stored: StoredBatch, record?: GeneratedImageRecord, additionalMetadataBytes = 0): void {
+    const result = stored.imageFixtureResult;
+    if (typeof this.options.validateImageArtifact !== "function") throw new RunKernelError(503, "image_output_policy_not_configured", "尚未配置持久化产物授权政策");
+    if (result?.kind !== "returned" || this.options.validateImageArtifact(principal, ConfirmedImageExecutionSchema.parse(stored.imageExecution!),
+      ImageFixtureResultSchema.parse(result) as Extract<ImageFixtureResult, { kind: "returned" }>, record, additionalMetadataBytes) !== undefined) {
+      throw new RunKernelError(403, "image_output_policy_invalid", "产物政策必须同步确认实际证据");
+    }
+  }
+  private assertImageArtifactEvidence(stored: StoredBatch, job: RunJob): void {
+    const artifact = stored.imageTaskArtifact, result = stored.imageFixtureResult, attempt = stored.imageFixtureAttempt;
+    if (!artifact && stored.imageTaskArtifactFingerprint) throw new Error("产物摘要没有对应记录");
+    if (artifact && (!attempt || result?.kind !== "returned" || stored.imageTaskArtifactFingerprint !== imageSnapshotFingerprint(artifact)
+      || artifact.jobId !== job.id || artifact.batchId !== job.batchId || artifact.attemptId !== attempt.id || artifact.resultId !== result.id
+      || artifact.executionFingerprint !== stored.requestFingerprint || artifact.resultFingerprint !== stored.imageFixtureResultFingerprint
+      || artifact.committedBy !== attempt.actorId || Date.parse(artifact.committedAt) < Date.parse(result.receivedAt)
+      || result.outcome.artifactStatus !== "pending-validation" || result.outcome.failureCode !== undefined
+      || !["billing_unknown", "succeeded"].includes(job.status)
+      || !stored.aggregate.audit.some((event) => event.eventType === "image-artifact-verified" && event.actorId === artifact.committedBy && event.metadata.jobId === job.id
+        && event.metadata.assetId === artifact.assetId && event.metadata.resultId === artifact.resultId && event.metadata.generatedRecordFingerprint === artifact.generatedRecordFingerprint))) throw new Error("产物、实际响应或任务审计错配");
+    const seen = new Set<string>();
+    for (const failure of stored.imageTaskArtifactFailures ?? []) {
+      const key = `${failure.stage}:${failure.code}`;
+      if (!attempt || result?.kind !== "returned" || failure.jobId !== job.id || failure.resultId !== result.id || failure.resultFingerprint !== stored.imageFixtureResultFingerprint
+        || failure.recordedBy !== attempt.actorId || Date.parse(failure.recordedAt) < Date.parse(result.receivedAt) || seen.has(key)
+        || !stored.aggregate.audit.some((event) => event.eventType === "image-artifact-rejected" && event.actorId === failure.recordedBy && event.metadata.jobId === job.id
+          && event.metadata.resultId === failure.resultId && event.metadata.stage === failure.stage && event.metadata.code === failure.code)) throw new Error("产物失败证据损坏");
+      seen.add(key);
+    }
   }
   private assertFrozenImageExecution(input: ConfirmedImageExecution): void {
     const execution = ConfirmedImageExecutionSchema.parse(input);
