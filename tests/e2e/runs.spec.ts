@@ -208,6 +208,33 @@ test("绘制蒙版后原图先验证，蒙版绑定真实底图摘要再确认�
   expect(receipts[3]).toEqual(receipts[1]); expect(receipts[5]).toEqual(receipts[1]);
 });
 
+test("专项验收：三张输出完成两张后取消，结果保留且刷新不继续派发", async ({ page }) => {
+  const panel = await prepare(page);
+  await panel.getByLabel("任务输出数量").fill("3");
+  const createdPromise = page.waitForResponse((response) => new URL(response.url()).pathname === "/studio-api/v1/run-batches" && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click();
+  const batchId = (await (await createdPromise).json()).batch.id as string;
+  await expect(panel.getByLabel("选择任务批次")).toHaveValue(batchId);
+  await panel.getByRole("button", { name: "确认模拟成本并排队" }).click();
+  await panel.getByRole("button", { name: "执行排队任务" }).click();
+  const current = panel.getByRole("region", { name: "当前批次" });
+  await expect(current.getByRole("status")).toHaveText("输出进度：2 / 3 成功");
+  const before = await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json();
+  await panel.getByRole("button", { name: "取消批次" }).click();
+  await expect(current.locator(".run-batch-title")).toContainText("已取消");
+  await expect(current.getByLabel("输出 3 任务")).toContainText("已取消");
+  const cancelled = await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json();
+  expect(cancelled.jobs.slice(0, 2)).toEqual(before.jobs.slice(0, 2)); expect(cancelled.jobs[2].providerRequestId).toBeUndefined();
+  await panel.getByRole("button", { name: "结果回到画布" }).click();
+  await expect(page.getByText(/已放置 2 个模拟结果记录/)).toBeVisible();
+  await expect(page.getByText(/已保存 r\d+/)).toBeVisible();
+  await page.reload(); await page.getByRole("button", { name: "任务与预算", exact: true }).click();
+  await panel.getByLabel("选择任务批次").selectOption(batchId);
+  await expect(current.getByRole("status")).toHaveText("输出进度：2 / 3 成功");
+  await expect(panel.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);
+  expect(await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json()).toEqual(cancelled);
+});
+
 test("超额申请刷新恢复，审批响应丢失后重放不重复结算", async ({ page }) => {
   const { panel, decision } = await prepareOverage(page);
   const batchId = await panel.getByLabel("选择任务批次").inputValue();

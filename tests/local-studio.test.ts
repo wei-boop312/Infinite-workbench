@@ -210,4 +210,45 @@ describe("本地画布任务桥接", () => {
     await verify(url);
     expect((await call(url, "/v1/run-batches", request())).status).toBe(201);
   });
+
+  it("专项验收：部分完成后取消，只停止未开始任务，成功输出及真实账本跨重启保留", async () => {
+    const path = directory(); const url = await listen(path);
+    await call(url, "/context", context()); await verify(url);
+    const draft = await (await call(url, "/v1/run-batches", { ...request(), expectedOutputs: 3 })).json() as RunBatchAggregate;
+    expect((await call(url, `/v1/run-batches/${draft.batch.id}/confirm`, { expectedEstimatedCostMinor: 75, expectedCurrency: "CNY" })).status).toBe(200);
+    const partial = await (await call(url, `/v1/run-batches/${draft.batch.id}/dispatch`, {})).json() as RunBatchAggregate;
+    expect(partial.jobs.map((job) => job.status)).toEqual(["succeeded", "succeeded", "queued"]);
+    expect(await (await call(url, "/v1/projects/project-a/budget")).json()).toMatchObject({ spentMinor: 40, reservedMinor: 25 });
+    const cancelled = await (await call(url, `/v1/run-batches/${draft.batch.id}/cancel`, {})).json() as RunBatchAggregate;
+    expect(cancelled.jobs.slice(0, 2)).toEqual(partial.jobs.slice(0, 2));
+    expect(cancelled.jobs[2]).toMatchObject({ status: "cancelled", outputAssetIds: [] });
+    expect(cancelled.ledger.slice(0, partial.ledger.length)).toEqual(partial.ledger);
+    expect(cancelled.ledger.filter((entry) => entry.settlement === "settled")).toHaveLength(2);
+    expect(await (await call(url, "/v1/projects/project-a/budget")).json()).toMatchObject({ spentMinor: 40, reservedMinor: 0, availableMinor: 9960 });
+    const restarted = await listen(path);
+    expect(await (await call(restarted, `/v1/run-batches/${draft.batch.id}`)).json()).toEqual(cancelled);
+    expect(await (await call(restarted, `/v1/run-batches/${draft.batch.id}/dispatch`, {})).json()).toEqual(cancelled);
+    expect(await (await call(restarted, `/v1/run-batches/${draft.batch.id}/cancel`, {})).json()).toEqual(cancelled);
+    expect(await (await call(restarted, "/v1/projects/project-a/budget")).json()).toMatchObject({ spentMinor: 40, reservedMinor: 0 });
+  });
+
+  it("专项验收：绕过界面直接请求也不能在项目预算耗尽后冻结新任务", async () => {
+    const url = await listen(directory()); await call(url, "/context", context()); await verify(url);
+    for (let index = 0; index < 40; index += 1) {
+      const response = await call(url, "/v1/run-batches", { ...request(), idempotencyKey: `budget-gate-${index}`, expectedOutputs: 10, maxCostMinor: 300 });
+      expect(response.status).toBe(201);
+      const draft = await response.json() as RunBatchAggregate;
+      expect((await call(url, `/v1/run-batches/${draft.batch.id}/confirm`, { expectedEstimatedCostMinor: 250, expectedCurrency: "CNY" })).status).toBe(200);
+    }
+    const before = await (await call(url, "/v1/projects/project-a/budget")).json();
+    expect(before).toMatchObject({ limitMinor: 10000, reservedMinor: 10000, spentMinor: 0, availableMinor: 0 });
+    const excess = await (await call(url, "/v1/run-batches", { ...request(), idempotencyKey: "excess-direct-request" })).json() as RunBatchAggregate;
+    const blocked = await call(url, `/v1/run-batches/${excess.batch.id}/confirm`, { expectedEstimatedCostMinor: 50, expectedCurrency: "CNY" });
+    expect(blocked.status).toBe(422); expect(await blocked.json()).toEqual({ error: "project_budget_exceeded" });
+    const unchanged = await (await call(url, `/v1/run-batches/${excess.batch.id}`)).json() as RunBatchAggregate;
+    expect(unchanged.jobs).toEqual([]); expect(unchanged.batch.status).toBe("awaiting_confirmation");
+    expect(unchanged.audit.at(-1)?.eventType).toBe("confirmation-rejected");
+    expect(await (await call(url, "/v1/projects/project-a/budget")).json()).toEqual(before);
+    expect(await (await call(url, "/health")).json()).toMatchObject({ realExecutorsEnabled: false, assetVerificationEnabled: true });
+  });
 });
