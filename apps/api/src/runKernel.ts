@@ -10,6 +10,7 @@ import {
   type ClaimRunJobsRequest,
   type ExecuteRunJobRequest,
   type ProjectBudgetSnapshot,
+  type ResolveBillingUnknownRequest,
   type RetryRunJobRequest,
   type RunAuditEvent,
   type RunBatch,
@@ -26,7 +27,7 @@ export type RunPrincipal = {
   actorId: string;
 };
 
-export type RunPermission = "run:read" | "run:create" | "run:confirm" | "run:cancel" | "run:execute" | "run:retry";
+export type RunPermission = "run:read" | "run:create" | "run:confirm" | "run:cancel" | "run:execute" | "run:retry" | "run:reconcile-billing";
 
 export type StaticRunAccess = RunPrincipal & {
   bearerToken: string;
@@ -127,6 +128,7 @@ export interface RunKernelPort {
   confirmBatch(principal: RunPrincipal, batchId: string, confirmation: ConfirmRunBatchRequest): RunBatchAggregate;
   claimBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest): RunJobClaimResult;
   executeLeasedJob(principal: RunPrincipal, jobId: string, request: ExecuteRunJobRequest): RunBatchAggregate;
+  resolveBillingUnknown(principal: RunPrincipal, jobId: string, request: ResolveBillingUnknownRequest): RunBatchAggregate;
   dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   reconcileBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   retryJob(principal: RunPrincipal, jobId: string, request: RetryRunJobRequest): RunBatchAggregate;
@@ -155,6 +157,26 @@ function requestFingerprint(request: CreateRunBatchRequest): string {
 
 function idempotencyIndexKey(principal: RunPrincipal, request: CreateRunBatchRequest): string {
   return `${scopedProjectKey(principal.tenantId, request.projectId)}\u0000${request.idempotencyKey}`;
+}
+
+function billingResolutionFingerprint(request: ResolveBillingUnknownRequest): string {
+  const canonical = request.resolution === "charged"
+    ? {
+      resolutionId: request.resolutionId,
+      resolution: request.resolution,
+      expectedReservedMinor: request.expectedReservedMinor,
+      expectedCurrency: request.expectedCurrency,
+      evidenceRef: request.evidenceRef,
+      actualCostMinor: request.actualCostMinor,
+    }
+    : {
+      resolutionId: request.resolutionId,
+      resolution: request.resolution,
+      expectedReservedMinor: request.expectedReservedMinor,
+      expectedCurrency: request.expectedCurrency,
+      evidenceRef: request.evidenceRef,
+    };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 export class InMemoryRunKernel implements RunKernelPort {
@@ -604,6 +626,91 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.copy(stored.aggregate);
   }
 
+  resolveBillingUnknown(
+    principal: RunPrincipal,
+    jobId: string,
+    request: ResolveBillingUnknownRequest,
+  ): RunBatchAggregate {
+    const { stored, job } = this.findJob(principal, jobId);
+    const batch = stored.aggregate.batch;
+    this.assertAllowed(principal, batch.projectId, "run:reconcile-billing");
+    const fingerprint = billingResolutionFingerprint(request);
+    const resolutionEvents = stored.aggregate.audit.filter((event) => event.metadata.jobId === jobId
+      && ["billing-resolved-charged", "billing-resolved-not-charged"].includes(event.eventType));
+    const repeated = resolutionEvents.find((event) => event.metadata.resolutionId === request.resolutionId);
+    if (repeated) {
+      if (repeated.metadata.requestFingerprint !== fingerprint) {
+        throw new RunKernelError(409, "billing_resolution_idempotency_conflict", "相同核账动作编号对应了不同参数");
+      }
+      return this.copy(stored.aggregate);
+    }
+    if (resolutionEvents.length > 0 || job.billingResolutionId) {
+      throw new RunKernelError(409, "billing_already_resolved", "该任务的计费状态已经处理");
+    }
+    if (job.status !== "billing_unknown") {
+      throw new RunKernelError(409, "billing_state_not_unknown", "只有计费待核对任务可以执行核账");
+    }
+    const latest = this.latestJobs(stored.aggregate.jobs).find((candidate) => candidate.outputIndex === job.outputIndex);
+    if (!latest || latest.id !== job.id) throw new RunKernelError(409, "run_job_superseded", "该任务已有后续尝试");
+    const reservedMinor = stored.jobReservations.get(job.id) ?? 0;
+    if (request.expectedReservedMinor !== reservedMinor || request.expectedCurrency !== batch.currency) {
+      stored.aggregate.audit.push(this.audit(batch, principal.actorId, "billing-resolution-rejected", {
+        jobId,
+        resolutionId: request.resolutionId,
+        reason: "snapshot-mismatch",
+      }));
+      this.persist();
+      throw new RunKernelError(409, "billing_resolution_snapshot_mismatch", "核账所依据的预留金额或币种已变化");
+    }
+    const actualCostMinor = request.resolution === "charged" ? request.actualCostMinor : 0;
+    if (actualCostMinor > reservedMinor) {
+      stored.aggregate.audit.push(this.audit(batch, principal.actorId, "billing-resolution-rejected", {
+        jobId,
+        resolutionId: request.resolutionId,
+        reason: "actual-exceeds-reservation",
+      }));
+      this.persist();
+      throw new RunKernelError(422, "billing_actual_exceeds_reservation", "外部实际扣费超过预留，必须升级处理而不能自动入账");
+    }
+
+    const resolvedAt = new Date(this.clock()).toISOString();
+    const resolved: RunJob = {
+      ...job,
+      status: "failed",
+      actualCostMinor,
+      failureCode: request.resolution === "charged" ? "billing-resolved-charged" : "billing-resolved-not-charged",
+      billingResolutionId: request.resolutionId,
+      billingResolvedAt: resolvedAt,
+      billingResolvedBy: principal.actorId,
+      billingEvidenceRef: request.evidenceRef,
+      finishedAt: resolvedAt,
+    };
+    this.replaceJob(stored.aggregate, resolved);
+    stored.aggregate.audit.push(this.audit(
+      batch,
+      principal.actorId,
+      request.resolution === "charged" ? "billing-resolved-charged" : "billing-resolved-not-charged",
+      {
+        jobId,
+        resolutionId: request.resolutionId,
+        evidenceRef: request.evidenceRef,
+        actualCostMinor: String(actualCostMinor),
+        requestFingerprint: fingerprint,
+      },
+    ));
+    this.settleReservation(
+      stored,
+      resolved,
+      actualCostMinor,
+      request.resolution === "charged" ? "settled" : "released",
+      principal.actorId,
+    );
+    this.refreshBatchStatus(stored);
+    stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    this.persist();
+    return this.copy(stored.aggregate);
+  }
+
   cancelBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
     const stored = this.requireBatch(principal, batchId);
     const aggregate = stored.aggregate;
@@ -797,6 +904,22 @@ export class InMemoryRunKernel implements RunKernelPort {
           || (job.status === "queued" && leaseFieldCount !== 0)
           || (leaseFieldCount !== 0 && leaseFieldCount !== 4)) {
           throw new Error("任务内核快照中的执行租约不完整");
+        }
+        const billingResolutionFieldCount = [
+          job.billingResolutionId,
+          job.billingResolvedAt,
+          job.billingResolvedBy,
+          job.billingEvidenceRef,
+        ].filter((value) => value !== undefined).length;
+        if ((billingResolutionFieldCount !== 0 && billingResolutionFieldCount !== 4)
+          || (billingResolutionFieldCount === 4 && job.status !== "failed")) {
+          throw new Error("任务内核快照中的计费核账状态不完整");
+        }
+        if (billingResolutionFieldCount === 4) {
+          const resolutionEvent = stored.aggregate.audit.find((event) => event.metadata.jobId === job.id
+            && event.metadata.resolutionId === job.billingResolutionId
+            && ["billing-resolved-charged", "billing-resolved-not-charged"].includes(event.eventType));
+          if (!resolutionEvent) throw new Error("任务内核快照缺少计费核账审计");
         }
       }
       for (const jobId of stored.jobReservations.keys()) {

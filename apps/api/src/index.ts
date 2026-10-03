@@ -8,6 +8,7 @@ import {
   ExecuteRunJobRequestSchema,
   MockRunRequestSchema,
   ObjectStorageGrantRequestSchema,
+  ResolveBillingUnknownRequestSchema,
   RetryRunJobRequestSchema,
 } from "@canvas/contracts";
 import type { CanvasDocument } from "@canvas/contracts";
@@ -178,6 +179,36 @@ export function createApiServer(options: ApiServerOptions = {}) {
         }
         const code = error instanceof Error && error.message === "REQUEST_TOO_LARGE" ? 413 : 400;
         sendJson(response, code, { error: code === 413 ? "request_too_large" : "invalid_run_job_execution" });
+      }
+      return;
+    }
+
+    const resolveBillingMatch = pathname.match(/^\/v1\/run-jobs\/([^/]+)\/resolve-billing$/);
+    if (resolveBillingMatch && request.method === "POST") {
+      const kernel = options.runKernel;
+      if (!kernel) {
+        sendJson(response, 503, { error: "run_kernel_not_configured" });
+        return;
+      }
+      const principal = kernel.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "run_authentication_required" });
+        return;
+      }
+      try {
+        const input = ResolveBillingUnknownRequestSchema.parse(await readJson(request, MAX_RUN_BODY_BYTES));
+        sendJson(response, 200, kernel.resolveBillingUnknown(
+          principal,
+          decodeURIComponent(resolveBillingMatch[1]),
+          input,
+        ));
+      } catch (error) {
+        if (error instanceof RunKernelError) {
+          sendJson(response, error.status, { error: error.code });
+          return;
+        }
+        const code = error instanceof Error && error.message === "REQUEST_TOO_LARGE" ? 413 : 400;
+        sendJson(response, code, { error: code === 413 ? "request_too_large" : "invalid_billing_resolution" });
       }
       return;
     }

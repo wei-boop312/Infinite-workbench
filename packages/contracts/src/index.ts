@@ -193,6 +193,10 @@ export const RunJobSchema = z.object({
   leaseOwnerId: IdSchema.optional(),
   leasedAt: IsoDateSchema.optional(),
   leaseExpiresAt: IsoDateSchema.optional(),
+  billingResolutionId: IdSchema.optional(),
+  billingResolvedAt: IsoDateSchema.optional(),
+  billingResolvedBy: IdSchema.optional(),
+  billingEvidenceRef: IdSchema.optional(),
   failureCode: IdSchema.optional(),
   startedAt: IsoDateSchema.optional(),
   finishedAt: IsoDateSchema.optional(),
@@ -266,6 +270,23 @@ export const ExecuteRunJobRequestSchema = z.object({
   leaseId: IdSchema,
 }).strict();
 
+const ResolveBillingUnknownBaseSchema = z.object({
+  resolutionId: IdSchema,
+  expectedReservedMinor: z.number().int().nonnegative(),
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/),
+  evidenceRef: IdSchema,
+}).strict();
+
+export const ResolveBillingUnknownRequestSchema = z.discriminatedUnion("resolution", [
+  ResolveBillingUnknownBaseSchema.extend({
+    resolution: z.literal("charged"),
+    actualCostMinor: z.number().int().positive(),
+  }).strict(),
+  ResolveBillingUnknownBaseSchema.extend({
+    resolution: z.literal("not-charged"),
+  }).strict(),
+]);
+
 export const RunAuditEventSchema = z.object({
   id: IdSchema,
   tenantId: IdSchema,
@@ -287,6 +308,9 @@ export const RunAuditEventSchema = z.object({
     "job-failed",
     "job-timed-out",
     "billing-unknown",
+    "billing-resolution-rejected",
+    "billing-resolved-charged",
+    "billing-resolved-not-charged",
     "cost-settled",
     "job-retry-created",
     "batch-cancelled",
@@ -391,6 +415,7 @@ export type ConfirmRunBatchRequest = z.infer<typeof ConfirmRunBatchRequestSchema
 export type RetryRunJobRequest = z.infer<typeof RetryRunJobRequestSchema>;
 export type ClaimRunJobsRequest = z.infer<typeof ClaimRunJobsRequestSchema>;
 export type ExecuteRunJobRequest = z.infer<typeof ExecuteRunJobRequestSchema>;
+export type ResolveBillingUnknownRequest = z.infer<typeof ResolveBillingUnknownRequestSchema>;
 export type RunAuditEvent = z.infer<typeof RunAuditEventSchema>;
 export type ProjectBudgetSnapshot = z.infer<typeof ProjectBudgetSnapshotSchema>;
 export type RunBatchAggregate = z.infer<typeof RunBatchAggregateSchema>;
