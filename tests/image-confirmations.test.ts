@@ -50,17 +50,17 @@ function setup(options: { path?: string; limit?: number; format?: "png" | "jpeg"
   const path = options.path ?? join(directory!, "state.sqlite");
   const store = new SqliteRunKernelStateStore(path); stores.push(store);
   if (!store.loadCatalog()) store.transaction(() => store.saveCatalog({ schemaVersion: 1, projects: [{ projectId: "project-a", assets: [], constraints: [constraint(options.format)] }] }));
-  let now = Date.parse(at), runAllowed = true, assetAllowed = true;
+  let now = Date.parse(at), runAllowed = true, assetAllowed = true, readOnly = false;
   const scope = (actor: typeof principal, id: string) => actor.tenantId === principal.tenantId && actor.actorId === "writer" && id === "project-a";
   const authenticate = (request: { headers: { authorization?: string } }) => request.headers.authorization === "Bearer writer" ? principal : null;
-  const runAuthorizer = { authenticate, allows: (actor: typeof principal, id: string) => runAllowed && scope(actor, id) };
+  const runAuthorizer = { authenticate, allows: (actor: typeof principal, id: string, permission: string) => runAllowed && scope(actor, id) && (!readOnly || permission === "run:read") };
   const assetAuthorizer = { authenticate, allows: (actor: typeof principal, id: string) => assetAllowed && scope(actor, id) };
   const authorizer = { authenticate, allows: scope };
   const kernel = new SqliteRunKernel({ stateStore: store, authorizer: runAuthorizer, budgets: [{ tenantId: principal.tenantId, projectId: "project-a", currency: "CNY", limitMinor: options.limit ?? 1000 }], clock: () => now });
   const estimate = vi.fn((_config: unknown, _input: unknown, time: string) => ({ mode: "local-fixture" as const, evidenceRef: "no-real-price-or-call",
     quote: { id: "fixture-quote", version: "price-fixture-v1", source: "server-price-table" as const, currency: "CNY", estimatedCostMinor: 25, maxCostMinor: 30, expiresAt: new Date(Date.parse(time) + 60_000).toISOString() } }));
   const service = new LocalImageProviders({ tenantId: principal.tenantId, stateStore: store, authorizer, assetAuthorizer, runAuthorizer, runKernel: kernel, estimate, maxMetadataBytes: options.quota, clock: () => now });
-  return { store, path, kernel, service, estimate, advance: (ms: number) => { now += ms; }, revokeRun: () => { runAllowed = false; }, revokeAsset: () => { assetAllowed = false; } };
+  return { store, path, kernel, service, estimate, advance: (ms: number) => { now += ms; }, revokeRun: () => { runAllowed = false; }, revokeAsset: () => { assetAllowed = false; }, restrictToReadOnly: () => { readOnly = true; } };
 }
 function register(fixture: ReturnType<typeof setup>, config = connection()) { fixture.service.registerRevision(principal, config, config.revision - 1); }
 function preparation(fixture: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) { return fixture.service.createPreparation(principal, selection(extra)); }
@@ -80,6 +80,40 @@ const rejectCode = (promise: Promise<unknown>, code: string) => expect(promise).
 const untouched = (fixture: ReturnType<typeof setup>) => { expect(fixture.store.load()?.batches).toHaveLength(0); expect(fixture.kernel.getBudget(principal, "project-a")).toMatchObject({ reservedMinor: 0, spentMinor: 0 }); };
 
 describe("本地图片确认与统一预算/任务原子绑定（尚不执行）", () => {
+  it("公开人工约束与输入从不可变准备单恢复，而不是当前目录；不泄漏连接秘密", () => {
+    const fixture = setup(); register(fixture); source(fixture);
+    const prepared = preparation(fixture, { operation: "edit", inputAssetIds: ["source"] });
+    expect(prepared.constraint).toEqual(constraint()); expect(prepared.requestTemplate.inputs[0]).toMatchObject({ assetId: "source", checksumSha256: sha(png), byteSize: png.length, width: 1, height: 1 });
+    fixture.store.transaction(() => { const catalog = fixture.store.loadCatalog()!; catalog.projects[0].constraints[0].brandRules.style = "后来修改"; fixture.store.saveCatalog(catalog); });
+    expect(fixture.service.getPreparation(principal, "project-a", prepared.id)).toEqual(prepared);
+    expect(JSON.stringify(prepared)).not.toMatch(/never-called|opaque-never-resolved|baseUrl|credentialRef/); untouched(fixture);
+  });
+  it("只读确认恢复未确认/已确认/已取消历史，既不确认也不再次预留；撤权及跨范围拒绝", async () => {
+    const fixture = setup(); register(fixture); const prepared = preparation(fixture), before = fixture.store.load();
+    expect(fixture.service.getConfirmation(principal, "project-a", prepared.id).confirmation).toBeNull(); expect(fixture.store.load()).toEqual(before);
+    const confirmed = await confirm(fixture, prepared); fixture.advance(61_000); register(fixture, connection({ revision: 2, enabled: false }));
+    const snapshot = fixture.store.load(); expect(fixture.service.getConfirmation(principal, "project-a", prepared.id).confirmation).toEqual(confirmed); expect(fixture.store.load()).toEqual(snapshot);
+    fixture.kernel.cancelBatch(principal, confirmed.aggregate.batch.id); const cancelled = fixture.store.load();
+    expect(fixture.service.getConfirmation(principal, "project-a", prepared.id).confirmation?.aggregate.batch.status).toBe("cancelled"); expect(fixture.store.load()).toEqual(cancelled);
+    const missing = vi.spyOn(fixture.store, "load").mockReturnValue(null);
+    expect(() => fixture.service.getConfirmation(principal, "project-a", prepared.id)).toThrow(expect.objectContaining({ code: "run_state_unavailable" })); missing.mockRestore();
+    fixture.restrictToReadOnly(); expect(fixture.service.getConfirmation(principal, "project-a", prepared.id).confirmation?.aggregate.batch.status).toBe("cancelled");
+    await rejectCode(confirm(fixture, prepared), "image_confirmation_permission_denied"); expect(fixture.store.load()).toEqual(cancelled);
+    expect(() => fixture.service.getConfirmation({ ...principal, tenantId: "foreign" }, "project-a", prepared.id)).toThrow();
+    expect(() => fixture.service.getConfirmation(principal, "foreign", prepared.id)).toThrow();
+    fixture.revokeRun(); expect(() => fixture.service.getConfirmation(principal, "project-a", prepared.id)).toThrow(); expect(fixture.store.load()).toEqual(cancelled);
+  });
+  it("只读HTTP确认恢复要求认证且拒绝查询/范围/正文/POST，不改变预算或任务", async () => {
+    const fixture = setup(); register(fixture); const prepared = preparation(fixture);
+    const server = createApiServer({ imageProviders: fixture.service }); servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const address = server.address(); if (!address || typeof address === "string") throw new Error();
+    const path = `http://127.0.0.1:${address.port}/v1/projects/project-a/image-preparations/${prepared.id}/confirmation`;
+    expect((await fetch(path)).status).toBe(401);
+    const good = await fetch(path, { headers: { authorization: "Bearer writer" } }); expect(good.headers.get("cache-control")).toBe("no-store"); expect((await good.json()).confirmation).toBeNull();
+    expect((await fetch(path + "?pretend=confirmed", { headers: { authorization: "Bearer writer" } })).status).toBe(400);
+    expect((await fetch(path, { headers: { authorization: "Bearer writer", range: "bytes=0-1" } })).status).toBe(400);
+    expect((await fetch(path, { method: "POST", headers: { authorization: "Bearer writer" }, body: "{}" })).status).toBe(404); untouched(fixture);
+  });
   it("完整摘要/估价/上限/币种确认，冻结实际任务请求及协议摘要而非准备单摘要", async () => {
     const fixture = setup(); register(fixture); const prepared = preparation(fixture);
     const result = await confirm(fixture, prepared);

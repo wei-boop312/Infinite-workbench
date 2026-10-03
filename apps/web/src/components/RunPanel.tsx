@@ -291,7 +291,13 @@ export default function RunPanel(props: Props) {
       <button className="run-secondary" disabled={busy} onClick={() => void run(async (client) => {
         await client.register(contextRef.current); setReady(true); await refresh(client);
       }, false)}>{busy ? "正在同步…" : "刷新任务记录"}</button>
-      {ready && <ImagePreparationPanel projectId={projectId} assets={assets} constraints={constraints} missingOriginalAssetIds={missingOriginalAssetIds} disabled={busy || Boolean(decision)} />}
+      {ready && <ImagePreparationPanel projectId={projectId} assets={assets} constraints={constraints} missingOriginalAssetIds={missingOriginalAssetIds} disabled={busy || Boolean(decision)}
+        onConfirmed={(result, nextBudget) => {
+          if (!alive.current || result.aggregate.batch.projectId !== projectId) return;
+          applyBatches([result.aggregate, ...batchesRef.current.filter(item => item.batch.id !== result.aggregate.batch.id)]);
+          setSelectedBatchId(result.aggregate.batch.id);
+          if (nextBudget?.projectId === projectId) setBudget(nextBudget);
+        }} />}
       <fieldset disabled={busy || !ready || Boolean(decision)} className="run-form">
         <legend>新建产品精修批次</legend>
         <label>商品图片<select aria-label="任务商品图片" value={assetId} onChange={(event) => setAssetId(event.target.value)}>

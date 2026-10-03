@@ -61,7 +61,7 @@ describe("明确选择与非授权准备单浏览器合同", () => {
   });
   it.each(["project", "model", "parameters", "id"])("客户端拒绝响应错配 %s，不能把其他选择或历史当成功", async damage => {
     const record = fixturePublicPreparation();
-    if (damage === "project") { record.projectId = "foreign"; record.requestTemplate.projectId = "foreign"; }
+    if (damage === "project") { record.projectId = "foreign"; record.requestTemplate.projectId = "foreign"; record.constraint.projectId = "foreign"; }
     if (damage === "model") { record.requestTemplate.model = "different"; record.connection.models[0].model = "different"; }
     if (damage === "parameters") record.requestTemplate.parameters.prompt = "not-the-human-choice";
     if (damage === "id") record.id = "foreign-id";

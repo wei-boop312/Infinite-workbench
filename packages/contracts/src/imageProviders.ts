@@ -225,21 +225,6 @@ export const ImageProviderPublicSchema = z.object({
   extraParameters: z.array(ImageExtraParameterRuleSchema).max(16).refine((rules) => unique(rules.map((rule) => rule.name))),
 }).strict();
 export const ImageProviderListSchema = z.array(ImageProviderPublicSchema).max(64);
-export const ImagePreparationPublicSchema = z.object({
-  id: Id, projectId: Id, status: z.literal("unconfirmed"), executionAuthorized: z.literal(false),
-  protocolPreparation: z.literal("not-run"), mode: z.literal("local-fixture"), createdAt: DateTime,
-  snapshotFingerprint: Hash, connection: ImageProviderPublicSchema,
-  requestTemplate: ImageRequestTemplateSchema, pricing: LocalImageQuoteSchema,
-}).strict().superRefine((record, context) => {
-  const template = record.requestTemplate;
-  const model = record.connection.models.find((item) => item.model === template.model);
-  if (template.projectId !== record.projectId || template.connectionId !== record.connection.id
-    || template.connectionRevision !== record.connection.revision || !model || model.capabilityVersion !== template.capabilityVersion
-    || template.protection !== "none" || !model.operations.includes(template.operation)
-    || JSON.stringify(template.quote) !== JSON.stringify(record.pricing.quote)) {
-    context.addIssue({ code: "custom", message: "公开准备单关系不一致" });
-  }
-});
 // A browser recovery pointer is a selection, never a quote or authorization.
 export const ImagePreparationRecoverySchema = z.object({
   schemaVersion: z.literal(1), selection: CreateImagePreparationSchema, preparationId: Id.optional(),
@@ -288,5 +273,4 @@ export type ImageProviderRevision = z.infer<typeof ImageProviderRevisionSchema>;
 export type LocalImageQuote = z.infer<typeof LocalImageQuoteSchema>;
 export type ImageProviderPublic = z.infer<typeof ImageProviderPublicSchema>;
 export type ImagePublicModel = z.infer<typeof ImagePublicModelSchema>;
-export type ImagePreparationPublic = z.infer<typeof ImagePreparationPublicSchema>;
 export type ImagePreparationRecovery = z.infer<typeof ImagePreparationRecoverySchema>;

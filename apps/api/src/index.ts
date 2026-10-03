@@ -130,15 +130,19 @@ export function createApiServer(options: ApiServerOptions = {}) {
     const providerMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-providers(?:\/([^/]+))?$/);
     const preparationMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-preparations(?:\/([^/]+))?$/);
     const imageConfirmationMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-preparations\/([^/]+)\/confirm$/);
-    if ((imageConfirmationMatch && request.method === "POST") || (providerMatch && request.method === "GET") || (preparationMatch && (request.method === "GET" || (request.method === "POST" && !preparationMatch[2])))) {
+    const imageConfirmationHistoryMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-preparations\/([^/]+)\/confirmation$/);
+    if ((imageConfirmationHistoryMatch && request.method === "GET") || (imageConfirmationMatch && request.method === "POST") || (providerMatch && request.method === "GET") || (preparationMatch && (request.method === "GET" || (request.method === "POST" && !preparationMatch[2])))) {
       const providers = options.imageProviders;
       if (!providers) { sendJson(response, 503, { error: "image_provider_catalog_not_configured" }); return; }
       const principal = providers.authenticate(request);
       if (!principal) { sendJson(response, 401, { error: "image_provider_authentication_required" }); return; }
       try {
-        const match = (imageConfirmationMatch ?? providerMatch ?? preparationMatch)!;
+        const match = (imageConfirmationHistoryMatch ?? imageConfirmationMatch ?? providerMatch ?? preparationMatch)!;
         const projectId = decodeURIComponent(match[1]);
-        if (imageConfirmationMatch) sendJson(response, 200, await providers.confirmPreparation(principal, projectId, decodeURIComponent(match[2]), ConfirmImagePreparationSchema.parse(await readJson(request, 16 * 1024))));
+        if (imageConfirmationHistoryMatch) {
+          if (requestUrl.search || request.headers["transfer-encoding"] || Number(request.headers["content-length"] ?? 0) !== 0 || request.headers.range) throw new RunKernelError(400, "invalid_image_provider_request", "只读确认恢复不接受查询、正文或范围");
+          sendJson(response, 200, providers.getConfirmation(principal, projectId, decodeURIComponent(match[2])));
+        } else if (imageConfirmationMatch) sendJson(response, 200, await providers.confirmPreparation(principal, projectId, decodeURIComponent(match[2]), ConfirmImagePreparationSchema.parse(await readJson(request, 16 * 1024))));
         else if (providerMatch) sendJson(response, 200, providerMatch[2] ? providers.get(principal, projectId, decodeURIComponent(providerMatch[2])) : providers.list(principal, projectId));
         else if (request.method === "POST") {
           const input = CreateImagePreparationSchema.parse(await readJson(request, 128 * 1024));

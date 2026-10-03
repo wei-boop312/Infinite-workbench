@@ -1,6 +1,6 @@
 # 阶段 4 多供应商图片 API 接入计划
 
-日期：2026-10-04（上海）。状态：**里程碑 1 合同/闸门、2 官方纯协议、3 兼容中转差异、4 Google 原生纯协议、5A 候选资产验证/保存、5B1 目录/准备单、5B2A 确认/预留、5B2B1 租约/重建/意图、5B2B2A 本地假传输/原始响应、5B2B2B 实际本地响应授权/资产任务原子绑定、5B3A 二进制回读、5B3B 浏览器原文件缓存及 5B4A 供应商选择/参数与假报价准备 UI 已通过本地验收；里程碑 5 整体和真实供应商接入尚未验收**。阶段 3 本机零费用验收基线为 `d1c0246`。
+日期：2026-10-04（上海）。状态：**里程碑 1 合同/闸门、2 官方纯协议、3 兼容中转差异、4 Google 原生纯协议、5A 候选资产验证/保存、5B1 目录/准备单、5B2A 确认/预留、5B2B1 租约/重建/意图、5B2B2A 本地假传输/原始响应、5B2B2B 实际本地响应授权/资产任务原子绑定、5B3A 二进制回读、5B3B 浏览器原文件缓存、5B4A 供应商选择/参数假报价准备 UI 及 5B4B 完整人工冻结确认/只读恢复已通过本地验收；里程碑 5 整体和真实供应商接入尚未验收**。阶段 3 本机零费用验收基线为 `d1c0246`。
 
 接入顺序遵循冻结路线图：一个官方图片 API → 一个 OpenAI 兼容中转协议 → 一个非 OpenAI 协议。画布不直接访问这些服务，全部由统一任务、预算、权限与资产层承接。
 
@@ -36,10 +36,12 @@ OpenAI 的 Image API 提供生成和编辑端点；Responses 还可以通过图�
 
 ## 下一次实施入口
 
-先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，继续**完整人工摘要/币种/估价及上限确认 UI（5B4B）**。5B4A 见 `docs/image-preparation-ui.md`；5A 至 5B3B 分别见 `generated-image-ingestion.md`、`image-provider-preparations.md`、`image-task-confirmations.md`、`image-task-leases.md`、`image-fixture-execution.md`、`image-task-artifacts.md`、`generated-asset-readback.md`、`generated-asset-cache.md`，不重复实现。必填 authorizeCommit 已根据实际服务端证据实现本地授权，资产/任务已同库原子绑定；不是生产执行授权。
+先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，继续**5B5 实际任务结果谱系与已缓存资产回画布**。5B4B 见 `docs/image-confirmation-ui.md`，5B4A 见 `docs/image-preparation-ui.md`；5A 至 5B3B 分别见 `generated-image-ingestion.md`、`image-provider-preparations.md`、`image-task-confirmations.md`、`image-task-leases.md`、`image-fixture-execution.md`、`image-task-artifacts.md`、`generated-asset-readback.md`、`generated-asset-cache.md`，不重复实现。必填 authorizeCommit 已根据实际服务端证据实现本地授权，资产/任务已同库原子绑定；不是生产执行授权。
 
-二进制回读、原文件/代理原子缓存和供应商明确选择/准备 UI 已验收。公开能力和中转受控参数规则隐藏地址/鉴权/凭证；目录默认空，不自动种入模型/价格、诊断或执行。准备保持 unconfirmed/executionAuthorized=false/protocolPreparation=not-run，不创建任务/预留；存储指针先于 POST，响应不明只人工恢复原动作，目录/参数/报价漂移需新动作。下一步先补可信完整冻结人工约束/输入摘要，再接币种/估价/上限人工确认到已有统一任务事务，确认仍 confirmed-not-dispatchable/executionAuthorized=false，不开放生成或自动结算。其后任务结果谱系和缓存资产回画布；只引用 assetId，不保存 Base64/临时 URL/令牌，不覆写跨项目资产/预算，不扩张目标。真实执行闸门保持关闭。
+完整服务端冻结人工约束、原图/蒙版摘要和假报价已公开给人工核对，不能用当前表单/名称替代原快照。明确勾选后确认原摘要/币种/估价/上限，既有事务按 maxCostMinor 一次预留并创建真实本地任务；原准备仍 unconfirmed/executionAuthorized=false/protocolPreparation=not-run，独立确认仍 confirmed-not-dispatchable/executionAuthorized=false，不开放生成或自动结算。确认前先保存只读项目/准备编号/摘要指针，丢失/错配/取消后只 GET 恢复；严格只读服务不恢复租约、重报价或改账本，任务快照缺失不假装未确认。当前参数/目录/报价漂移须新动作；目录默认空，不种入模型/价格、诊断或执行。
+
+下一步先核对实际产物、回读/缓存、现有画布历史、assetId/缓存标记/元数据、项目包和普通加资产隔离。提供受权限保护的实际绑定任务结果谱系，再只允许当前项目已完整缓存且元数据一致的原文件回画布；保留输入/输出/约束/模型/确认及费用状态关系。不能用客户端自报任务或假编号绕过；只引用 assetId，不保存 Base64/临时/供应商 URL/令牌，不覆写跨项目资产，不重新生成、核账或释放未知预留。仍只做本地零费用验证，日常生成执行关闭，不扩张目标。
 
 保留现有只调用一次的显式假传输路径及同库产物提交，不把 not-connected 意图或 attempted 写前记录冒充已送达/入库授权。保留旧 mock 精修、用户记录和配置指纹，不复用自动成功/已知费用结算。好图、坏图或保存失败与计费分别处理，未知扣费保持上限预留；有图仅经现有人工核账/第二人超额审批后 succeeded，无图核账后 failed。原响应快照不被后续核账覆盖，显式产物恢复只处理已保存原包，不自动重试。资产政策继续复查；4K 超限不先付费后缩图，锁区未验收保持拒绝。不读取密钥或启用付费生成。
 
-里程碑 1 至 4 分别见 `docs/image-provider-contract.md`、`docs/openai-image-protocol.md`、`docs/compatible-image-protocol.md`、`docs/google-image-protocol.md`；最新 429 项单元/集成（34 文件）、58 项 Chrome 回归、6 个工作区构建通过。现有 `ProviderConnectionSchema` 只是阶段 0 占位；本地协议/目录/准备/确认/租约/假传输/产物/人工费用整合/二进制回读/缓存及供应商选择界面，不代表真实供应商、生产 Worker/网络、凭证管理、可信价格或真实费用已验收。
+里程碑 1 至 4 分别见 `docs/image-provider-contract.md`、`docs/openai-image-protocol.md`、`docs/compatible-image-protocol.md`、`docs/google-image-protocol.md`；最新 446 项单元/集成（35 文件）、71 项 Chrome 回归、6 个工作区构建通过。5B4B 三协议确认及编辑原图使用实际本机 HTTP/自有临时 SQLite/浏览器整合，不调用供应商。现有 `ProviderConnectionSchema` 只是阶段 0 占位；本地协议/目录/准备/确认/租约/假传输/产物/人工费用整合/回读/缓存及选择/人工确认界面，不代表真实供应商、生产 Worker/网络、凭证管理、可信价格或真实费用已验收。

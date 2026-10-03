@@ -3,7 +3,8 @@ import {
   RunBatchAggregateSchema,
   RunBatchListSchema,
   VerifiedImageSchema,
-  CreateImagePreparationSchema, ImageProviderListSchema, ImagePreparationPublicSchema,
+  CreateImagePreparationSchema, ImageProviderListSchema, ImagePreparationPublicSchema, ConfirmImagePreparationSchema, ImageConfirmationPublicSchema, ImageConfirmationHistorySchema,
+  type ImagePreparationPublic, type ImageConfirmationPublic,
   type CreateImagePreparation,
   type CreateRunBatchRequest,
   type RegisterRunContextRequest,
@@ -79,6 +80,9 @@ const ERROR_LABELS: Record<string, string> = {
   image_output_dimensions_exceeded: "输出超过本机 1600 万像素或单边 8192 限制，未估价。",
   image_protocol_not_implemented: "自定义协议没有适配器，不能准备。",
   image_output_constraint_changed: "原约束快照已变化，请核对后创建新动作。",
+  image_confirmation_permission_denied: "当前身份没有人工确认权限；不会创建任务或预留。",
+  image_confirmation_not_configured: "当前服务未配置本地确认事务，保持未确认。",
+  image_confirmation_snapshot_mismatch: "冻结摘要或币种/估价/上限不匹配，未确认，请只读核对原记录。",
 };
 
 export function money(minor: number): string { return `¥${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`; }
@@ -120,7 +124,7 @@ export class StudioRunClient {
       });
     } catch (error) {
       if (this.signal.aborted) throw error;
-      throw new Error("本地任务服务暂时不可用，未确认收到的请求可安全重试。");
+      throw new Error(maxBytes ? "本地响应未能确认；请读取原动作历史，不会自动重发。" : "本地任务服务暂时不可用，未确认收到的请求可安全重试。");
     }
     let payload: unknown;
     try {
@@ -192,12 +196,50 @@ export class StudioRunClient {
       || (template.operation === "edit" ? template.mask?.assetId : undefined) !== (selection.operation === "edit" ? selection.maskAssetId : undefined)) {
       throw new Error("准备单与本次人工选择不一致，保留原动作编号，未继续执行。");
     }
+    await this.validateFrozenConstraint(record);
     return record;
   }
   async imagePreparation(projectId: string, preparationId: string) {
     const record = await this.request(`/v1/projects/${encodeURIComponent(projectId)}/image-preparations/${encodeURIComponent(preparationId)}`, ImagePreparationPublicSchema, undefined, undefined, 512 * 1024);
     if (record.projectId !== projectId || record.id !== preparationId || record.requestTemplate.tenantId !== "local-studio") throw new Error("历史准备单不属于当前项目或编号，未恢复。");
+    await this.validateFrozenConstraint(record);
     return record;
+  }
+  private async validateFrozenConstraint(record: ImagePreparationPublic) {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(record.constraint))));
+    const checksum = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+    if (checksum !== record.requestTemplate.constraintChecksumSha256 || this.signal.aborted) throw new Error("冻结人工约束摘要不一致或操作已取消，不能用于人工确认。");
+  }
+  private matchImageConfirmation(record: ImagePreparationPublic, result: ImageConfirmationPublic) {
+    const { batch } = result.aggregate, template = record.requestTemplate;
+    const refs = [...template.inputs, ...(template.operation === "edit" && template.mask ? [template.mask] : [])];
+    const inputs = refs.map(item => item.assetId);
+    if (result.preparationId !== record.id || result.preparationFingerprint !== record.snapshotFingerprint
+      || batch.projectId !== record.projectId || batch.tenantId !== template.tenantId || batch.constraintSnapshotId !== record.constraint.id
+      || batch.adapterId !== template.adapterId || batch.tool !== (template.operation === "generate" ? "image-generate" : "image-edit")
+      || batch.currency !== record.pricing.quote.currency || batch.estimatedCostMinor !== record.pricing.quote.estimatedCostMinor
+      || batch.maxCostMinor < record.pricing.quote.maxCostMinor || JSON.stringify(batch.inputAssetIds) !== JSON.stringify(inputs)
+      || Date.parse(result.confirmedAt) < Date.parse(record.createdAt) || Date.parse(result.confirmedAt) >= Date.parse(record.pricing.quote.expiresAt)
+      || result.transformedInputs.length !== refs.length || refs.some((ref, index) => {
+        const transform = result.transformedInputs[index];
+        return transform?.assetId !== ref.assetId || transform.originalChecksumSha256 !== ref.checksumSha256
+          || (index < template.inputs.length ? transform.transform !== "exif-srgb-png-v1" : transform.transform === "exif-srgb-png-v1");
+      })) throw new Error("确认结果与完整冻结准备单不一致，请只读核对，不会重发。");
+    return result;
+  }
+  async imageConfirmation(record: ImagePreparationPublic) {
+    await this.validateFrozenConstraint(record);
+    const history = await this.request(`/v1/projects/${encodeURIComponent(record.projectId)}/image-preparations/${encodeURIComponent(record.id)}/confirmation`, ImageConfirmationHistorySchema, undefined, undefined, 512 * 1024);
+    if (history.preparationId !== record.id || history.preparationFingerprint !== record.snapshotFingerprint) throw new Error("确认历史与当前准备单不一致，未恢复。");
+    return history.confirmation ? this.matchImageConfirmation(record, history.confirmation) : null;
+  }
+  async confirmImage(record: ImagePreparationPublic) {
+    await this.validateFrozenConstraint(record);
+    const quote = record.pricing.quote;
+    const body = ConfirmImagePreparationSchema.parse({ expectedSnapshotFingerprint: record.snapshotFingerprint,
+      expectedCurrency: quote.currency, expectedEstimatedCostMinor: quote.estimatedCostMinor, expectedMaxCostMinor: quote.maxCostMinor });
+    const result = await this.request(`/v1/projects/${encodeURIComponent(record.projectId)}/image-preparations/${encodeURIComponent(record.id)}/confirm`, ImageConfirmationPublicSchema, body, undefined, 512 * 1024);
+    return this.matchImageConfirmation(record, result);
   }
   async cacheImage(projectId: string, assetId: string) {
     const { cacheGeneratedAsset } = await import("../assets/generatedAssetCache");

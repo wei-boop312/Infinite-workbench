@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
+import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
 
 export * from "./imageProviders.ts";
 
@@ -182,6 +182,25 @@ export const ConstraintSnapshotSchema = z.object({
   }).strict(),
   createdAt: IsoDateSchema,
 }).strict();
+
+// Derived from the immutable server record, not the browser's current constraint.
+export const ImagePreparationPublicSchema = z.object({
+  id: IdSchema, projectId: IdSchema, status: z.literal("unconfirmed"), executionAuthorized: z.literal(false),
+  protocolPreparation: z.literal("not-run"), mode: z.literal("local-fixture"), createdAt: IsoDateSchema,
+  snapshotFingerprint: z.string().regex(/^[a-f0-9]{64}$/), connection: ImageProviderPublicSchema,
+  requestTemplate: ImageRequestTemplateSchema, constraint: ConstraintSnapshotSchema, pricing: LocalImageQuoteSchema,
+}).strict().superRefine((record, context) => {
+  const template = record.requestTemplate, constraint = record.constraint;
+  const model = record.connection.models.find((item) => item.model === template.model);
+  if (template.projectId !== record.projectId || constraint.projectId !== record.projectId || template.constraintSnapshotId !== constraint.id
+    || template.connectionId !== record.connection.id || template.connectionRevision !== record.connection.revision
+    || !model || model.capabilityVersion !== template.capabilityVersion || !model.operations.includes(template.operation)
+    || template.protection !== "none" || constraint.lockedPaths.includes("product.pixels")
+    || template.parameters.outputFormat !== constraint.outputSpec.format
+    || (template.parameters.size !== "auto" && (template.parameters.size.width !== constraint.outputSpec.width || template.parameters.size.height !== constraint.outputSpec.height))
+    || JSON.stringify(template.quote) !== JSON.stringify(record.pricing.quote)) context.addIssue({ code: "custom", message: "公开准备单关系不一致" });
+});
+export type ImagePreparationPublic = z.infer<typeof ImagePreparationPublicSchema>;
 
 export const ImagePreparationRecordSchema = z.object({
   schemaVersion: z.literal(1), id: IdSchema, tenantId: IdSchema, projectId: IdSchema,
@@ -580,6 +599,36 @@ export const RunBatchAggregateSchema = z.object({
 }).strict();
 
 export const RunBatchListSchema = z.array(RunBatchAggregateSchema);
+
+export const ImageConfirmationPublicSchema = z.object({
+  mode: z.literal("local-fixture"), realExecutionEnabled: z.literal(false), executionAuthorized: z.literal(false),
+  executionState: z.literal("confirmed-not-dispatchable"), protocolPreparation: z.literal("prepared"),
+  preparationId: IdSchema, preparationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/), confirmedBy: IdSchema, confirmedAt: IsoDateSchema,
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/), payloadChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  transformedInputs: z.array(ImageInputTransformSchema).max(21), aggregate: RunBatchAggregateSchema,
+}).strict().superRefine((record, context) => {
+  const { batch, jobs } = record.aggregate;
+  if (batch.tool === "product-retouch" || batch.idempotencyKey !== `image-confirm:${record.preparationId}`
+    || batch.confirmedBy !== record.confirmedBy || batch.confirmedAt !== record.confirmedAt
+    || jobs.length !== 1 || jobs[0].batchId !== batch.id || jobs[0].executorKind !== "provider"
+    || jobs[0].adapterId !== batch.adapterId || JSON.stringify(jobs[0].inputAssetIds) !== JSON.stringify(batch.inputAssetIds)) {
+    context.addIssue({ code: "custom", message: "图片确认与实际任务关系不一致" });
+  }
+});
+export const ImageConfirmationHistorySchema = z.object({
+  mode: z.literal("local-fixture"), preparationId: IdSchema, preparationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  confirmation: ImageConfirmationPublicSchema.nullable(),
+}).strict().superRefine((record, context) => {
+  if (record.confirmation && (record.confirmation.preparationId !== record.preparationId || record.confirmation.preparationFingerprint !== record.preparationFingerprint)) {
+    context.addIssue({ code: "custom", message: "确认历史与准备单不一致" });
+  }
+});
+export type ImageConfirmationPublic = z.infer<typeof ImageConfirmationPublicSchema>;
+// A read-only recovery pointer; it contains no price or executable authorization.
+export const ImageConfirmationRecoverySchema = z.object({
+  schemaVersion: z.literal(1), projectId: IdSchema, preparationId: IdSchema, preparationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
 
 export const RegisterRunContextRequestSchema = z.object({
   projectId: IdSchema,

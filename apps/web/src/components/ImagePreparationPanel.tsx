@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import type { Asset, ConstraintSnapshot, ImageProviderPublic, ImagePreparationPublic, ImagePreparationRecovery } from "@canvas/contracts";
+import type { Asset, ConstraintSnapshot, ImageProviderPublic, ImagePreparationPublic, ImagePreparationRecovery, ImageConfirmationPublic, ProjectBudgetSnapshot } from "@canvas/contracts";
 import { assetRepository } from "../assets/assetRepository";
 import { StudioRunClient } from "../runs/runClient";
 import { buildImageSelection, emptyImageDraft, readImageRecovery, recoveryKey, type ImagePreparationDraft } from "../runs/imagePreparationDraft";
+import { confirmationRecoveryKey, readConfirmationRecovery } from "../runs/imageConfirmationRecovery";
+import ImageConfirmationReview from "./ImageConfirmationReview";
 
-type Props = { projectId: string; assets: Asset[]; constraints: ConstraintSnapshot[]; missingOriginalAssetIds: Set<string>; disabled: boolean };
+type Props = { projectId: string; assets: Asset[]; constraints: ConstraintSnapshot[]; missingOriginalAssetIds: Set<string>; disabled: boolean;
+  onConfirmed: (result: ImageConfirmationPublic, budget?: ProjectBudgetSnapshot) => void };
 const evidenceLabel = { declared: "仅声明，未验证真实请求", "local-fixture-passed": "本地假响应通过，不是实接", "live-request-accepted": "有实请求证据，真实执行仍关闭" };
 
 export default function ImagePreparationPanel(props: Props) {
@@ -20,6 +23,7 @@ export default function ImagePreparationPanel(props: Props) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [changed, setChanged] = useState(false);
+  const [draftEdited, setDraftEdited] = useState(false);
   const [now, setNow] = useState(Date.now());
   const client = useRef<StudioRunClient | null>(null);
   const controller = useRef<AbortController | null>(null);
@@ -31,7 +35,7 @@ export default function ImagePreparationPanel(props: Props) {
   const constraint = props.constraints.find((item) => item.id === draft.constraintId);
   const active = () => controller.current !== null && !controller.current.signal.aborted;
   const current = (api: StudioRunClient) => client.current === api && active();
-  const patch = (fields: Partial<ImagePreparationDraft>) => { setDraft((value) => ({ ...value, ...fields })); setChanged(true); };
+  const patch = (fields: Partial<ImagePreparationDraft>) => { setDraft((value) => ({ ...value, ...fields })); setChanged(true); setDraftEdited(true); };
   const perform = async (action: (api: StudioRunClient) => Promise<void>) => {
     if (pending.current || !client.current || props.disabled) return;
     const api = client.current;
@@ -50,7 +54,7 @@ export default function ImagePreparationPanel(props: Props) {
   };
   const displayRecord = (value: ImagePreparationPublic, historical: boolean, api: StudioRunClient) => {
     if (!current(api)) return;
-    setRecord(value); setHistoryId(value.id); setChanged(historical);
+    setRecord(value); setHistoryId(value.id); setChanged(historical); setDraftEdited(false);
     setNotice(historical ? "恢复的是原准备历史，不重新报价、不确认或执行。" : "未确认准备单已保存，没有创建任务或预留预算。");
   };
   useEffect(() => {
@@ -60,8 +64,13 @@ export default function ImagePreparationPanel(props: Props) {
       await readDirectory(api);
       if (!current(api)) return;
       const previous = readImageRecovery(localStorage.getItem(recoveryKey(projectId)), projectId);
+      const confirmedPointer = readConfirmationRecovery(localStorage.getItem(confirmationRecoveryKey(projectId)), projectId);
       setRecovery(previous); setRecoveryChecked(true);
-      if (previous?.preparationId) displayRecord(await api.imagePreparation(projectId, previous.preparationId), true, api);
+      if (confirmedPointer) {
+        const saved = await api.imagePreparation(projectId, confirmedPointer.preparationId);
+        if (saved.snapshotFingerprint !== confirmedPointer.preparationFingerprint) throw new Error("确认恢复指针与原准备摘要不一致，未恢复。");
+        displayRecord(saved, true, api);
+      } else if (previous?.preparationId) displayRecord(await api.imagePreparation(projectId, previous.preparationId), true, api);
       else if (previous) setNotice("上次准备响应未确认。请人工恢复原动作；不会自动重发或重新报价。");
     })().catch((failure) => { if (current(api)) setError(failure instanceof Error ? failure.message : "目录或历史恢复失败。"); })
       .finally(() => { if (current(api)) { pending.current = false; setBusy(false); } });
@@ -109,7 +118,7 @@ export default function ImagePreparationPanel(props: Props) {
   const frozen = record?.requestTemplate;
   return <section className="image-preparation" aria-label="图片供应商准备">
     <h3>图片供应商 · 本地准备</h3>
-    <p className="run-hint">先明确选择，再保存假报价。声明能力和目录读取不等于图片实接；本区不创建任务、不预留预算、不执行生成。</p>
+    <p className="run-hint">先明确选择，再保存假报价。准备不创建任务或预留；另行人工核对后只预留本地假报价上限，不执行生成。声明能力和目录读取不等于图片实接。</p>
     {error && <p className="run-error" role="alert">{error}</p>}
     {notice && <p className="run-hint" role="status">{notice}</p>}
     <button disabled={busy || props.disabled} onClick={() => void perform(readDirectory)}>刷新供应商目录</button>
@@ -117,7 +126,7 @@ export default function ImagePreparationPanel(props: Props) {
     <fieldset disabled={busy || props.disabled || !loaded || !providers.length}>
       <legend>明确选择（每个任务一张图）</legend>
       <label>供应商<select aria-label="图片供应商" value={draft.connectionId} onChange={(event) => {
-        setDraft({ ...emptyImageDraft(), connectionId: event.target.value }); setChanged(true);
+        setDraft({ ...emptyImageDraft(), connectionId: event.target.value }); setChanged(true); setDraftEdited(true);
       }}><option value="">请选择，不自动选定</option>{providers.map((item) => <option key={item.id} value={item.id} disabled={!item.enabled || item.protocol === "custom"}>
         {item.name} · {item.protocol} · 修订 {item.revision}{!item.enabled ? " · 已停用" : item.protocol === "custom" ? " · 未实现" : ""}</option>)}</select></label>
       <label>模型<select aria-label="图片模型" value={draft.model} onChange={(event) => patch({ model: event.target.value, operation: "", quality: "", background: "", inputFidelity: "", outputCompression: "", extraValues: {}, inputAssetIds: [], maskAssetId: "" })}>
@@ -149,7 +158,7 @@ export default function ImagePreparationPanel(props: Props) {
     <div className="run-fields"><label>历史准备单编号<input aria-label="历史图片准备单编号" maxLength={160} value={historyId} onChange={(event) => setHistoryId(event.target.value)} /></label>
       <button disabled={busy || props.disabled || !historyId.trim()} onClick={() => void perform(async (api) => displayRecord(await api.imagePreparation(projectId, historyId.trim()), true, api))}>读取历史准备单</button></div>
     {(recovery || record || error) && <button disabled={busy || props.disabled} onClick={() => {
-      try { localStorage.removeItem(recoveryKey(projectId)); setRecovery(null); setRecoveryChecked(true); setRecord(null); setChanged(true); setError(""); setNotice("仅清除本项目浏览器恢复指针；服务端历史保留。下一次保存使用新动作编号和新假报价。"); }
+      try { localStorage.removeItem(recoveryKey(projectId)); localStorage.removeItem(confirmationRecoveryKey(projectId)); setRecovery(null); setRecoveryChecked(true); setRecord(null); setChanged(true); setDraftEdited(false); setError(""); setNotice("仅清除本项目浏览器恢复指针；服务端历史保留。下一次保存使用新动作编号和新假报价。"); }
       catch { setError("恢复指针未能清除，未开始新动作。"); }
     }}>开始新准备动作（保留服务端历史）</button>}
     {record && frozen && <article className="image-preparation-summary" aria-label="未确认图片准备单">
@@ -159,8 +168,10 @@ export default function ImagePreparationPanel(props: Props) {
         {frozen.operation === "generate" ? "生成" : "编辑"} · 输入：{frozen.inputs.map((input) => input.assetId).join("、") || "无"} · 蒙版：{frozen.operation === "edit" ? frozen.mask?.assetId ?? "无" : "无"}<br />
         约束：{frozen.constraintSnapshotId} · {frozen.parameters.size === "auto" ? "auto" : `${frozen.parameters.size.width}×${frozen.parameters.size.height}`} · {frozen.parameters.outputFormat} · {frozen.parameters.quality} · {frozen.parameters.background}<br />
         假报价（不是实费）：{record.pricing.quote.currency}，估算 {record.pricing.quote.estimatedCostMinor} 最小币种单位，上限 {record.pricing.quote.maxCostMinor} 最小币种单位；有效至 {record.pricing.quote.expiresAt}。未预留。</p>
-      <details><summary>完整冻结参数与摘要</summary><pre>{JSON.stringify({ requestTemplate: frozen, pricing: record.pricing, snapshotFingerprint: record.snapshotFingerprint }, null, 2)}</pre></details>
-      <small>确认入口将在下一步接入。本区没有生成、自动重试或成本结算按钮。</small>
+      <details><summary>完整冻结参数与摘要</summary><pre>{JSON.stringify({ requestTemplate: frozen, constraint: record.constraint, pricing: record.pricing, snapshotFingerprint: record.snapshotFingerprint }, null, 2)}</pre></details>
+      {draftEdited && <p className="run-hint">当前选择或参数已修改，请开始新准备动作；不能用旧摘要确认新参数。</p>}
+      <ImageConfirmationReview key={`${record.id}:${record.snapshotFingerprint}`} record={record} disabled={busy || props.disabled}
+        blocked={Boolean(expired || drifted || draftEdited || !loaded || !recoveryChecked)} onConfirmed={props.onConfirmed} />
     </article>}
   </section>;
 }

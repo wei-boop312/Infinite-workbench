@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { ConfirmImagePreparationSchema, ConfirmedImageExecutionSchema, CreateImagePreparationSchema, ImageExecutionRequestSchema, ImagePreparationRecordSchema, ImageProviderConnectionSchema, ImageProviderRevisionSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema,
+import { ConfirmImagePreparationSchema, ConfirmedImageExecutionSchema, CreateImagePreparationSchema, ImageConfirmationPublicSchema, ImageExecutionRequestSchema, ImagePreparationRecordSchema, ImageProviderConnectionSchema, ImageProviderRevisionSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema,
   type ConfirmImagePreparation, type ConfirmedImageExecution, type CreateImagePreparation, type ImagePreparationRecord, type ImageProviderConnection, type LocalImageQuote } from "@canvas/contracts";
 import { ImageProviderContractError, imageProviderPublicView, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 import { constraintContentChecksum, validateLocalImageAssetPolicy } from "./imageAssetPolicy";
 import { assetMetadataFingerprint } from "./verifiedAssets";
 import type { ObjectStorageAuthorizer } from "./objectStorageGateway";
-import { RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
+import { InMemoryRunKernel, RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 import type { SqliteRunKernel } from "./sqliteRunKernel";
 import { prepareOpenAiImageRequest } from "./openaiImageProtocol";
@@ -31,7 +31,7 @@ function preparationView(record: ImagePreparationRecord) {
   return { id: record.id, projectId: record.projectId, status: record.status, executionAuthorized: record.executionAuthorized,
     protocolPreparation: record.protocolPreparation, mode: "local-fixture" as const, createdAt: record.createdAt,
     snapshotFingerprint: record.snapshotFingerprint, connection: imageProviderPublicView(record.connection),
-    requestTemplate: record.requestTemplate, pricing: record.pricing };
+    requestTemplate: record.requestTemplate, constraint: record.constraint, pricing: record.pricing };
 }
 
 // Local-only directory, preparations and staged confirmations. No executor,
@@ -157,6 +157,21 @@ export class LocalImageProviders {
     });
   }
 
+  getConfirmation(principal: RunPrincipal, projectId: string, id: string) {
+    return this.database(() => {
+      this.allow(principal, projectId, "provider:read");
+      if (!this.options.runAuthorizer.allows(principal, projectId, "run:read")) reject("image_preparation_not_found", 404);
+      if (!this.options.runKernel) reject("image_confirmation_not_configured", 503);
+      const record = this.options.stateStore.loadImagePreparation(principal.tenantId, projectId, id);
+      if (!record) reject("image_preparation_not_found", 404);
+      this.assertPreparation(record);
+      const confirmation = this.confirmedView(principal, record, true) ?? null;
+      this.allow(principal, projectId, "provider:read");
+      if (!this.options.runAuthorizer.allows(principal, projectId, "run:read")) reject("image_preparation_not_found", 404);
+      return { mode: "local-fixture" as const, preparationId: id, preparationFingerprint: record.snapshotFingerprint, confirmation };
+    });
+  }
+
   async confirmPreparation(principal: RunPrincipal, projectId: string, id: string, input: unknown) {
     const confirmation = ConfirmImagePreparationSchema.parse(input);
     try {
@@ -222,19 +237,22 @@ export class LocalImageProviders {
     validateImageProviderRequest(record.connection, request, this.now());
     validateLocalImageAssetPolicy(this.options.stateStore, request);
   }
-  private confirmedView(principal: RunPrincipal, record: ImagePreparationRecord) {
-    const batches = this.options.stateStore.load()?.batches ?? [];
+  private confirmedView(principal: RunPrincipal, record: ImagePreparationRecord, readOnly = false) {
+    const snapshot = this.options.stateStore.load();
+    if (readOnly && !snapshot) throw new Error("已配置确认内核的任务快照缺失，不能当作未确认");
+    if (readOnly && snapshot) InMemoryRunKernel.assertSnapshot(snapshot); // Never recovers leases or writes ledger/history.
+    const batches = snapshot?.batches ?? [];
     const saved = batches.find((item) => item.aggregate.batch.tenantId === principal.tenantId && item.aggregate.batch.projectId === record.projectId
       && item.aggregate.batch.idempotencyKey === `image-confirm:${record.id}`);
     if (!saved) return undefined;
     const execution = saved.imageExecution;
     if (!execution || imageSnapshotFingerprint(execution.preparation) !== imageSnapshotFingerprint(record)) throw new Error("图片确认缺少原始准备单证据");
-    const aggregate = this.options.runKernel!.getBatch(principal, execution.batchId); // Recheck full kernel conservation/frozen evidence.
-    return { mode: "local-fixture" as const, realExecutionEnabled: false as const, executionAuthorized: false as const,
+    const aggregate = readOnly ? structuredClone(saved.aggregate) : this.options.runKernel!.getBatch(principal, execution.batchId);
+    return ImageConfirmationPublicSchema.parse({ mode: "local-fixture" as const, realExecutionEnabled: false as const, executionAuthorized: false as const,
       executionState: "confirmed-not-dispatchable" as const, protocolPreparation: "prepared" as const,
       preparationId: record.id, preparationFingerprint: record.snapshotFingerprint, executionFingerprint: saved.requestFingerprint,
       confirmedBy: execution.confirmedBy, confirmedAt: execution.confirmedAt, requestFingerprint: execution.requestFingerprint,
-      payloadChecksumSha256: execution.payloadChecksumSha256, transformedInputs: execution.transformedInputs, aggregate };
+      payloadChecksumSha256: execution.payloadChecksumSha256, transformedInputs: execution.transformedInputs, aggregate });
   }
 
   private current(tenantId: string, projectId: string, id: string): ImageProviderConnection {

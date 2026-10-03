@@ -1,4 +1,5 @@
-import { ImageProviderConnectionSchema, ImagePreparationPublicSchema,
+import { createHash } from "node:crypto";
+import { ConstraintSnapshotSchema, ImageProviderConnectionSchema, ImagePreparationPublicSchema, ImageConfirmationPublicSchema,
   type ConstraintSnapshot, type CreateImagePreparation, type ImageProviderConnection, type ImagePreparationPublic } from "../../packages/contracts/src/index";
 import { imageProviderPublicView } from "../../apps/api/src/imageProviderContract";
 
@@ -19,6 +20,22 @@ export function fixtureConnection(protocol: ImageProviderConnection["protocol"] 
       qualities: ["auto", "high"], backgrounds: ["auto", "opaque", "transparent"], inputFidelities: protocol === "google" ? [] : ["low", "high"],
       supportsOutputCompression: protocol !== "google", mask: protocol === "google" ? { mode: "none", polarity: "unsupported" } : { mode: "prompt-guidance", polarity: "transparent-edit" }, evidence: { state: "declared" } }] });
 }
+export function fixturePublicConfirmation(record = fixturePublicPreparation()) {
+  const template = record.requestTemplate, quote = record.pricing.quote;
+  const ids = [...template.inputs.map(input => input.assetId), ...(template.operation === "edit" && template.mask ? [template.mask.assetId] : [])];
+  return ImageConfirmationPublicSchema.parse({ mode: "local-fixture", realExecutionEnabled: false, executionAuthorized: false,
+    executionState: "confirmed-not-dispatchable", protocolPreparation: "prepared", preparationId: record.id, preparationFingerprint: record.snapshotFingerprint,
+    executionFingerprint: "d".repeat(64), requestFingerprint: "e".repeat(64), payloadChecksumSha256: "f".repeat(64),
+    transformedInputs: [...template.inputs, ...(template.operation === "edit" && template.mask ? [template.mask] : [])].map((ref, index) => ({
+      assetId: ref.assetId, originalChecksumSha256: ref.checksumSha256, transmittedChecksumSha256: "9".repeat(64),
+      transform: index < template.inputs.length ? "exif-srgb-png-v1" : "internal-white-to-transparent-mask-v1" })),
+    confirmedBy: "fixture-designer", confirmedAt: record.createdAt, aggregate: { batch: { id: "batch-a", tenantId: template.tenantId, projectId: record.projectId,
+      constraintSnapshotId: record.constraint.id, tool: template.operation === "generate" ? "image-generate" : "image-edit", adapterId: template.adapterId,
+      inputAssetIds: ids, idempotencyKey: `image-confirm:${record.id}`, status: "queued", expectedOutputs: 1, estimatedCostMinor: quote.estimatedCostMinor,
+      maxCostMinor: quote.maxCostMinor, currency: quote.currency, confirmedBy: "fixture-designer", confirmedAt: record.createdAt, createdAt: record.createdAt },
+      jobs: [{ id: "job-a", batchId: "batch-a", outputIndex: 0, attempt: 1, executorKind: "provider", adapterId: template.adapterId, idempotencyKey: "independent-execution-key",
+        status: "queued", inputAssetIds: ids, outputAssetIds: [], estimatedCostMinor: quote.estimatedCostMinor, createdAt: record.createdAt }], ledger: [], audit: [], billingOverages: [] } });
+}
 export function fixtureConstraint(extra: Partial<ConstraintSnapshot> = {}): ConstraintSnapshot {
   return { id: "constraint-a", projectId: "project-a", lockedPaths: [], editableRegions: [{ id: "region-a", description: "人工指定布局" }],
     brandRules: { tone: "人工设计" }, outputSpec: { width: 1024, height: 1024, format: "png" }, createdAt: fixtureTime, ...extra };
@@ -32,10 +49,13 @@ export function fixturePublicPreparation(selection = fixtureSelection(), id = "p
   const { inputAssetIds, idempotencyKey: _key, maskAssetId: _mask, ...fields } = { ...selection, maskAssetId: undefined };
   const quote = { id: "fixture-quote", version: "fake-price-v1", source: "server-price-table", currency: "CNY", estimatedCostMinor: 25,
     maxCostMinor: 30, expiresAt: "2099-10-04T00:00:00.000Z" };
+  const constraint = ConstraintSnapshotSchema.parse(fixtureConstraint({ projectId: selection.projectId, id: selection.constraintSnapshotId,
+    outputSpec: { ...(selection.parameters.size === "auto" ? { width: 1024, height: 1024 } : selection.parameters.size), format: selection.parameters.outputFormat } }));
   return ImagePreparationPublicSchema.parse({ id, projectId: selection.projectId, status: "unconfirmed", executionAuthorized: false,
     protocolPreparation: "not-run", mode: "local-fixture", createdAt: fixtureTime, snapshotFingerprint: "a".repeat(64),
     connection: imageProviderPublicView(fixtureConnection(selection.connectionId.replace("fixture-", "") as ImageProviderConnection["protocol"])),
-    requestTemplate: { ...fields, schemaVersion: 1, tenantId: "local-studio", adapterId: "fixture-image-v1", constraintChecksumSha256: "b".repeat(64), quote,
+    constraint,
+    requestTemplate: { ...fields, schemaVersion: 1, tenantId: "local-studio", adapterId: "fixture-image-v1", constraintChecksumSha256: createHash("sha256").update(JSON.stringify(constraint)).digest("hex"), quote,
       inputs: inputAssetIds.map(assetId => ({ assetId, checksumSha256: "c".repeat(64), mimeType: "image/png", byteSize: 68, width: 1, height: 1 })) },
     pricing: { mode: "local-fixture", evidenceRef: "not-real-price", quote } });
 }

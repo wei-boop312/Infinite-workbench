@@ -31,6 +31,11 @@ async function routes(page: Page, protocol: ImageProviderConnection["protocol"] 
   await page.route("**/studio-api/v1/projects/*/image-providers", async route => {
     await route.fulfill({ json: [{ ...visible, revision }], headers: { "cache-control": "no-store" } });
   });
+  await page.route("**/studio-api/v1/projects/*/image-preparations/*/confirmation", async route => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2)!);
+    const record = [...saved.values()].find(item => item.id === id);
+    await route.fulfill({ json: { mode: "local-fixture", preparationId: id, preparationFingerprint: record?.snapshotFingerprint ?? "a".repeat(64), confirmation: null }, headers: { "cache-control": "no-store" } });
+  });
   await page.route(/\/studio-api\/v1\/projects\/[^/]+\/image-preparations(?:\/[^/?]+)?$/, async route => {
     const request = route.request();
     expect(request.headers()["x-canvas-local"]).toBe("1");
