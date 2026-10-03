@@ -340,7 +340,7 @@ test("预估后浏览器原文件丢失，不用缩略图或已存证明绕过�
   const before = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
   await page.evaluate(async (assetId: string) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("ai-commerce-canvas-assets", 2); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+      const request = indexedDB.open("ai-commerce-canvas-assets"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
     });
     const transaction = database.transaction("blobs", "readwrite"); transaction.objectStore("blobs").delete(`${assetId}:original`);
     await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });

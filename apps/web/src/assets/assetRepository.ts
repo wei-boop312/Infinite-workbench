@@ -1,9 +1,12 @@
-import type { Asset } from "@canvas/contracts";
+import type { Asset, VerifiedImage } from "@canvas/contracts";
+import { assertGeneratedReceipt, blobSha256 } from "./generatedAssetPolicy";
 
 const DATABASE_NAME = "ai-commerce-canvas-assets";
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const ASSET_STORE = "assets";
 const BLOB_STORE = "blobs";
+const GENERATED_CACHE_STORE = "generatedCaches";
+type GeneratedCacheRecord = { assetId: string; projectId: string; tenantId: string; metadata: string; checksum: string };
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
 const ACCEPTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);
@@ -24,6 +27,7 @@ export interface AssetRepositoryPort {
   saveMask(projectId: string, sourceAssetId: string, blob: Blob, width: number, height: number): Promise<Asset>;
   restore(projectId: string, records: RestoredAsset[]): Promise<void>;
   restoreOriginal(projectId: string, assetId: string, blob: Blob): Promise<Asset>;
+  cacheGenerated(receipt: VerifiedImage, original: Blob, signal: AbortSignal): Promise<Asset>;
   remove(projectId: string, assetId: string): Promise<boolean>;
   usage(projectId: string): Promise<AssetUsage>;
 }
@@ -72,11 +76,15 @@ function transactionComplete(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-function openDatabase(): Promise<IDBDatabase> {
+function openDatabase(signal?: AbortSignal): Promise<IDBDatabase> {
   if (!("indexedDB" in window)) return Promise.reject(new Error("当前浏览器不支持本地资产库"));
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason); return; }
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    const abort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
     request.onupgradeneeded = () => {
+      if (signal?.aborted) { request.transaction!.abort(); return; }
       const database = request.result;
       let assets: IDBObjectStore;
       if (!database.objectStoreNames.contains(ASSET_STORE)) {
@@ -90,9 +98,10 @@ function openDatabase(): Promise<IDBDatabase> {
         const blobs = database.createObjectStore(BLOB_STORE, { keyPath: "key" });
         blobs.createIndex("assetId", "assetId", { unique: false });
       }
+      if (!database.objectStoreNames.contains(GENERATED_CACHE_STORE)) database.createObjectStore(GENERATED_CACHE_STORE, { keyPath: "assetId" });
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("无法打开浏览器资产库"));
+    request.onsuccess = () => { signal?.removeEventListener("abort", abort); if (signal?.aborted) request.result.close(); else resolve(request.result); };
+    request.onerror = () => { signal?.removeEventListener("abort", abort); reject(request.error ?? new Error("无法打开浏览器资产库")); };
   });
 }
 
@@ -205,7 +214,7 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
     const assets = await this.list(projectId);
     let proxyBytes = 0;
     for (const asset of assets) {
-      if (!asset.proxyStorageKey) continue;
+      if (!asset.proxyStorageKey && asset.purpose !== "generated") continue;
       proxyBytes += (await this.getBlob(asset.id, "proxy"))?.size ?? 0;
     }
     const originalBytes = assets.reduce((total, asset) => total + asset.byteSize, 0);
@@ -244,6 +253,47 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
     } finally {
       database.close();
     }
+  }
+
+  async cacheGenerated(input: VerifiedImage, original: Blob, signal: AbortSignal): Promise<Asset> {
+    const { VerifiedImageSchema } = await import("@canvas/contracts");
+    const receipt = VerifiedImageSchema.parse(structuredClone(input)), asset = receipt.asset;
+    assertGeneratedReceipt(receipt, asset.projectId, asset.id); signal.throwIfAborted();
+    if (original.size !== asset.byteSize || original.type !== asset.mimeType || await blobSha256(original) !== receipt.checksumSha256) throw new Error("生成图片缓存原文件错配。");
+    signal.throwIfAborted();
+    const { width, height, proxy } = await inspectImage(original);
+    signal.throwIfAborted();
+    if (width !== asset.width || height !== asset.height || width * height > 16_000_000 || Math.max(width, height) > 8192) throw new Error("生成图片实际尺寸与权威收据不匹配。");
+    const marker: GeneratedCacheRecord = { assetId: asset.id, projectId: asset.projectId, tenantId: receipt.tenantId, metadata: JSON.stringify(asset), checksum: receipt.checksumSha256 };
+    const database = await openDatabase(signal);
+    try {
+      signal.throwIfAborted();
+      const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE], "readwrite"), done = transactionComplete(transaction);
+      // Handle a rejection immediately, including one occurring while IDB reads await.
+      void done.catch(() => undefined);
+      const abort = () => { try { transaction.abort(); } catch { /* Already committed. */ } };
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        const assets = transaction.objectStore(ASSET_STORE), markers = transaction.objectStore(GENERATED_CACHE_STORE);
+        const [existing, previous] = await Promise.all([
+          requestResult(assets.get(asset.id) as IDBRequest<Asset | undefined>),
+          requestResult(markers.get(asset.id) as IDBRequest<GeneratedCacheRecord | undefined>),
+        ]);
+        signal.throwIfAborted();
+        if ((existing && (JSON.stringify(existing) !== marker.metadata || !previous))
+          || (previous && (!existing || JSON.stringify(previous) !== JSON.stringify(marker)))) throw new Error("生成资产编号、项目或不可变元数据与本地记录冲突。");
+        const blobs = transaction.objectStore(BLOB_STORE);
+        // Never content-deduplicate two independent outputs or replace another
+        // project's global asset ID. All metadata/original/proxy/marker commit together.
+        if (!existing) assets.add(asset);
+        blobs.put({ key: `${asset.id}:original`, assetId: asset.id, role: "original", blob: original } satisfies BlobRecord);
+        blobs.put({ key: `${asset.id}:proxy`, assetId: asset.id, role: "proxy", blob: proxy } satisfies BlobRecord);
+        if (!previous) markers.add(marker);
+        await done;
+        return asset;
+      } catch (error) { abort(); await done.catch(() => undefined); throw error; }
+      finally { signal.removeEventListener("abort", abort); }
+    } finally { database.close(); }
   }
 
   async restore(projectId: string, records: RestoredAsset[]): Promise<void> {
@@ -288,7 +338,7 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
         ? await inspectVideo(blob, asset.originalName)
         : null;
     const proxy = metadata && "proxy" in metadata ? metadata.proxy : undefined;
-    const restored: Asset = {
+    const restored: Asset = asset.purpose === "generated" ? asset : {
       ...asset,
       width: metadata?.width ?? asset.width,
       height: metadata?.height ?? asset.height,
@@ -316,8 +366,9 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
       const lookup = database.transaction(ASSET_STORE, "readonly");
       const asset = await requestResult(lookup.objectStore(ASSET_STORE).get(assetId) as IDBRequest<Asset | undefined>);
       if (!asset || asset.projectId !== projectId) return false;
-      const transaction = database.transaction([ASSET_STORE, BLOB_STORE], "readwrite");
+      const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE], "readwrite");
       transaction.objectStore(ASSET_STORE).delete(assetId);
+      transaction.objectStore(GENERATED_CACHE_STORE).delete(assetId);
       transaction.objectStore(BLOB_STORE).delete(`${assetId}:original`);
       transaction.objectStore(BLOB_STORE).delete(`${assetId}:proxy`);
       await transactionComplete(transaction);
@@ -347,7 +398,8 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
       const existingDatabase = await openDatabase();
       try {
         const transaction = existingDatabase.transaction(ASSET_STORE, "readonly");
-        const existing = await requestResult(transaction.objectStore(ASSET_STORE).index("projectFingerprint").get([projectId, contentFingerprint]) as IDBRequest<Asset | undefined>);
+        const matching = await requestResult(transaction.objectStore(ASSET_STORE).index("projectFingerprint").getAll([projectId, contentFingerprint]) as IDBRequest<Asset[]>);
+        const existing = matching.find((asset) => asset.purpose !== "generated");
         if (existing) return existing;
       } finally {
         existingDatabase.close();

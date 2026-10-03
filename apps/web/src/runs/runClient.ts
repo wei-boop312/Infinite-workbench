@@ -83,13 +83,20 @@ export const RUN_STATUS_LABEL: Record<string, string> = {
   billing_unknown: "计费待核对", cancelled: "已取消", draft: "草稿",
 };
 
+// One browser network boundary for task commands AND explicit binary reads.
+// Callers supply only locally constructed paths, never provider URLs or keys.
+export function localStudioFetch(path: string, options: RequestInit): Promise<Response> {
+  if (!path.startsWith("/") || path.startsWith("//")) throw new Error("本地服务路径无效。");
+  return fetch(`/studio-api${path}`, options);
+}
+
 export class StudioRunClient {
   constructor(private readonly signal: AbortSignal) {}
 
   private async request<T>(path: string, schema: { parse(value: unknown): T }, body?: unknown, upload?: { blob: Blob; mimeType: string; checksum: string }): Promise<T> {
     let response: Response;
     try {
-      response = await fetch(`/studio-api${path}`, {
+      response = await localStudioFetch(path, {
         method: body === undefined && !upload ? "GET" : "POST",
         headers: { "x-canvas-local": "1", ...(upload ? { "content-type": upload.mimeType, "x-content-sha256": upload.checksum }
           : body === undefined ? {} : { "content-type": "application/json" }) },
@@ -129,6 +136,10 @@ export class StudioRunClient {
   }
   budget(projectId: string) {
     return this.request(`/v1/projects/${encodeURIComponent(projectId)}/budget`, ProjectBudgetSnapshotSchema);
+  }
+  async cacheImage(projectId: string, assetId: string) {
+    const { cacheGeneratedAsset } = await import("../assets/generatedAssetCache");
+    return cacheGeneratedAsset(projectId, assetId, { signal: this.signal });
   }
   create(request: CreateRunBatchRequest) { return this.request("/v1/run-batches", RunBatchAggregateSchema, request); }
   action(batch: RunBatchAggregate, action: "confirm" | "cancel" | "dispatch" | "reconcile") {

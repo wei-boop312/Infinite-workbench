@@ -128,7 +128,7 @@ export function AssetLibrary({
               </span>
             </small>
             <div className="asset-card-actions">
-              <button disabled={originalMissing} title={originalMissing ? "请先恢复本地原文件" : undefined} onClick={() => onAddToCanvas(asset)}>添加到画布</button>
+              <button disabled={originalMissing || asset.purpose === "generated"} title={asset.purpose === "generated" ? "生成图片已缓存；任务结果画布回流尚未开放" : originalMissing ? "请先恢复本地原文件" : undefined} onClick={() => onAddToCanvas(asset)}>添加到画布</button>
               <button
                 className="backup"
                 disabled={originalMissing ? !canRestore || restoring : transferFinished}

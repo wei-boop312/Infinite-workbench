@@ -387,7 +387,7 @@ test("本地原文件丢失后可从备份恢复且 assetId 不变", async ({ pa
 
   const assetId = await page.evaluate(async () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("ai-commerce-canvas-assets", 2);
+      const request = indexedDB.open("ai-commerce-canvas-assets");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -417,7 +417,7 @@ test("本地原文件丢失后可从备份恢复且 assetId 不变", async ({ pa
 
   const restored = await page.evaluate(async (expectedAssetId) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("ai-commerce-canvas-assets", 2);
+      const request = indexedDB.open("ai-commerce-canvas-assets");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

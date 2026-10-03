@@ -248,8 +248,10 @@ function CanvasKernel() {
         if (cancelled) return;
         const original = await assetRepository.getBlob(asset.id, "original");
         if (!original) missingOriginals.add(asset.id);
-        const blob = asset.proxyStorageKey
-          ? await assetRepository.getBlob(asset.id, "proxy")
+        const blob = asset.purpose === "generated"
+          ? await assetRepository.getBlob(asset.id, "proxy") ?? original
+          : asset.proxyStorageKey
+            ? await assetRepository.getBlob(asset.id, "proxy")
           : asset.kind === "image"
             ? original
             : null;
@@ -467,6 +469,7 @@ function CanvasKernel() {
   }, [commit, edges, nodes, screenToFlowPosition]);
 
   const addAssetToCanvas = useCallback((asset: Asset) => {
+    if (asset.purpose === "generated") { setLastAction("生成图片已缓存；任务结果画布回流尚未开放。"); return; }
     const current = currentRef.current.snapshot;
     const position = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
     const deselected = current.nodes.map((node) => ({ ...node, selected: false }));
@@ -1240,7 +1243,9 @@ function CanvasKernel() {
         {runPanelOpen && <Suspense fallback={<aside className="inspector" role="status">正在加载任务面板…</aside>}>
           <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots}
             missingOriginalAssetIds={missingOriginalAssetIds} onClose={() => setRunPanelOpen(false)}
-            onBatches={rememberRunReferences} onAddResults={addRunResults} />
+            onBatches={rememberRunReferences} onAddResults={addRunResults} onCachedAsset={(asset) => {
+              if (asset.projectId === activeProjectIdRef.current) setAssetCatalogRevision((revision) => revision + 1);
+            }} />
         </Suspense>}
 
         {selectedText && !runPanelOpen && (
