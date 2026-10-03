@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import sharp from "sharp";
-import type { ImageExecutionRequest, ImageModelCapability, VerifiedImage } from "@canvas/contracts";
+import { ImageInputTransformSchema, type ImageExecutionRequest, type ImageModelCapability, type VerifiedImage } from "@canvas/contracts";
 import { ImageProviderContractError, validateImageProviderInputs } from "./imageProviderContract";
 
 export const MAX_IMAGE_PROTOCOL_REQUEST_BYTES = 64 * 1024 * 1024;
@@ -8,8 +8,7 @@ export const MAX_IMAGE_REFERENCE_CHARACTERS = 20 * 1024 * 1024;
 export const imagePayloadSha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 function reject(code: string): never { throw new ImageProviderContractError(code); }
 export type TrustedImageBytes = { receipt: VerifiedImage; body: Buffer };
-export type ImageInputTransform = { assetId: string; originalChecksumSha256: string; transmittedChecksumSha256: string;
-  transform: "exif-srgb-png-v1" | "internal-white-to-transparent-mask-v1" | "internal-white-mask-v1" };
+export type ImageInputTransform = ReturnType<typeof ImageInputTransformSchema.parse>;
 type NormalizedImage = { assetId: string; body: Buffer };
 export type ImagePayloadParts = { fields: Record<string, string | number>; images: NormalizedImage[]; mask?: NormalizedImage; transformedInputs: ImageInputTransform[] };
 

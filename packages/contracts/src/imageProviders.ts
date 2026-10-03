@@ -212,6 +212,11 @@ export const ImageProviderOutcomeSchema = z.object({
   if (value.artifactStatus === "pending-validation" && value.providerStatus !== "returned") ctx.addIssue({ code: "custom", message: "尚未返回的响应不能包含待验证产物" });
 });
 
+export const ImageInputTransformSchema = z.object({
+  assetId: Id, originalChecksumSha256: Hash, transmittedChecksumSha256: Hash,
+  transform: z.enum(["exif-srgb-png-v1", "internal-white-to-transparent-mask-v1", "internal-white-mask-v1"]),
+}).strict();
+
 export type ImageProviderConnection = z.infer<typeof ImageProviderConnectionSchema>;
 export type ImageModelCapability = z.infer<typeof ImageModelCapabilitySchema>;
 export type ImageExecutionRequest = z.infer<typeof ImageExecutionRequestSchema>;

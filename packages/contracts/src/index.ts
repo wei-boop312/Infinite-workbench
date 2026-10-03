@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderOutcomeSchema } from "./imageProviders.ts";
 
 export * from "./imageProviders.ts";
 
@@ -181,6 +182,42 @@ export const ConstraintSnapshotSchema = z.object({
   }).strict(),
   createdAt: IsoDateSchema,
 }).strict();
+
+// Immutable server output/provenance, never a client-submitted verification.
+export const GeneratedImageRecordSchema = z.object({
+  schemaVersion: z.literal(1),
+  validation: z.literal("verified"), protectionApplied: z.literal("none"),
+  protocol: ImageProtocolSchema,
+  request: ImageExecutionRequestSchema,
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  transformedInputs: z.array(ImageInputTransformSchema).max(21),
+  constraint: ConstraintSnapshotSchema,
+  confirmedAt: IsoDateSchema,
+  // Original protocol outcome is retained; it alone was NOT asset verification.
+  providerOutcome: ImageProviderOutcomeSchema,
+  image: VerifiedImageSchema,
+}).strict().superRefine((record, context) => {
+  const { request, providerOutcome: outcome, image, constraint } = record;
+  const refs = request.operation === "edit" ? [...request.inputs, ...(request.mask ? [request.mask] : [])] : [];
+  if (request.protection !== "none" || image.asset.purpose !== "generated" || image.sourceChecksumSha256 !== undefined
+    || image.tenantId !== request.tenantId || image.asset.projectId !== request.projectId
+    || outcome.tenantId !== request.tenantId || outcome.projectId !== request.projectId || outcome.jobId !== request.jobId
+    || outcome.connectionId !== request.connectionId || outcome.requestFingerprint !== record.requestFingerprint
+    || outcome.providerStatus !== "returned" || outcome.artifactStatus !== "pending-validation" || outcome.failureCode !== undefined || outcome.billing.state !== "unknown"
+    || constraint.id !== request.constraintSnapshotId || constraint.projectId !== request.projectId || constraint.lockedPaths.includes("product.pixels")
+    || image.asset.mimeType !== `image/${request.parameters.outputFormat}` || image.asset.mimeType !== `image/${constraint.outputSpec.format}`
+    || image.asset.width !== constraint.outputSpec.width || image.asset.height !== constraint.outputSpec.height
+    || (request.parameters.size !== "auto" && (image.asset.width !== request.parameters.size.width || image.asset.height !== request.parameters.size.height))
+    || image.asset.sourceAssetId !== (request.operation === "edit" ? request.inputs[0].assetId : undefined)
+    || Date.parse(record.confirmedAt) >= Date.parse(request.quote.expiresAt) || Date.parse(record.confirmedAt) > Date.parse(image.verifiedAt)
+    || record.transformedInputs.length !== refs.length
+    || refs.some((ref, index) => record.transformedInputs[index]?.assetId !== ref.assetId || record.transformedInputs[index]?.originalChecksumSha256 !== ref.checksumSha256
+      || (ref !== (request.operation === "edit" ? request.mask : undefined) && record.transformedInputs[index]?.transform !== "exif-srgb-png-v1")
+      || (ref === (request.operation === "edit" ? request.mask : undefined) && record.transformedInputs[index]?.transform === "exif-srgb-png-v1"))) {
+    context.addIssue({ code: "custom", message: "生成图片的资产、确认、约束或谱系不一致" });
+  }
+});
 
 export const RunBatchSchema = z.object({
   id: IdSchema,
@@ -503,6 +540,7 @@ export const MockRunResultSchema = z.object({
 export type CanvasDocument = z.infer<typeof CanvasDocumentSchema>;
 export type Asset = z.infer<typeof AssetSchema>;
 export type VerifiedImage = z.infer<typeof VerifiedImageSchema>;
+export type GeneratedImageRecord = z.infer<typeof GeneratedImageRecordSchema>;
 export type ObjectStoragePermission = z.infer<typeof ObjectStoragePermissionSchema>;
 export type ObjectStorageGrantRequest = z.infer<typeof ObjectStorageGrantRequestSchema>;
 export type ObjectStorageGrant = z.infer<typeof ObjectStorageGrantSchema>;
