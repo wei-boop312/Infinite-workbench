@@ -55,4 +55,6 @@
 
 第九里程碑原子升级数据库为 v2，增加不可变图片原文件与收据。以上生产边界解除前不能将本机演示宣称为生产可用。
 
+阶段 4 的 5A 增加 v3 候选完整验证与生成谱系事务；5B1 增加 v4 供应商修订目录/未确认准备单，旧原图、任务和账本不重写。资产及准备快照都不是费用结算或执行授权，边界见 `generated-image-ingestion.md`、`image-provider-preparations.md`。
+
 官方依据：[SQLite 事务](https://www.sqlite.org/lang_transaction.html)、[WAL 边界](https://www.sqlite.org/wal.html)、[Node.js SQLite API](https://nodejs.org/api/sqlite.html)。

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { GeneratedImageRecordSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type GeneratedImageRecord, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImagePreparationRecordSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
@@ -38,7 +38,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
       this.transaction(() => {
         const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version);
-        if (![0, 1, 2, 3].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
+        if (![0, 1, 2, 3, 4].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
         this.database.exec(`CREATE TABLE IF NOT EXISTS kernel_state (
           kind TEXT PRIMARY KEY CHECK (kind IN ('runs', 'catalog')),
           revision INTEGER NOT NULL CHECK (revision > 0),
@@ -66,7 +66,26 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
           tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, job_id TEXT NOT NULL,
           PRIMARY KEY (tenant_id, project_id, job_id)
         ) STRICT;
-        PRAGMA user_version = 3`);
+        CREATE TABLE IF NOT EXISTS image_provider_revisions (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+          revision INTEGER NOT NULL, record TEXT NOT NULL, record_sha256 TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, connection_id, revision)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS image_provider_heads (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, connection_id)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS image_preparations (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, id TEXT NOT NULL, action_key TEXT NOT NULL,
+          record TEXT NOT NULL, record_sha256 TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, id), UNIQUE (tenant_id, project_id, action_key)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS image_preparation_presence (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, id TEXT NOT NULL, action_key TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, id), UNIQUE (tenant_id, project_id, action_key)
+        ) STRICT;
+        PRAGMA user_version = 4`);
       });
     } catch (error) {
       this.database.close();
@@ -187,6 +206,80 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     this.database.prepare("INSERT INTO generated_images(tenant_id, project_id, job_id, asset_id, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
       .run(tenantId, projectId, jobId, record.image.asset.id, payload, createHash("sha256").update(payload).digest("hex"));
     this.database.prepare("INSERT INTO generated_image_presence(tenant_id, project_id, job_id) VALUES (?, ?, ?)").run(tenantId, projectId, jobId);
+  }
+
+  loadImageProviderHistory(tenantId: string, projectId: string): ImageProviderRevision[] {
+    try {
+      const heads = this.database.prepare("SELECT connection_id, revision FROM image_provider_heads WHERE tenant_id = ? AND project_id = ? LIMIT 65").all(tenantId, projectId);
+      const rows = this.database.prepare("SELECT connection_id, revision, record, record_sha256 FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ? ORDER BY connection_id, revision LIMIT 2049").all(tenantId, projectId);
+      if (heads.length > 64 || rows.length > 2048) throw new Error("供应商目录超出本机界限");
+      const latest = new Map<string, number>();
+      const history = rows.map((row) => {
+        const record = ImageProviderRevisionSchema.parse(this.readImageMetadata(row));
+        const connection = record.connection;
+        if (connection.tenantId !== tenantId || connection.projectId !== projectId || connection.id !== row.connection_id || connection.revision !== row.revision
+          || connection.revision !== (latest.get(connection.id) ?? 0) + 1 || connection.revision > 32) throw new Error("供应商版本丢失或归属损坏");
+        latest.set(connection.id, connection.revision);
+        return record;
+      });
+      if (latest.size !== heads.length || heads.some((head) => typeof head.connection_id !== "string" || latest.get(head.connection_id) !== head.revision)) throw new Error("供应商当前版本与历史不一致");
+      return history;
+    } catch (error) { throw databaseError(error); }
+  }
+
+  saveImageProviderRevision(incoming: ImageProviderRevision): void {
+    if (this.depth === 0) throw new Error("必须在事务中保存供应商版本");
+    const record = ImageProviderRevisionSchema.parse(incoming);
+    const connection = record.connection;
+    const history = this.loadImageProviderHistory(connection.tenantId, connection.projectId).filter((item) => item.connection.id === connection.id);
+    if (connection.revision !== history.length + 1 || connection.revision > 32) throw new Error("供应商版本不能覆盖或跳跃");
+    const payload = this.imageMetadataPayload(record);
+    this.database.prepare("INSERT INTO image_provider_revisions(tenant_id, project_id, connection_id, revision, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(connection.tenantId, connection.projectId, connection.id, connection.revision, payload, createHash("sha256").update(payload).digest("hex"));
+    this.database.prepare("INSERT INTO image_provider_heads(tenant_id, project_id, connection_id, revision) VALUES (?, ?, ?, ?) ON CONFLICT(tenant_id, project_id, connection_id) DO UPDATE SET revision = excluded.revision")
+      .run(connection.tenantId, connection.projectId, connection.id, connection.revision);
+  }
+
+  loadImagePreparation(tenantId: string, projectId: string, id: string): ImagePreparationRecord | null { return this.readImagePreparation(tenantId, projectId, "id", id); }
+  loadImagePreparationByAction(tenantId: string, projectId: string, key: string): ImagePreparationRecord | null { return this.readImagePreparation(tenantId, projectId, "action_key", key); }
+  private readImagePreparation(tenantId: string, projectId: string, field: "id" | "action_key", value: string): ImagePreparationRecord | null {
+    try {
+      const row = this.database.prepare(`SELECT id, action_key, record, record_sha256 FROM image_preparations WHERE tenant_id = ? AND project_id = ? AND ${field} = ?`).get(tenantId, projectId, value);
+      const marker = this.database.prepare(`SELECT id, action_key FROM image_preparation_presence WHERE tenant_id = ? AND project_id = ? AND ${field} = ?`).get(tenantId, projectId, value);
+      if (!row && !marker) return null;
+      if (!row || !marker || marker.id !== row.id || marker.action_key !== row.action_key) throw new Error("图片准备单已丢失或损坏");
+      const record = ImagePreparationRecordSchema.parse(this.readImageMetadata(row));
+      if (record.tenantId !== tenantId || record.projectId !== projectId || record.id !== row.id || record.selection.idempotencyKey !== row.action_key) throw new Error("图片准备单归属不一致");
+      return record;
+    } catch (error) { throw databaseError(error); }
+  }
+
+  saveImagePreparation(incoming: ImagePreparationRecord): void {
+    if (this.depth === 0) throw new Error("必须在事务中保存图片准备单");
+    const record = ImagePreparationRecordSchema.parse(incoming);
+    const payload = this.imageMetadataPayload(record);
+    this.database.prepare("INSERT INTO image_preparations(tenant_id, project_id, id, action_key, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(record.tenantId, record.projectId, record.id, record.selection.idempotencyKey, payload, createHash("sha256").update(payload).digest("hex"));
+    this.database.prepare("INSERT INTO image_preparation_presence(tenant_id, project_id, id, action_key) VALUES (?, ?, ?, ?)")
+      .run(record.tenantId, record.projectId, record.id, record.selection.idempotencyKey);
+  }
+
+  imagePreparationCount(tenantId: string, projectId: string): number {
+    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM image_preparation_presence WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.count ?? 0);
+  }
+  imageMetadataBytes(tenantId: string, projectId: string): number {
+    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
+      .get(tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
+  }
+  private imageMetadataPayload(value: unknown): string {
+    const payload = JSON.stringify(value);
+    if (Buffer.byteLength(payload, "utf8") > 512 * 1024) throw new Error("图片配置/准备单元数据过大");
+    return payload;
+  }
+  private readImageMetadata(row: Record<string, unknown>): unknown {
+    if (typeof row.record !== "string" || Buffer.byteLength(row.record, "utf8") > 512 * 1024
+      || createHash("sha256").update(row.record).digest("hex") !== row.record_sha256) throw new Error("图片元数据摘要损坏");
+    return JSON.parse(row.record);
   }
 
   assertConfiguration(configuration: unknown): void {

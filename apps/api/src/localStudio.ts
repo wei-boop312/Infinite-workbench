@@ -14,6 +14,7 @@ import { FileRunKernelStateStore } from "./runKernelStore";
 import { SqliteRunKernel } from "./sqliteRunKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 import { LocalVerifiedAssets } from "./verifiedAssets";
+import { LocalImageProviders } from "./imageProviders";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -105,7 +106,16 @@ export function createLocalStudioMiddleware(directory: string) {
   const registerBudget = (projectId: string) => kernel.registerLocalProject({
     tenantId, projectId, currency: "CNY", limitMinor: 10_000,
   });
-  const api = createApiServer({ runKernel: kernel!, verifiedAssets });
+  const imageProviders = new LocalImageProviders({ tenantId, stateStore, runAuthorizer: authorizer,
+    authorizer: { authenticate: authorizer.authenticate, allows: (principal, projectId, permission) => permission === "provider:read"
+      && authorizer.allows(principal, projectId, "run:read") },
+    assetAuthorizer: { authenticate: authorizer.authenticate, allows: (principal, projectId, permission) => principal.tenantId === tenantId && Boolean(project(projectId))
+      && (principal.actorId === actorId || (principal.actorId === "local-reviewer" && permission === "asset:read")) },
+    estimate: (_connection, _selection, at) => ({ mode: "local-fixture", evidenceRef: "local-zero-fee-preparation-v1",
+      quote: { id: `fixture-quote-${randomUUID()}`, version: "local-fixture-price-v1", source: "server-price-table", currency: "CNY",
+        estimatedCostMinor: 25, maxCostMinor: 25, expiresAt: new Date(Date.parse(at) + 5 * 60_000).toISOString() } }),
+  }); // No automatic provider/model seeding or public management permissions.
+  const api = createApiServer({ runKernel: kernel!, verifiedAssets, imageProviders });
 
   const registerContext = (incoming: RegisterRunContextRequest) => {
     for (const asset of incoming.assets) {

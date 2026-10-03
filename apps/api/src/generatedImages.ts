@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { ConstraintSnapshotSchema, GeneratedImageRecordSchema, ImageInputTransformSchema, ImageProviderOutcomeSchema, VerifiedImageSchema,
-  type ConstraintSnapshot, type GeneratedImageRecord, type ImageExecutionRequest, type ImageProviderConnection } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImageInputTransformSchema, ImageProviderOutcomeSchema, VerifiedImageSchema,
+  type GeneratedImageRecord, type ImageExecutionRequest, type ImageProviderConnection } from "@canvas/contracts";
 import type { ObjectStorageAuthorizer, StoragePrincipal } from "./objectStorageGateway";
-import { requireImageConfirmation, validateImageProviderInputs, validateImageProviderRequest } from "./imageProviderContract";
+import { requireImageConfirmation, validateImageProviderRequest } from "./imageProviderContract";
 import { imagePayloadSha256, MAX_IMAGE_PROTOCOL_REQUEST_BYTES, type ImageInputTransform } from "./imageRequestPayload";
 import { MAX_IMAGE_PROTOCOL_OUTPUT_BYTES, type ParsedImageProtocolResponse } from "./imageProtocolResponse";
-import { decodeStaticImage, MAX_STATIC_IMAGE_EDGE, MAX_STATIC_IMAGE_PIXELS } from "./staticImageDecoder";
+import { decodeStaticImage } from "./staticImageDecoder";
+import { constraintContentChecksum, validateLocalImageAssetPolicy } from "./imageAssetPolicy";
+export { constraintContentChecksum } from "./imageAssetPolicy";
 import { assetMetadataFingerprint } from "./verifiedAssets";
 import { RunKernelError } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
@@ -14,9 +16,6 @@ export type ImageOutputContext = {
   connection: ImageProviderConnection; request: ImageExecutionRequest; confirmedFingerprint: string; confirmedAt: string;
   prepared: { body: Buffer; requestFingerprint: string; payloadChecksumSha256: string; transformedInputs: ImageInputTransform[] };
 };
-export function constraintContentChecksum(constraint: ConstraintSnapshot): string {
-  return imagePayloadSha256(Buffer.from(JSON.stringify(ConstraintSnapshotSchema.parse(constraint)), "utf8"));
-}
 function reject(code: string, status = 422): never { throw new RunKernelError(status, code, "生成图片未通过权威验证，保留原任务与计费状态"); }
 
 // Trusted server service only. No HTTP upload/result endpoint is enabled here.
@@ -80,26 +79,8 @@ export class LocalGeneratedImages {
       const preflight = () => {
         if (actor.tenantId !== this.options.tenantId || request.tenantId !== actor.tenantId || !this.options.authorizer.allows(actor, request.projectId, "asset:write")) reject("image_output_permission_denied", 403);
         if (typeof this.options.authorizeCommit !== "function" || this.options.authorizeCommit(request, fingerprint, payloadHash, { confirmedAt, transformedInputs: transforms }) !== undefined) reject("image_output_execution_not_authorized", 403);
-        const catalog = this.options.stateStore.loadCatalog();
-        const project = catalog?.projects.find((item) => item.projectId === request.projectId);
-        const constraint = project?.constraints.find((item) => item.id === request.constraintSnapshotId);
-        if (!catalog || !project || !constraint || constraintContentChecksum(constraint) !== request.constraintChecksumSha256) reject("image_output_constraint_changed");
-        if (constraint.lockedPaths.includes("product.pixels")) reject("image_pixel_protection_not_configured");
-        if (Math.max(constraint.outputSpec.width, constraint.outputSpec.height) > MAX_STATIC_IMAGE_EDGE
-          || constraint.outputSpec.width * constraint.outputSpec.height > MAX_STATIC_IMAGE_PIXELS) reject("image_output_dimensions_exceeded");
-        if (constraint.outputSpec.format !== request.parameters.outputFormat || (request.parameters.size !== "auto"
-          && (constraint.outputSpec.width !== request.parameters.size.width || constraint.outputSpec.height !== request.parameters.size.height))) reject("image_output_spec_changed");
-        const masks = [...new Set(constraint.editableRegions.flatMap((region) => region.maskAssetId ? [region.maskAssetId] : []))];
-        if (masks.length > 1 || (masks.length && (request.operation !== "edit" || request.mask?.assetId !== masks[0]))
-          || (request.operation === "edit" && request.mask && !masks.includes(request.mask.assetId))) reject("image_output_constraint_mask_changed");
         if (refs.length && !this.options.authorizer.allows(actor, request.projectId, "asset:read")) reject("image_output_permission_denied", 403);
-        const receipts = refs.map((ref) => {
-          const receipt = this.options.stateStore.loadVerifiedImage(request.tenantId, request.projectId, ref.assetId);
-          const registered = project.assets.find((asset) => asset.id === ref.assetId);
-          if (!receipt || !registered || receipt.registeredMetadataSha256 !== assetMetadataFingerprint(registered)) reject("image_input_not_verified");
-          return receipt;
-        });
-        validateImageProviderInputs(request, receipts);
+        const { catalog, project, constraint } = validateLocalImageAssetPolicy(this.options.stateStore, request);
         const existing = this.options.stateStore.loadGeneratedImage(request.tenantId, request.projectId, request.jobId);
         if (existing) {
           this.assertCatalogImage(existing);

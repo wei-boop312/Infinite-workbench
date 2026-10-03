@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderOutcomeSchema } from "./imageProviders.ts";
+import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
 
 export * from "./imageProviders.ts";
 
@@ -182,6 +182,34 @@ export const ConstraintSnapshotSchema = z.object({
   }).strict(),
   createdAt: IsoDateSchema,
 }).strict();
+
+export const ImagePreparationRecordSchema = z.object({
+  schemaVersion: z.literal(1), id: IdSchema, tenantId: IdSchema, projectId: IdSchema,
+  status: z.literal("unconfirmed"), executionAuthorized: z.literal(false), protocolPreparation: z.literal("not-run"),
+  selection: CreateImagePreparationSchema, selectionFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  snapshotFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  connection: ImageProviderConnectionSchema, requestTemplate: ImageRequestTemplateSchema,
+  constraint: ConstraintSnapshotSchema, pricing: LocalImageQuoteSchema, createdBy: IdSchema, createdAt: IsoDateSchema,
+}).strict().superRefine((record, context) => {
+  const { selection, requestTemplate: template, connection, constraint, pricing } = record;
+  const model = connection.models.find((item) => item.model === selection.model);
+  if (record.tenantId !== connection.tenantId || template.tenantId !== record.tenantId
+    || [selection.projectId, connection.projectId, template.projectId, constraint.projectId].some((id) => id !== record.projectId)
+    || selection.connectionId !== connection.id || template.connectionId !== connection.id
+    || selection.connectionRevision !== connection.revision || template.connectionRevision !== connection.revision
+    || !model || model.version !== selection.capabilityVersion || template.capabilityVersion !== selection.capabilityVersion
+    || template.adapterId !== connection.adapterId || template.model !== selection.model || !connection.enabled
+    || selection.constraintSnapshotId !== constraint.id || template.constraintSnapshotId !== constraint.id
+    || template.protection !== "none" || selection.protection !== "none" || constraint.lockedPaths.includes("product.pixels")
+    || template.operation !== selection.operation || JSON.stringify(template.parameters) !== JSON.stringify(selection.parameters)
+    || template.parameters.outputFormat !== constraint.outputSpec.format
+    || (template.parameters.size !== "auto" && (template.parameters.size.width !== constraint.outputSpec.width || template.parameters.size.height !== constraint.outputSpec.height))
+    || JSON.stringify(template.providerParameters) !== JSON.stringify(selection.providerParameters)
+    || JSON.stringify(template.quote) !== JSON.stringify(pricing.quote)
+    || JSON.stringify(template.inputs.map((item) => item.assetId)) !== JSON.stringify(selection.inputAssetIds)
+    || (template.operation === "edit" ? template.mask?.assetId : undefined) !== (selection.operation === "edit" ? selection.maskAssetId : undefined)
+    || Date.parse(record.createdAt) >= Date.parse(template.quote.expiresAt)) context.addIssue({ code: "custom", message: "图片准备单的冻结快照不一致" });
+});
 
 // Immutable server output/provenance, never a client-submitted verification.
 export const GeneratedImageRecordSchema = z.object({
@@ -541,6 +569,7 @@ export type CanvasDocument = z.infer<typeof CanvasDocumentSchema>;
 export type Asset = z.infer<typeof AssetSchema>;
 export type VerifiedImage = z.infer<typeof VerifiedImageSchema>;
 export type GeneratedImageRecord = z.infer<typeof GeneratedImageRecordSchema>;
+export type ImagePreparationRecord = z.infer<typeof ImagePreparationRecordSchema>;
 export type ObjectStoragePermission = z.infer<typeof ObjectStoragePermissionSchema>;
 export type ObjectStorageGrantRequest = z.infer<typeof ObjectStorageGrantRequestSchema>;
 export type ObjectStorageGrant = z.infer<typeof ObjectStorageGrantSchema>;

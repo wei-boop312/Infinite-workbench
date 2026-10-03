@@ -16,7 +16,7 @@ async function prepare(page: Page) {
   return panel;
 }
 
-test("图片供应商处于合同阶段，真实执行闸门在浏览器访问后仍关闭", async ({ page }) => {
+test("图片供应商处于目录/准备阶段，真实执行闸门在浏览器访问后仍关闭", async ({ page }) => {
   const external: string[] = [];
   page.on("request", (request) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(request.url())) external.push(request.url()); });
   const panel = await prepare(page);
@@ -24,9 +24,31 @@ test("图片供应商处于合同阶段，真实执行闸门在浏览器访问�
     const response = await fetch("/studio-api/health", { headers: { "x-canvas-local": "1" } });
     return { status: response.status, cacheControl: response.headers.get("cache-control"), body: await response.json() };
   });
-  expect(health).toMatchObject({ status: 200, cacheControl: "no-store", body: { realExecutorsEnabled: false, imageProviderMode: "contracts-only", runKernelEnabled: true } });
+  expect(health).toMatchObject({ status: 200, cacheControl: "no-store", body: { realExecutorsEnabled: false, imageProviderMode: "catalog-and-preparations-only", runKernelEnabled: true } });
   await expect(panel.getByRole("button", { name: "查看批次预估" })).toBeEnabled();
   await expect(panel.getByRole("button", { name: "确认模拟成本并排队" })).toHaveCount(0);
+  expect(external).toEqual([]);
+});
+
+test("浏览器目录不自动添加模型，准备入口拒绝伪报价且不启动任务", async ({ page }) => {
+  const external: string[] = [];
+  page.on("request", (request) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(request.url())) external.push(request.url()); });
+  const panel = await prepare(page);
+  const created = page.waitForResponse((response) => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click();
+  const batch = await (await created).json();
+  const checks = await page.evaluate(async ({ projectId }) => {
+    const headers = { "x-canvas-local": "1", "content-type": "application/json" };
+    const base = `/studio-api/v1/projects/${encodeURIComponent(projectId)}`;
+    const listing = await fetch(`${base}/image-providers`, { headers });
+    const counterfeit = await fetch(`${base}/image-preparations`, { method: "POST", headers, body: JSON.stringify({ projectId, quote: { estimatedCostMinor: 0 }, confirmedAt: "2026-01-01T00:00:00Z" }) });
+    const budget = await fetch(`${base}/budget`, { headers });
+    return { list: { status: listing.status, cache: listing.headers.get("cache-control"), body: await listing.json() }, counterfeit: counterfeit.status, budget: await budget.json() };
+  }, { projectId: batch.batch.projectId });
+  expect(checks.list).toEqual({ status: 200, cache: "no-store", body: [] });
+  expect(checks.counterfeit).toBe(400);
+  expect(checks.budget).toMatchObject({ reservedMinor: 0, spentMinor: 0 });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
   expect(external).toEqual([]);
 });
 

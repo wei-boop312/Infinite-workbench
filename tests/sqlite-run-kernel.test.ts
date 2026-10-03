@@ -198,7 +198,7 @@ describe("本机 SQLite 任务事务", () => {
       expect(() => kernel.listBatches(principal, "project-a")).toThrowError(expect.objectContaining({ code: "run_state_unavailable" }));
       database.exec("DELETE FROM kernel_state WHERE kind = 'runs'");
       expect(() => store.load()).toThrow(SqliteStateStoreError);
-      database.exec("PRAGMA user_version = 4");
+      database.exec("PRAGMA user_version = 5");
       expect(() => new SqliteRunKernelStateStore(path)).toThrow(SqliteStateStoreError);
     } finally { database.close(); }
   });

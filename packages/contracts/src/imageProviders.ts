@@ -186,6 +186,30 @@ export const ImageExecutionRequestSchema = z.discriminatedUnion("operation", [
   z.object({ ...RequestBase, operation: z.literal("edit"), inputs: z.array(ImageInputReferenceSchema).min(1).max(20).refine((inputs) => unique(inputs.map((input) => input.assetId))), mask: ImageInputReferenceSchema.optional() }).strict(),
 ]);
 
+// A preparation is NOT a job, human confirmation, reserved budget or dispatch.
+export const ImageRequestTemplateSchema = z.discriminatedUnion("operation", [
+  ImageExecutionRequestSchema.options[0].omit({ jobId: true, idempotencyKey: true }),
+  ImageExecutionRequestSchema.options[1].omit({ jobId: true, idempotencyKey: true }),
+]);
+const SelectionBase = {
+  projectId: Id, idempotencyKey: Id, connectionId: Id,
+  connectionRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  model: Id, capabilityVersion: Id, constraintSnapshotId: Id,
+  protection: z.enum(["none", "pixel-exact"]), parameters: ImageParametersSchema,
+  providerParameters: ProviderParameters.optional(),
+};
+export const CreateImagePreparationSchema = z.discriminatedUnion("operation", [
+  z.object({ ...SelectionBase, operation: z.literal("generate"), inputAssetIds: z.tuple([]) }).strict(),
+  z.object({ ...SelectionBase, operation: z.literal("edit"), inputAssetIds: z.array(Id).min(1).max(20).refine(unique), maskAssetId: Id.optional() }).strict(),
+]);
+export const ImageProviderRevisionSchema = z.object({
+  schemaVersion: z.literal(1), connection: ImageProviderConnectionSchema,
+  registeredBy: Id, registeredAt: DateTime,
+}).strict();
+export const LocalImageQuoteSchema = z.object({
+  mode: z.literal("local-fixture"), evidenceRef: Id, quote: ImageQuoteSchema,
+}).strict();
+
 // Reasoning is not silently folded into outputTokens or converted to money.
 const Metrics = z.object({ inputTokens: Integer.optional(), outputTokens: Integer.optional(), reasoningTokens: Integer.optional(), cachedInputTokens: Integer.optional(), toolInputTokens: Integer.optional(), totalTokens: Integer.optional(), images: Integer.optional() })
   .strict().refine((value) => Object.keys(value).length > 0, "实报用量不能为空");
@@ -223,3 +247,7 @@ export type ImageExecutionRequest = z.infer<typeof ImageExecutionRequestSchema>;
 export type ImageProviderOutcome = z.infer<typeof ImageProviderOutcomeSchema>;
 export type ImageCompatibilityProfile = z.infer<typeof ImageCompatibilityProfileSchema>;
 export type GoogleImageProfile = z.infer<typeof GoogleImageProfileSchema>;
+export type ImageRequestTemplate = z.infer<typeof ImageRequestTemplateSchema>;
+export type CreateImagePreparation = z.infer<typeof CreateImagePreparationSchema>;
+export type ImageProviderRevision = z.infer<typeof ImageProviderRevisionSchema>;
+export type LocalImageQuote = z.infer<typeof LocalImageQuoteSchema>;

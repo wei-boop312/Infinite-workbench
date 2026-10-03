@@ -18,6 +18,7 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 const hash = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
+export const imageSnapshotFingerprint = hash;
 
 // Fingerprint the WHOLE validated connection including endpoint/reference/evidence:
 // any server-side change invalidates a previous confirmation, even with a reused revision.

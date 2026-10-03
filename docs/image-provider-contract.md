@@ -21,6 +21,8 @@
 
 公开视图省略基础地址和凭证引用，固定显示 `realExecutionEnabled=false`。`/health` 增加 `imageProviderMode=contracts-only`，原有 `realExecutorsEnabled=false` 不变。未配置状态仍没有可用的供应商目录或真实模型选择界面。
 
+后续 5B1 已增加持久化目录及未确认准备接口；注入该服务时健康检查改为 `catalog-and-preparations-only`，未注入仍是 `contracts-only`。没有新增真实执行许可，详见 `image-provider-preparations.md`。
+
 ## 验证与限制
 
 新增 17 项本地合同/HTTP 测试与 1 项 Chrome 闸门回归；覆盖严格参数、归属/能力/报价变更、输入及蒙版证明、费用与产物分离、真实执行拒绝。测试只用 `.invalid` 样例地址、假模型、凭证引用和回环 HTTP，不调用外网。
