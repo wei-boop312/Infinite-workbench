@@ -5,6 +5,10 @@ import {
   RunBatchAggregateSchema,
   RunKernelSnapshotSchema,
   ConfirmedImageExecutionSchema,
+  ClaimRunJobsRequestSchema,
+  ExecuteRunJobRequestSchema,
+  ImageDispatchIntentSchema,
+  type ImageDispatchIntent,
   type ConfirmedImageExecution,
   type ConfirmRunBatchRequest,
   type CostLedger,
@@ -26,7 +30,7 @@ import {
   type RunKernelSnapshot,
 } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
-import { imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
+import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
 export type RunPrincipal = {
   tenantId: string;
@@ -107,6 +111,8 @@ type BudgetState = ProjectBudgetConfig & {
 type StoredBatch = {
   aggregate: RunBatchAggregate;
   imageExecution?: ConfirmedImageExecution;
+  imageDispatchIntent?: ImageDispatchIntent;
+  imageDispatchIntentFingerprint?: string;
   requestFingerprint: string;
   reservedMinor: number;
   actualMinor: number;
@@ -121,6 +127,9 @@ export type RunKernelOptions = {
   // Shared stores reload before each command. Other processes' live jobs are not restart casualties.
   recoverRunningJobsOnRestore?: boolean;
   validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
+  // Synchronous trusted policy only, checked inside the same command transaction.
+  // It enables INTERNAL local image lease preparation, never the public mock route.
+  validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent) => undefined;
   unitEstimateMinor?: number;
   unitActualMinor?: number;
   maxConcurrentJobs?: number;
@@ -500,6 +509,17 @@ export class InMemoryRunKernel implements RunKernelPort {
     const stored = this.requireBatch(principal, batchId);
     this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
     this.assertMockBatch(stored.aggregate.batch);
+    return this.claimValidatedBatch(principal, batchId, request, false);
+  }
+
+  claimImageBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest): RunJobClaimResult {
+    return this.claimValidatedBatch(principal, batchId, ClaimRunJobsRequestSchema.parse(request), true);
+  }
+
+  private claimValidatedBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest, image: boolean): RunJobClaimResult {
+    const stored = this.requireBatch(principal, batchId);
+    this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
+    if (image) this.requireImageExecution(stored);
     if (stored.aggregate.batch.status === "billing_unknown") {
       throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止继续调度");
     }
@@ -517,7 +537,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       return { aggregate: this.copy(aggregate), leases: [] };
     }
 
-    this.validateBatchInputs(aggregate.batch);
+    if (image) this.validateImageTask(principal, stored);
+    else this.validateBatchInputs(aggregate.batch);
 
     const projectKey = scopedProjectKey(aggregate.batch.tenantId, aggregate.batch.projectId);
     const active = this.activeJobs();
@@ -637,6 +658,107 @@ export class InMemoryRunKernel implements RunKernelPort {
     }
     this.refreshBatchStatus(stored);
     stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
+    this.persist();
+    return this.copy(stored.aggregate);
+  }
+
+  // Purely INTERNAL lease-bound transition. No transport is connected here.
+  // Only started=true may become a future fixture dispatch; a replay cannot send.
+  startImageJob(principal: RunPrincipal, jobId: string, input: ExecuteRunJobRequest, prepared: {
+    body: Buffer; contentType: string; requestFingerprint: string; payloadChecksumSha256: string;
+    transformedInputs: ConfirmedImageExecution["transformedInputs"];
+  }): { aggregate: RunBatchAggregate; intent: ImageDispatchIntent; started: boolean } {
+    const lease = ExecuteRunJobRequestSchema.parse(input);
+    const initial = this.findJob(principal, jobId);
+    this.assertAllowed(principal, initial.stored.aggregate.batch.projectId, "run:execute");
+    const execution = this.requireImageExecution(initial.stored);
+    if (!Buffer.isBuffer(prepared.body) || prepared.body.byteLength !== execution.payloadByteSize
+      || prepared.contentType !== execution.contentType || prepared.requestFingerprint !== execution.requestFingerprint
+      || prepared.payloadChecksumSha256 !== execution.payloadChecksumSha256
+      || createHash("sha256").update(prepared.body).digest("hex") !== execution.payloadChecksumSha256
+      || imageSnapshotFingerprint(prepared.transformedInputs) !== imageSnapshotFingerprint(execution.transformedInputs)) {
+      throw new RunKernelError(409, "image_dispatch_payload_mismatch", "重建协议负载与人工确认不一致");
+    }
+    const recovered = this.recoverExpiredLeases("system-lease-reaper");
+    const { stored, job } = this.findJob(principal, jobId);
+    const intent = stored.imageDispatchIntent;
+    if (intent) {
+      if (intent.workerId !== lease.workerId || intent.leaseId !== lease.leaseId || intent.actorId !== principal.actorId) {
+        if (recovered) this.persist();
+        throw new RunKernelError(409, "run_job_lease_mismatch", "派发意图属于另一个租约或执行人");
+      }
+      if (recovered) this.persist();
+      return { aggregate: this.copy(stored.aggregate), intent: ImageDispatchIntentSchema.parse(intent), started: false };
+    }
+    if (job.status !== "leased") {
+      if (recovered) this.persist();
+      throw new RunKernelError(409, "run_job_not_leased", "图片任务没有有效租约");
+    }
+    if (job.leaseId !== lease.leaseId || job.leaseOwnerId !== lease.workerId
+      || !stored.aggregate.audit.some((event) => event.eventType === "job-leased" && event.metadata.leaseId === lease.leaseId
+        && event.metadata.jobId === job.id && event.actorId === principal.actorId)) {
+      if (recovered) this.persist();
+      throw new RunKernelError(409, "run_job_lease_mismatch", "图片租约编号、执行器或领取人不匹配");
+    }
+    this.validateImageTask(principal, stored);
+    const at = new Date(this.clock()).toISOString();
+    const recorded = ImageDispatchIntentSchema.parse({ schemaVersion: 1, mode: "local-fixture", transport: "not-connected",
+      id: `image-intent-${randomUUID()}`, jobId: job.id, batchId: job.batchId, actorId: principal.actorId, workerId: lease.workerId, leaseId: lease.leaseId,
+      executionFingerprint: stored.requestFingerprint, requestFingerprint: execution.requestFingerprint, payloadChecksumSha256: execution.payloadChecksumSha256,
+      payloadByteSize: execution.payloadByteSize, contentType: execution.contentType, inputTransformsFingerprint: imageSnapshotFingerprint(execution.transformedInputs), recordedAt: at });
+    this.validateImageTask(principal, stored, recorded);
+    // Synchronous policy work can still cross a lease boundary. Recheck after
+    // the last trusted callback, before writing any dispatch intent.
+    if (!job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= this.clock()) {
+      this.recoverExpiredLeases("system-lease-reaper");
+      this.persist();
+      throw new RunKernelError(409, "run_job_not_leased", "图片租约在最终核验期间到期");
+    }
+    stored.imageDispatchIntent = recorded;
+    stored.imageDispatchIntentFingerprint = imageSnapshotFingerprint(recorded);
+    this.replaceJob(stored.aggregate, { ...job, status: "running", startedAt: at });
+    stored.aggregate.audit.push(this.audit(stored.aggregate.batch, principal.actorId, "job-started", {
+      jobId, leaseId: lease.leaseId, workerId: lease.workerId, imageDispatchIntentId: recorded.id,
+      payloadChecksumSha256: recorded.payloadChecksumSha256, transport: "not-connected",
+    }));
+    this.refreshBatchStatus(stored);
+    this.assertStateConsistent();
+    this.persist();
+    return { aggregate: this.copy(stored.aggregate), intent: ImageDispatchIntentSchema.parse(recorded), started: true };
+  }
+
+  inspectImageLease(principal: RunPrincipal, jobId: string, input: ExecuteRunJobRequest) {
+    const lease = ExecuteRunJobRequestSchema.parse(input);
+    const initial = this.findJob(principal, jobId);
+    this.assertAllowed(principal, initial.stored.aggregate.batch.projectId, "run:read");
+    this.assertAllowed(principal, initial.stored.aggregate.batch.projectId, "run:execute");
+    this.requireImageExecution(initial.stored);
+    const recovered = this.recoverExpiredLeases("system-lease-reaper");
+    const { stored, job } = this.findJob(principal, jobId);
+    if (recovered) this.persist();
+    if (job.leaseId !== lease.leaseId || job.leaseOwnerId !== lease.workerId
+      || !stored.aggregate.audit.some((event) => event.eventType === "job-leased" && event.actorId === principal.actorId
+        && event.metadata.leaseId === lease.leaseId && event.metadata.jobId === jobId)) throw new RunKernelError(409, "run_job_lease_mismatch", "图片租约或领取人不匹配");
+    if (!stored.imageDispatchIntent) {
+      if (job.status !== "leased" || !job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= this.clock()) throw new RunKernelError(409, "run_job_not_leased", "图片租约已失效");
+      this.validateImageTask(principal, stored);
+    } else if (stored.imageDispatchIntent.actorId !== principal.actorId) throw new RunKernelError(409, "run_job_lease_mismatch", "派发意图属于另一领取人");
+    return { aggregate: this.copy(stored.aggregate), execution: ConfirmedImageExecutionSchema.parse(stored.imageExecution!),
+      intent: stored.imageDispatchIntent ? ImageDispatchIntentSchema.parse(stored.imageDispatchIntent) : undefined };
+  }
+
+  reconcileImageBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
+    const stored = this.requireBatch(principal, batchId);
+    this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
+    this.requireImageExecution(stored);
+    this.recoverExpiredLeases("system-lease-reaper");
+    for (const job of this.latestJobs(stored.aggregate.jobs)) {
+      if (job.status === "running" && job.startedAt && this.clock() - Date.parse(job.startedAt) >= this.jobTimeoutMs) {
+        this.finishJob(stored, job, "billing-unknown", principal.actorId, "image-dispatch-outcome-unknown");
+      }
+    }
+    this.refreshBatchStatus(stored);
+    this.assertStateConsistent();
     this.persist();
     return this.copy(stored.aggregate);
   }
@@ -1018,6 +1140,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       const stored: StoredBatch = {
         aggregate,
         imageExecution: serialized.imageExecution,
+        imageDispatchIntent: serialized.imageDispatchIntent,
+        imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
         requestFingerprint: serialized.requestFingerprint,
         reservedMinor: serialized.reservedMinor,
         actualMinor: serialized.actualMinor,
@@ -1090,6 +1214,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       batches: [...this.batches.values()].map((stored) => ({
         aggregate: this.copy(stored.aggregate),
         ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
+        ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
         requestFingerprint: stored.requestFingerprint,
         reservedMinor: stored.reservedMinor,
         actualMinor: stored.actualMinor,
@@ -1110,7 +1235,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (stored.imageExecution || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
+        if (stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else {
         const execution = stored.imageExecution;
         if (!execution) throw new Error("图片任务缺少服务端确认快照");
@@ -1122,15 +1247,19 @@ export class InMemoryRunKernel implements RunKernelPort {
           || request.tenantId !== batch.tenantId || request.projectId !== batch.projectId || request.constraintSnapshotId !== batch.constraintSnapshotId
           || batch.tool !== (request.operation === "generate" ? "image-generate" : "image-edit") || batch.adapterId !== request.adapterId
           || batch.idempotencyKey !== `image-confirm:${execution.preparation.id}` || batch.confirmedBy !== execution.confirmedBy || batch.confirmedAt !== execution.confirmedAt
-          || batch.estimatedCostMinor !== request.quote.estimatedCostMinor || batch.maxCostMinor !== request.quote.maxCostMinor
+          || batch.estimatedCostMinor !== request.quote.estimatedCostMinor
+          || batch.maxCostMinor !== Math.max(request.quote.maxCostMinor, ...stored.aggregate.billingOverages.filter((item) => item.status === "approved").map((item) => item.requestedBatchMaxCostMinor))
           || batch.currency !== request.quote.currency || jobs.length !== 1 || !job || job.id !== request.jobId || job.idempotencyKey !== request.idempotencyKey
           || job.executorKind !== "provider" || job.adapterId !== request.adapterId || job.estimatedCostMinor !== request.quote.estimatedCostMinor
           || JSON.stringify(batch.inputAssetIds) !== JSON.stringify(ids) || JSON.stringify(job.inputAssetIds) !== JSON.stringify(ids)
-          || stored.jobScenarios.size !== 0 || job.outputAssetIds.length !== 0 || job.actualCostMinor !== undefined
-          || !["queued", "cancelled"].includes(job.status) || !["queued", "cancelled"].includes(batch.status)
-          || (job.status === "queued" && stored.jobReservations.get(job.id) !== request.quote.maxCostMinor)) {
+          || stored.jobScenarios.size !== 0 || job.outputAssetIds.length !== 0
+          || !["queued", "leased", "running", "billing_unknown", "cancelled", "failed"].includes(job.status)
+          || !["queued", "running", "billing_unknown", "cancelled", "failed"].includes(batch.status)
+          || (["queued", "leased", "running", "billing_unknown"].includes(job.status) && (stored.jobReservations.get(job.id) !== request.quote.maxCostMinor || job.actualCostMinor !== undefined))
+          || (job.status === "failed" && (!job.billingResolutionId || job.actualCostMinor === undefined))) {
           throw new Error("图片任务确认、预留或关闭执行闸门不一致");
         }
+        this.assertImageIntent(stored, execution, job);
       }
       const jobsById = new Map(jobs.map((job) => [job.id, job]));
       if (jobsById.size !== jobs.length) throw new Error("任务内核快照中的任务编号重复");
@@ -1481,7 +1610,45 @@ export class InMemoryRunKernel implements RunKernelPort {
   }
 
   private assertMockBatch(batch: RunBatch): void {
-    if (batch.tool !== "product-retouch") throw new RunKernelError(409, "image_execution_not_configured", "图片任务尚未接通受控租约执行器，预算保持预留");
+    if (batch.tool !== "product-retouch") throw new RunKernelError(409, "image_execution_not_configured", "图片任务不能通过旧模拟执行入口处理");
+  }
+  private requireImageExecution(stored: StoredBatch): ConfirmedImageExecution {
+    if (!stored.imageExecution || stored.aggregate.batch.tool === "product-retouch") throw new RunKernelError(422, "image_task_required", "需要已确认的图片任务");
+    if (typeof this.options.validateImageTask !== "function") throw new RunKernelError(503, "image_lease_policy_not_configured", "尚未配置可信图片租约政策");
+    return stored.imageExecution;
+  }
+  private validateImageTask(principal: RunPrincipal, stored: StoredBatch, intent?: ImageDispatchIntent): void {
+    const execution = this.requireImageExecution(stored);
+    try {
+      validateImageProviderRequest(execution.preparation.connection, execution.request, new Date(this.clock()).toISOString());
+      if (this.options.validateImageTask!(principal, ConfirmedImageExecutionSchema.parse(execution), intent ? ImageDispatchIntentSchema.parse(intent) : undefined) !== undefined) {
+        throw new RunKernelError(403, "image_lease_policy_invalid", "图片租约政策必须同步确认权威状态");
+      }
+      validateImageProviderRequest(execution.preparation.connection, execution.request, new Date(this.clock()).toISOString());
+    } catch (error) {
+      if (error instanceof ImageProviderContractError) throw new RunKernelError(422, error.code, "图片租约合同核验失败");
+      throw error;
+    }
+  }
+  private assertImageIntent(stored: StoredBatch, execution: ConfirmedImageExecution, job: RunJob): void {
+    const intent = stored.imageDispatchIntent;
+    if (!intent) {
+      if (stored.imageDispatchIntentFingerprint || !["queued", "leased", "cancelled"].includes(job.status)) throw new Error("图片任务缺少派发意图");
+      return;
+    }
+    if (stored.imageDispatchIntentFingerprint !== imageSnapshotFingerprint(intent) || !["running", "billing_unknown", "failed"].includes(job.status)
+      || intent.jobId !== job.id || intent.batchId !== job.batchId || intent.workerId !== job.leaseOwnerId || intent.leaseId !== job.leaseId
+      || intent.recordedAt !== job.startedAt || Date.parse(intent.recordedAt) < Date.parse(execution.confirmedAt)
+      || !job.leasedAt || !job.leaseExpiresAt || Date.parse(intent.recordedAt) < Date.parse(job.leasedAt)
+      || Date.parse(intent.recordedAt) >= Date.parse(job.leaseExpiresAt) || Date.parse(intent.recordedAt) >= Date.parse(execution.request.quote.expiresAt)
+      || intent.executionFingerprint !== stored.requestFingerprint || intent.requestFingerprint !== execution.requestFingerprint
+      || intent.payloadChecksumSha256 !== execution.payloadChecksumSha256 || intent.payloadByteSize !== execution.payloadByteSize || intent.contentType !== execution.contentType
+      || intent.inputTransformsFingerprint !== imageSnapshotFingerprint(execution.transformedInputs)
+      || !stored.aggregate.audit.some((event) => event.eventType === "job-leased" && event.actorId === intent.actorId && event.metadata.leaseId === intent.leaseId
+        && event.metadata.jobId === job.id && event.metadata.workerId === intent.workerId && event.createdAt === job.leasedAt)
+      || !stored.aggregate.audit.some((event) => event.eventType === "job-started" && event.actorId === intent.actorId && event.metadata.imageDispatchIntentId === intent.id
+        && event.metadata.jobId === job.id && event.metadata.leaseId === intent.leaseId && event.metadata.workerId === intent.workerId
+        && event.metadata.payloadChecksumSha256 === intent.payloadChecksumSha256 && event.metadata.transport === "not-connected")) throw new Error("图片派发意图、租约或审计不一致");
   }
   private assertFrozenImageExecution(input: ConfirmedImageExecution): void {
     const execution = ConfirmedImageExecutionSchema.parse(input);

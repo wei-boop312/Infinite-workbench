@@ -254,7 +254,8 @@ export class LocalImageProviders {
   private checkMetadataQuota(tenantId: string, projectId: string, record: unknown) {
     const size = Buffer.byteLength(JSON.stringify(record), "utf8");
     const executionBytes = (this.options.stateStore.load()?.batches ?? []).filter((item) => item.aggregate.batch.tenantId === tenantId && item.aggregate.batch.projectId === projectId)
-      .reduce((total, item) => total + (item.imageExecution ? Buffer.byteLength(JSON.stringify(item.imageExecution), "utf8") : 0), 0);
+      .reduce((total, item) => total + (item.imageExecution ? Buffer.byteLength(JSON.stringify(item.imageExecution), "utf8") : 0)
+        + (item.imageDispatchIntent ? Buffer.byteLength(JSON.stringify(item.imageDispatchIntent), "utf8") : 0), 0);
     if (size > 512 * 1024 || this.options.stateStore.imageMetadataBytes(tenantId, projectId) + executionBytes + size > (this.options.maxMetadataBytes ?? 16 * 1024 * 1024)) reject("image_metadata_quota", 413);
   }
   private database<T>(action: () => T): T {

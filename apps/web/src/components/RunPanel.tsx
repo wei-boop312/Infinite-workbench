@@ -23,6 +23,10 @@ function latestJobs(jobs: RunJob[]): RunJob[] {
   return jobs.filter((job) => !jobs.some((other) => other.outputIndex === job.outputIndex && other.attempt > job.attempt));
 }
 
+function reservationMinor(batch: RunBatchAggregate, job: RunJob): number {
+  return batch.batch.tool === "product-retouch" ? job.estimatedCostMinor : batch.batch.maxCostMinor;
+}
+
 const AUDIT_LABEL: Record<string, string> = {
   "batch-created": "创建预估", "confirmation-rejected": "确认被拒绝", "batch-confirmed": "人工确认",
   "budget-reserved": "预留预算", "jobs-created": "创建输出任务", "batch-dispatched": "执行排队任务",
@@ -74,7 +78,7 @@ export default function RunPanel(props: Props) {
   let enteredActualMinor: number | null = null;
   try { enteredActualMinor = parseMoney(actualCost); } catch { /* Invalid input is reported on submission. */ }
   const needsOverage = decision?.kind === "billing" && resolution === "charged"
-    && enteredActualMinor !== null && enteredActualMinor > decision.job.estimatedCostMinor;
+    && enteredActualMinor !== null && enteredActualMinor > reservationMinor(decision.batch, decision.job);
 
   const applyBatches = (records: RunBatchAggregate[]) => {
     if (!alive.current) return;
@@ -142,11 +146,11 @@ export default function RunPanel(props: Props) {
   }, [decision]);
 
   useEffect(() => {
-    if (!ready || !batches.some((item) => item.jobs.some((job) => job.status === "running"))) return;
+    if (!ready || !batches.some((item) => item.batch.tool === "product-retouch" && item.jobs.some((job) => job.status === "running"))) return;
     const timer = window.setInterval(() => {
       if (pending.current) return;
       void run(async (client) => {
-        for (const record of batchesRef.current.filter((item) => item.jobs.some((job) => job.status === "running"))) {
+        for (const record of batchesRef.current.filter((item) => item.batch.tool === "product-retouch" && item.jobs.some((job) => job.status === "running"))) {
           await client.action(record, "reconcile");
         }
       });
@@ -237,14 +241,14 @@ export default function RunPanel(props: Props) {
       const actualCostMinor = parseMoney(actualCost);
       const requestedBatchMaxCostMinor = parseMoney(requestedCeiling);
       const exposure = decision.batch.jobs.reduce((total, job) => total + (job.actualCostMinor ?? 0)
-        + (["queued", "leased", "running", "billing_unknown"].includes(job.status) ? job.estimatedCostMinor : 0), 0)
-        - decision.job.estimatedCostMinor + actualCostMinor;
+        + (["queued", "leased", "running", "billing_unknown"].includes(job.status) ? reservationMinor(decision.batch, job) : 0), 0)
+        - reservationMinor(decision.batch, decision.job) + actualCostMinor;
       if (requestedBatchMaxCostMinor < Math.max(decision.batch.batch.maxCostMinor, exposure)) {
         throw new Error(`拟审批上限至少需要 ${money(Math.max(decision.batch.batch.maxCostMinor, exposure))}，包括其他输出的现有预留。`);
       }
       setDecisionSubmitted(true);
       const result = await client.requestOverage(decision.job.id, {
-        requestId: decisionId, expectedReservedMinor: decision.job.estimatedCostMinor,
+        requestId: decisionId, expectedReservedMinor: reservationMinor(decision.batch, decision.job),
         expectedCurrency: decision.batch.batch.currency, expectedBatchMaxCostMinor: decision.batch.batch.maxCostMinor,
         actualCostMinor, requestedBatchMaxCostMinor, evidenceRef: evidence.trim(), reason: reason.trim(),
       });
@@ -252,7 +256,7 @@ export default function RunPanel(props: Props) {
       return result;
     }
     const base = {
-      resolutionId: decisionId, expectedReservedMinor: decision.job.estimatedCostMinor,
+      resolutionId: decisionId, expectedReservedMinor: reservationMinor(decision.batch, decision.job),
       expectedCurrency: decision.batch.batch.currency, evidenceRef: evidence.trim(),
     };
     const request: ResolveBillingUnknownRequest = resolution === "charged"
@@ -313,19 +317,19 @@ export default function RunPanel(props: Props) {
           </p> : null;
         })()}
         <div className="run-actions">
-          {batch.batch.tool !== "product-retouch" && <p className="run-hint">本地图片确认已保存；受控租约执行器尚未接通，真实生成关闭。当前预算仍预留，未执行的任务可取消。</p>}
+          {batch.batch.tool !== "product-retouch" && <p className="run-hint">本地图片记录已保存；尚未开放图片执行，真实生成关闭。结果不明须人工核账，不会自动重试。</p>}
           {batch.batch.status === "awaiting_confirmation" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "confirm"))}>确认模拟成本并排队</button>}
           {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "queued") && batch.batch.status !== "billing_unknown" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "dispatch"))}>执行排队任务</button>}
-          {batch.jobs.some((job) => job.status === "running") && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "reconcile"))}>检查运行状态</button>}
+          {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "running") && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "reconcile"))}>检查运行状态</button>}
           {["awaiting_confirmation", "queued"].includes(batch.batch.status) && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "cancel"))}>取消批次</button>}
           {batch.jobs.some((job) => job.status === "succeeded") && <button disabled={busy} onClick={() => { props.onAddResults(batch); setMessage("已把模拟结果记录添加到画布，未生成图片文件。"); }}>结果回到画布</button>}
         </div>
         {batch.jobs.length > 0 && <div className="run-progress" role="status">输出进度：{latestJobs(batch.jobs).filter((job) => job.status === "succeeded").length} / {batch.batch.expectedOutputs} 成功</div>}
         <div className="run-jobs">{latestJobs(batch.jobs).map((job) => <article className={`run-job status-${job.status}`} key={job.id} aria-label={`输出 ${job.outputIndex + 1} 任务`}>
           <div><strong>输出 {job.outputIndex + 1} · 第 {job.attempt} 次</strong><span>{RUN_STATUS_LABEL[job.status]}</span></div>
-          <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(batch.batch.tool === "product-retouch" ? job.estimatedCostMinor : batch.batch.maxCostMinor)}`}</small>
+          <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(reservationMinor(batch, job))}`}</small>
           {job.billingEvidenceRef && <small>核账证据：{job.billingEvidenceRef}</small>}
-          {["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
+          {batch.batch.tool === "product-retouch" && ["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
           {job.status === "billing_unknown" && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")
             ? <small>超额申请待审批，原预留保持冻结。</small>
             : <button disabled={busy} onClick={() => openDecision("billing", job)}>核对输出 {job.outputIndex + 1} 计费</button>)}
@@ -349,7 +353,7 @@ export default function RunPanel(props: Props) {
       {decision && <section ref={decisionRef} tabIndex={-1} className="run-decision" role="alertdialog" aria-label={decision.kind === "retry" ? "确认任务重试" : decision.kind === "overage-review" ? "审批超额结算" : "确认计费核账"}>
         <strong>{decision.kind === "retry" ? "确认重试成本" : decision.kind === "overage-review" ? "审批超额结算" : "人工核对模拟计费"}</strong>
         {error && <p className="run-error" role="alert">{error}</p>}
-        <p>输出 {decision.job.outputIndex + 1} · 当前预留 {money(decision.job.estimatedCostMinor)} · 批次上限 {money(decision.batch.batch.maxCostMinor)}</p>
+        <p>输出 {decision.job.outputIndex + 1} · 当前预留 {money(reservationMinor(decision.batch, decision.job))} · 批次上限 {money(decision.batch.batch.maxCostMinor)}</p>
         {decision.kind === "billing" ? <>
           <label>核账结论<select aria-label="核账结论" value={resolution} disabled={decisionSubmitted} onChange={(event) => setResolution(event.target.value as "charged" | "not-charged")}>
             <option value="not-charged">确认未扣费，释放预留</option><option value="charged">确认已扣费，按实际金额结算</option>

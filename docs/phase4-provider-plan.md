@@ -1,6 +1,6 @@
 # 阶段 4 多供应商图片 API 接入计划
 
-日期：2026-10-04（上海）。状态：**里程碑 1 合同/闸门、2 官方纯协议、3 兼容中转差异、4 Google 原生纯协议、5A 候选资产验证/保存、5B1 供应商目录/未确认准备单及 5B2A 确认/预留/任务快照已通过本地验收；5B2/里程碑 5 整体和真实供应商接入尚未验收**。阶段 3 本机零费用验收基线为 `d1c0246`。
+日期：2026-10-04（上海）。状态：**里程碑 1 合同/闸门、2 官方纯协议、3 兼容中转差异、4 Google 原生纯协议、5A 候选资产验证/保存、5B1 供应商目录/未确认准备单、5B2A 确认/预留/任务快照及 5B2B1 内部租约/负载重建/派发意图已通过本地验收；5B2B/5B2/里程碑 5 整体和真实供应商接入尚未验收**。阶段 3 本机零费用验收基线为 `d1c0246`。
 
 接入顺序遵循冻结路线图：一个官方图片 API → 一个 OpenAI 兼容中转协议 → 一个非 OpenAI 协议。画布不直接访问这些服务，全部由统一任务、预算、权限与资产层承接。
 
@@ -36,8 +36,8 @@ OpenAI 的 Image API 提供生成和编辑端点；Responses 还可以通过图�
 
 ## 下一次实施入口
 
-先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，继续 **5B2B 受控租约与资产执行授权**。5A 资产验证底座见 `docs/generated-image-ingestion.md`；5B1 未确认准备单见 `docs/image-provider-preparations.md`；5B2A 已完成的协议准备/完整确认/预算上限预留/任务快照见 `docs/image-task-confirmations.md`，不重复实现。准备单仍未授权，新确认任务也 confirmed-not-dispatchable；5A authorizeCommit 仍只有测试夹具。
+先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，继续 **5B2B2 本地假传输/发送及响应证据/实际产物授权**。5A 资产底座见 `docs/generated-image-ingestion.md`；5B1 准备单见 `docs/image-provider-preparations.md`；5B2A 确认/预留/任务快照见 `docs/image-task-confirmations.md`；5B2B1 内部租约/负载重建/意图见 `docs/image-task-leases.md`，不重复实现。准备单与确认仍未授权产物，not-connected 派发意图也不是已发送/响应证据；5A authorizeCommit 仍只有测试夹具。
 
-在现有统一任务/租约事务中实现明确本地图片执行路径，保留旧 mock 精修语义、用户记录和配置指纹保护，不复用其自动成功/已知费用结算。发送前重建并匹配实际任务负载、转换和确认快照，复查当前连接、输入、约束、报价与租约；用服务端任务/运行租约及发送证据实现 5A 必填授权端口。仍只用本地假报价/假响应，好图、坏图或保存失败与计费分别处理，未知扣费保持预留，不自动重试。随后连接画布选择与有权限二进制回读。准备、确认与入库已共用本机资产政策，发送仍复查；4K 超限不得先付费后缩图，锁区未验收保持拒绝。不读取密钥或启用付费生成。
+在已有意图上连接显式本地假传输，持久化真实的本地发送/响应证据，只允许有效首次启动调用一次，崩溃/重复不得盲目重发。保留旧 mock 精修语义、用户记录和配置指纹，不复用自动成功/已知费用结算。以实际服务端确认、任务、运行租约及发送/响应证据实现 5A 必填授权，并把资产/产物任务状态在同一事务中原子可恢复地保存。好图、坏图或保存失败与计费分别处理，未知扣费保持上限预留，不自动重试。随后连接画布选择与有权限二进制回读。资产政策继续共用并复查；4K 超限不先付费后缩图，锁区未验收保持拒绝。不读取密钥或启用付费生成。
 
-里程碑 1 至 4 分别见 `docs/image-provider-contract.md`、`docs/openai-image-protocol.md`、`docs/compatible-image-protocol.md`、`docs/google-image-protocol.md`；最新 262 项单元/集成、32 项 Chrome 回归、6 个工作区构建通过。现有 `ProviderConnectionSchema` 只是阶段 0 占位；目录、准备/确认、纯协议及候选资产底座不代表真实供应商、生产 Worker/网络、凭证管理或任务费用整合已验收。
+里程碑 1 至 4 分别见 `docs/image-provider-contract.md`、`docs/openai-image-protocol.md`、`docs/compatible-image-protocol.md`、`docs/google-image-protocol.md`；最新 291 项单元/集成（28 文件）、34 项 Chrome 回归、6 个工作区构建通过。现有 `ProviderConnectionSchema` 只是阶段 0 占位；目录、准备/确认、内部租约/意图、纯协议及候选底座不代表真实供应商、生产 Worker/网络、凭证管理或资产/任务费用整合已验收。

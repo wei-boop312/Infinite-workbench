@@ -246,6 +246,17 @@ export const ConfirmedImageExecutionSchema = z.object({
 export type ConfirmImagePreparation = z.infer<typeof ConfirmImagePreparationSchema>;
 export type ConfirmedImageExecution = z.infer<typeof ConfirmedImageExecutionSchema>;
 
+// Durable write-ahead intent, NOT evidence of transport/response or asset authority.
+export const ImageDispatchIntentSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.literal("local-fixture"), transport: z.literal("not-connected"),
+  id: IdSchema, jobId: IdSchema, batchId: IdSchema, actorId: IdSchema, workerId: IdSchema, leaseId: IdSchema,
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/), requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/), payloadByteSize: z.number().int().positive().max(64 * 1024 * 1024),
+  contentType: z.string().regex(/^(application\/json|multipart\/form-data; boundary=canvas-[a-f0-9]{40})$/),
+  inputTransformsFingerprint: z.string().regex(/^[a-f0-9]{64}$/), recordedAt: IsoDateSchema,
+}).strict();
+export type ImageDispatchIntent = z.infer<typeof ImageDispatchIntentSchema>;
+
 // Immutable server output/provenance, never a client-submitted verification.
 export const GeneratedImageRecordSchema = z.object({
   schemaVersion: z.literal(1),
@@ -568,6 +579,8 @@ export const RunKernelBudgetStateSchema = z.object({
 export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
   imageExecution: ConfirmedImageExecutionSchema.optional(),
+  imageDispatchIntent: ImageDispatchIntentSchema.optional(),
+  imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   reservedMinor: z.number().int().nonnegative(),
   actualMinor: z.number().int().nonnegative(),

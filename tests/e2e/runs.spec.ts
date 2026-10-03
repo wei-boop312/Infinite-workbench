@@ -84,11 +84,57 @@ test("图片排队任务合同夹具显示实际预留上限，不暴露旧模�
     await route.fulfill({ response, json: [fixture, ...existing] });
   });
   const panel = await prepare(page); const current = panel.getByRole("region", { name: "当前批次" });
-  await expect(current).toContainText("受控租约执行器尚未接通，真实生成关闭");
+  await expect(current).toContainText("尚未开放图片执行，真实生成关闭");
   await expect(current.getByLabel("输出 1 任务")).toContainText("预留 ¥0.30");
   await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);
   await expect(current.getByRole("button", { name: "确认模拟成本并排队" })).toHaveCount(0);
   await expect(current.getByRole("button", { name: "取消批次" })).toBeEnabled();
+});
+
+test("图片计费未知 UI 按报价上限核账，核实 0.27 不误判超过 0.30 预留", async ({ page }) => {
+  // Contract-only browser fixture. No provider/task is seeded into the studio DB
+  // and no billing call is forwarded. Backend transactions have separate tests.
+  const at = "2026-10-04T00:00:00.000Z";
+  let fixture = { batch: { id: "image-billing-ui", tenantId: "local-studio", projectId: "project-main-image", constraintSnapshotId: "image-fixture-constraint", tool: "image-generate",
+    adapterId: "image-fixture-adapter", inputAssetIds: [], idempotencyKey: "image-ui-confirm", status: "billing_unknown", expectedOutputs: 1,
+    estimatedCostMinor: 25, maxCostMinor: 30, currency: "CNY", confirmedBy: "local-designer", confirmedAt: at, createdAt: at },
+    jobs: [{ id: "image-billing-job", batchId: "image-billing-ui", outputIndex: 0, attempt: 1, executorKind: "provider", adapterId: "image-fixture-adapter",
+      idempotencyKey: "image-ui-job-key", status: "billing_unknown", inputAssetIds: [], outputAssetIds: [], estimatedCostMinor: 25, createdAt: at }], ledger: [], audit: [], billingOverages: [] };
+  await page.route("**/studio-api/v1/projects/*/run-batches", async (route) => {
+    const response = await route.fetch(); await route.fulfill({ response, json: [fixture, ...await response.json()] });
+  });
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/studio-api/v1/run-jobs/image-billing-job/resolve-billing", async (route) => {
+    submitted = route.request().postDataJSON(); expect(submitted).toMatchObject({ expectedReservedMinor: 30, expectedCurrency: "CNY", resolution: "charged", actualCostMinor: 27 });
+    fixture = { ...fixture, batch: { ...fixture.batch, status: "failed" }, jobs: [{ ...fixture.jobs[0], status: "failed", actualCostMinor: 27 } as typeof fixture.jobs[0]] };
+    await route.fulfill({ status: 200, contentType: "application/json", json: fixture });
+  });
+  const panel = await prepare(page), current = panel.getByRole("region", { name: "当前批次" });
+  await expect(current).toContainText("预留 ¥0.30"); await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);
+  await panel.getByRole("button", { name: "核对输出 1 计费" }).click(); const decision = panel.getByRole("alertdialog", { name: "确认计费核账" });
+  await expect(decision).toContainText("当前预留 ¥0.30"); await decision.getByLabel("核账结论").selectOption("charged");
+  await decision.getByLabel("核实扣费金额").fill("0.27"); await decision.getByLabel("核账证据引用").fill("ui-fixture-no-real-charge");
+  await expect(decision.getByLabel("超额原因")).toHaveCount(0); await expect(decision.getByRole("button", { name: "提交核账结论" })).toBeEnabled();
+  await decision.getByRole("button", { name: "提交核账结论" }).click(); await expect(decision).toBeHidden();
+  expect(submitted).toBeDefined(); await expect(current.getByLabel("输出 1 任务")).toContainText("实际模拟成本 ¥0.27");
+  await expect(current.getByRole("button", { name: "人工重试输出 1" })).toHaveCount(0);
+});
+
+test("图片 running UI 不轮询旧模拟检查入口，也不暴露旧执行按钮", async ({ page }) => {
+  const at = "2026-10-04T00:00:00.000Z";
+  await page.route("**/studio-api/v1/projects/*/run-batches", async (route) => {
+    const response = await route.fetch(); const fixture = { batch: { id: "image-running-ui", tenantId: "local-studio", projectId: "project-main-image", constraintSnapshotId: "image-fixture-constraint", tool: "image-generate",
+      adapterId: "image-fixture-adapter", inputAssetIds: [], idempotencyKey: "image-running-confirm", status: "running", expectedOutputs: 1,
+      estimatedCostMinor: 25, maxCostMinor: 30, currency: "CNY", confirmedBy: "local-designer", confirmedAt: at, createdAt: at },
+      jobs: [{ id: "image-running-job", batchId: "image-running-ui", outputIndex: 0, attempt: 1, executorKind: "provider", adapterId: "image-fixture-adapter",
+        idempotencyKey: "image-running-job-key", status: "running", inputAssetIds: [], outputAssetIds: [], estimatedCostMinor: 25, createdAt: at, startedAt: at }], ledger: [], audit: [], billingOverages: [] };
+    await route.fulfill({ response, json: [fixture, ...await response.json()] });
+  });
+  const requests: string[] = []; page.on("request", (request) => { if (request.url().includes("image-running-ui/reconcile")) requests.push(request.url()); });
+  await page.clock.install(); const panel = await prepare(page); const current = panel.getByRole("region", { name: "当前批次" });
+  await expect(current).toContainText("尚未开放图片执行"); await page.clock.runFor(7000);
+  expect(requests).toEqual([]); await expect(current.getByRole("button", { name: "检查运行状态" })).toHaveCount(0);
+  await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0); await expect(current.getByRole("button", { name: "取消批次" })).toHaveCount(0);
 });
 
 async function prepareOverage(page: Page) {
