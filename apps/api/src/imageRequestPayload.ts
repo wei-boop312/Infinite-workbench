@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { ImageInputTransformSchema, type ImageExecutionRequest, type ImageModelCapability, type VerifiedImage } from "@canvas/contracts";
 import { ImageProviderContractError, validateImageProviderInputs } from "./imageProviderContract";
+import { withStaticImageDecodeSlot } from "./staticImageDecoder";
 
 export const MAX_IMAGE_PROTOCOL_REQUEST_BYTES = 64 * 1024 * 1024;
 export const MAX_IMAGE_REFERENCE_CHARACTERS = 20 * 1024 * 1024;
@@ -13,7 +14,7 @@ type NormalizedImage = { assetId: string; body: Buffer };
 export type ImagePayloadParts = { fields: Record<string, string | number>; images: NormalizedImage[]; mask?: NormalizedImage; transformedInputs: ImageInputTransform[] };
 
 async function normalizedPixels(body: Buffer, width: number, height: number) {
-  try {
+  return withStaticImageDecodeSlot(async () => { try {
     const decoded = await sharp(body, { failOn: "warning", limitInputPixels: 16_000_000 })
       .timeout({ seconds: 5 }).rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     if (decoded.info.width !== width || decoded.info.height !== height || decoded.info.channels !== 4) reject("image_normalized_dimensions_changed");
@@ -21,7 +22,7 @@ async function normalizedPixels(body: Buffer, width: number, height: number) {
   } catch (error) {
     if (error instanceof ImageProviderContractError) throw error;
     return reject("image_input_decode_failed");
-  }
+  } });
 }
 
 // Called only with a request/capability already checked by the provider contract.

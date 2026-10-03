@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import {
   ClaimRunJobsRequestSchema,
   CreateImagePreparationSchema,
+  ConfirmImagePreparationSchema,
   ConfirmRunBatchRequestSchema,
   CreateRunBatchRequestSchema,
   ExecuteRunJobRequestSchema,
@@ -70,7 +71,8 @@ export function createApiServer(options: ApiServerOptions = {}) {
         ok: true,
         mode: "phase-3",
         realExecutorsEnabled: false,
-        imageProviderMode: options.imageProviders ? "catalog-and-preparations-only" : "contracts-only",
+        imageProviderMode: options.imageProviders?.confirmationsEnabled ? "catalog-preparations-staged-confirmations"
+          : options.imageProviders ? "catalog-and-preparations-only" : "contracts-only",
         objectStorageSigningEnabled: Boolean(options.objectStorageGateway),
         runKernelEnabled: Boolean(options.runKernel),
         assetVerificationEnabled: Boolean(options.verifiedAssets),
@@ -81,15 +83,17 @@ export function createApiServer(options: ApiServerOptions = {}) {
     const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     const providerMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-providers(?:\/([^/]+))?$/);
     const preparationMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-preparations(?:\/([^/]+))?$/);
-    if ((providerMatch && request.method === "GET") || (preparationMatch && (request.method === "GET" || (request.method === "POST" && !preparationMatch[2])))) {
+    const imageConfirmationMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-preparations\/([^/]+)\/confirm$/);
+    if ((imageConfirmationMatch && request.method === "POST") || (providerMatch && request.method === "GET") || (preparationMatch && (request.method === "GET" || (request.method === "POST" && !preparationMatch[2])))) {
       const providers = options.imageProviders;
       if (!providers) { sendJson(response, 503, { error: "image_provider_catalog_not_configured" }); return; }
       const principal = providers.authenticate(request);
       if (!principal) { sendJson(response, 401, { error: "image_provider_authentication_required" }); return; }
       try {
-        const match = (providerMatch ?? preparationMatch)!;
+        const match = (imageConfirmationMatch ?? providerMatch ?? preparationMatch)!;
         const projectId = decodeURIComponent(match[1]);
-        if (providerMatch) sendJson(response, 200, providerMatch[2] ? providers.get(principal, projectId, decodeURIComponent(providerMatch[2])) : providers.list(principal, projectId));
+        if (imageConfirmationMatch) sendJson(response, 200, await providers.confirmPreparation(principal, projectId, decodeURIComponent(match[2]), ConfirmImagePreparationSchema.parse(await readJson(request, 16 * 1024))));
+        else if (providerMatch) sendJson(response, 200, providerMatch[2] ? providers.get(principal, projectId, decodeURIComponent(providerMatch[2])) : providers.list(principal, projectId));
         else if (request.method === "POST") {
           const input = CreateImagePreparationSchema.parse(await readJson(request, 128 * 1024));
           if (input.projectId !== projectId) throw new RunKernelError(422, "image_preparation_project_mismatch", "图片准备单项目不一致");

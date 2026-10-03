@@ -106,7 +106,7 @@ export function createLocalStudioMiddleware(directory: string) {
   const registerBudget = (projectId: string) => kernel.registerLocalProject({
     tenantId, projectId, currency: "CNY", limitMinor: 10_000,
   });
-  const imageProviders = new LocalImageProviders({ tenantId, stateStore, runAuthorizer: authorizer,
+  const imageProviders = new LocalImageProviders({ tenantId, stateStore, runAuthorizer: authorizer, runKernel: kernel!,
     authorizer: { authenticate: authorizer.authenticate, allows: (principal, projectId, permission) => permission === "provider:read"
       && authorizer.allows(principal, projectId, "run:read") },
     assetAuthorizer: { authenticate: authorizer.authenticate, allows: (principal, projectId, permission) => principal.tenantId === tenantId && Boolean(project(projectId))

@@ -4,6 +4,8 @@ import {
   ProjectBudgetSnapshotSchema,
   RunBatchAggregateSchema,
   RunKernelSnapshotSchema,
+  ConfirmedImageExecutionSchema,
+  type ConfirmedImageExecution,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -24,6 +26,7 @@ import {
   type RunKernelSnapshot,
 } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
+import { imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
 export type RunPrincipal = {
   tenantId: string;
@@ -103,11 +106,12 @@ type BudgetState = ProjectBudgetConfig & {
 
 type StoredBatch = {
   aggregate: RunBatchAggregate;
+  imageExecution?: ConfirmedImageExecution;
   requestFingerprint: string;
   reservedMinor: number;
   actualMinor: number;
   jobReservations: Map<string, number>;
-  jobScenarios: Map<string, RunBatch["mockScenario"]>;
+  jobScenarios: Map<string, CreateRunBatchRequest["mockScenario"]>;
 };
 
 export type RunKernelOptions = {
@@ -356,11 +360,69 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.copy(stored.aggregate);
   }
 
+  // Trusted local service primitive, deliberately NOT a generic HTTP create
+  // contract. Its caller must prepare the protocol and revalidate authoritative
+  // directory/assets under the same transaction before entering this method.
+  stageConfirmedImageBatch(principal: RunPrincipal, input: ConfirmedImageExecution): RunBatchAggregate {
+    const execution = ConfirmedImageExecutionSchema.parse(input);
+    const request = execution.request;
+    this.assertAllowed(principal, request.projectId, "run:create");
+    this.assertAllowed(principal, request.projectId, "run:confirm");
+    if (principal.tenantId !== request.tenantId || execution.confirmedBy !== principal.actorId) {
+      throw new RunKernelError(403, "image_confirmation_permission_denied", "图片确认身份不匹配");
+    }
+    this.assertFrozenImageExecution(execution);
+    const fingerprint = imageSnapshotFingerprint(execution);
+    const idempotencyKey = `image-confirm:${execution.preparation.id}`;
+    const indexKey = `${scopedProjectKey(principal.tenantId, request.projectId)}\u0000${idempotencyKey}`;
+    const existingId = this.idempotencyIndex.get(indexKey);
+    if (existingId) {
+      const previous = this.batches.get(existingId)!;
+      if (previous.requestFingerprint !== fingerprint) throw new RunKernelError(409, "image_confirmation_conflict", "准备单已有不同确认");
+      return this.copy(previous.aggregate);
+    }
+    validateImageProviderRequest(execution.preparation.connection, request, new Date(this.clock()).toISOString());
+    if (this.batches.has(execution.batchId) || [...this.batches.values()].some((item) => item.aggregate.jobs.some((job) => job.id === request.jobId))) {
+      throw new RunKernelError(409, "image_task_identity_conflict", "服务端任务编号冲突");
+    }
+    const budget = this.requireBudget(principal.tenantId, request.projectId);
+    const quote = request.quote;
+    if (budget.currency !== quote.currency) throw new RunKernelError(422, "budget_currency_mismatch", "图片报价与预算币种不一致");
+    if (budget.limitMinor - budget.reservedMinor - budget.spentMinor < quote.maxCostMinor) {
+      throw new RunKernelError(422, "project_budget_exceeded", "项目可用预算不足以覆盖确认上限");
+    }
+    const inputAssetIds = request.operation === "edit" ? [...request.inputs.map((ref) => ref.assetId), ...(request.mask ? [request.mask.assetId] : [])] : [];
+    const batch: RunBatch = {
+      id: execution.batchId, tenantId: principal.tenantId, projectId: request.projectId, constraintSnapshotId: request.constraintSnapshotId,
+      tool: request.operation === "generate" ? "image-generate" : "image-edit", adapterId: request.adapterId, inputAssetIds, idempotencyKey,
+      status: "queued", expectedOutputs: 1, estimatedCostMinor: quote.estimatedCostMinor, maxCostMinor: quote.maxCostMinor, currency: quote.currency,
+      confirmedBy: principal.actorId, confirmedAt: execution.confirmedAt, createdAt: execution.confirmedAt,
+    };
+    const job: RunJob = { id: request.jobId, batchId: batch.id, outputIndex: 0, attempt: 1, executorKind: "provider", adapterId: request.adapterId,
+      idempotencyKey: request.idempotencyKey, status: "queued", inputAssetIds, outputAssetIds: [], estimatedCostMinor: quote.estimatedCostMinor, createdAt: execution.confirmedAt };
+    const aggregate = RunBatchAggregateSchema.parse({ batch, jobs: [job], billingOverages: [],
+      ledger: [{ id: `ledger-${randomUUID()}`, tenantId: batch.tenantId, projectId: batch.projectId, batchId: batch.id, jobId: job.id,
+        currency: quote.currency, estimatedMinor: quote.estimatedCostMinor, reservedMinor: quote.maxCostMinor, settlement: "reserved", createdAt: execution.confirmedAt }],
+      audit: [this.audit(batch, principal.actorId, "batch-created", { mode: "local-fixture", preparationId: execution.preparation.id }),
+        this.audit(batch, principal.actorId, "batch-confirmed", { preparationFingerprint: execution.preparation.snapshotFingerprint,
+          executionFingerprint: fingerprint, requestFingerprint: execution.requestFingerprint, payloadChecksumSha256: execution.payloadChecksumSha256 }),
+        this.audit(batch, principal.actorId, "budget-reserved", { reservedMinor: String(quote.maxCostMinor) }),
+        this.audit(batch, principal.actorId, "jobs-created", { count: "1" })] });
+    budget.reservedMinor += quote.maxCostMinor;
+    this.batches.set(batch.id, { aggregate, imageExecution: execution, requestFingerprint: fingerprint, reservedMinor: quote.maxCostMinor,
+      actualMinor: 0, jobReservations: new Map([[job.id, quote.maxCostMinor]]), jobScenarios: new Map() });
+    this.idempotencyIndex.set(indexKey, batch.id);
+    this.assertStateConsistent();
+    this.persist();
+    return this.copy(aggregate);
+  }
+
   confirmBatch(principal: RunPrincipal, batchId: string, confirmation: ConfirmRunBatchRequest): RunBatchAggregate {
     const stored = this.requireBatch(principal, batchId);
     const aggregate = stored.aggregate;
     const batch = aggregate.batch;
     this.assertAllowed(principal, batch.projectId, "run:confirm");
+    this.assertMockBatch(batch);
 
     if (batch.status === "queued") return this.copy(aggregate);
     if (batch.status !== "awaiting_confirmation") {
@@ -422,7 +484,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     stored.reservedMinor = batch.estimatedCostMinor;
     for (const job of aggregate.jobs) {
       stored.jobReservations.set(job.id, this.unitEstimateMinor);
-      stored.jobScenarios.set(job.id, batch.mockScenario);
+      stored.jobScenarios.set(job.id, batch.mockScenario!);
     }
     aggregate.audit.push(
       this.audit(batch, principal.actorId, "batch-confirmed", { estimatedCostMinor: String(batch.estimatedCostMinor) }),
@@ -437,6 +499,7 @@ export class InMemoryRunKernel implements RunKernelPort {
   claimBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest): RunJobClaimResult {
     const stored = this.requireBatch(principal, batchId);
     this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
+    this.assertMockBatch(stored.aggregate.batch);
     if (stored.aggregate.batch.status === "billing_unknown") {
       throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止继续调度");
     }
@@ -536,6 +599,7 @@ export class InMemoryRunKernel implements RunKernelPort {
   executeLeasedJob(principal: RunPrincipal, jobId: string, request: ExecuteRunJobRequest): RunBatchAggregate {
     const initial = this.findJob(principal, jobId);
     this.assertAllowed(principal, initial.stored.aggregate.batch.projectId, "run:execute");
+    this.assertMockBatch(initial.stored.aggregate.batch);
     const recoveredExpired = this.recoverExpiredLeases("system-lease-reaper");
     const { stored, job } = this.findJob(principal, jobId);
     if (job.status !== "leased") {
@@ -590,6 +654,7 @@ export class InMemoryRunKernel implements RunKernelPort {
   reconcileBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
     const stored = this.requireBatch(principal, batchId);
     this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
+    this.assertMockBatch(stored.aggregate.batch);
     this.recoverExpiredLeases("system-lease-reaper");
     const now = this.clock();
     for (const job of this.latestJobs(stored.aggregate.jobs)) {
@@ -609,6 +674,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     const { stored, job } = located;
     const batch = stored.aggregate.batch;
     this.assertAllowed(principal, batch.projectId, "run:retry");
+    this.assertMockBatch(batch);
     if (job.status === "billing_unknown") {
       throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止重试，以免重复扣费");
     }
@@ -951,6 +1017,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (restoredBatches.has(batch.id)) throw new Error("任务内核快照包含重复批次");
       const stored: StoredBatch = {
         aggregate,
+        imageExecution: serialized.imageExecution,
         requestFingerprint: serialized.requestFingerprint,
         reservedMinor: serialized.reservedMinor,
         actualMinor: serialized.actualMinor,
@@ -1022,6 +1089,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       budgets: [...this.budgets.values()].map((budget) => ({ ...budget })),
       batches: [...this.batches.values()].map((stored) => ({
         aggregate: this.copy(stored.aggregate),
+        ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
         requestFingerprint: stored.requestFingerprint,
         reservedMinor: stored.reservedMinor,
         actualMinor: stored.actualMinor,
@@ -1041,6 +1109,29 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budgetKey = scopedProjectKey(batch.tenantId, batch.projectId);
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
+      if (batch.tool === "product-retouch") {
+        if (stored.imageExecution || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
+      } else {
+        const execution = stored.imageExecution;
+        if (!execution) throw new Error("图片任务缺少服务端确认快照");
+        this.assertFrozenImageExecution(execution);
+        const request = execution.request;
+        const ids = request.operation === "edit" ? [...request.inputs.map((ref) => ref.assetId), ...(request.mask ? [request.mask.assetId] : [])] : [];
+        const job = jobs[0];
+        if (stored.requestFingerprint !== imageSnapshotFingerprint(execution) || execution.batchId !== batch.id
+          || request.tenantId !== batch.tenantId || request.projectId !== batch.projectId || request.constraintSnapshotId !== batch.constraintSnapshotId
+          || batch.tool !== (request.operation === "generate" ? "image-generate" : "image-edit") || batch.adapterId !== request.adapterId
+          || batch.idempotencyKey !== `image-confirm:${execution.preparation.id}` || batch.confirmedBy !== execution.confirmedBy || batch.confirmedAt !== execution.confirmedAt
+          || batch.estimatedCostMinor !== request.quote.estimatedCostMinor || batch.maxCostMinor !== request.quote.maxCostMinor
+          || batch.currency !== request.quote.currency || jobs.length !== 1 || !job || job.id !== request.jobId || job.idempotencyKey !== request.idempotencyKey
+          || job.executorKind !== "provider" || job.adapterId !== request.adapterId || job.estimatedCostMinor !== request.quote.estimatedCostMinor
+          || JSON.stringify(batch.inputAssetIds) !== JSON.stringify(ids) || JSON.stringify(job.inputAssetIds) !== JSON.stringify(ids)
+          || stored.jobScenarios.size !== 0 || job.outputAssetIds.length !== 0 || job.actualCostMinor !== undefined
+          || !["queued", "cancelled"].includes(job.status) || !["queued", "cancelled"].includes(batch.status)
+          || (job.status === "queued" && stored.jobReservations.get(job.id) !== request.quote.maxCostMinor)) {
+          throw new Error("图片任务确认、预留或关闭执行闸门不一致");
+        }
+      }
       const jobsById = new Map(jobs.map((job) => [job.id, job]));
       if (jobsById.size !== jobs.length) throw new Error("任务内核快照中的任务编号重复");
       const overageIds = new Set<string>();
@@ -1095,7 +1186,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       for (const job of jobs) {
         if (globalJobIds.has(job.id) || job.batchId !== batch.id) throw new Error("任务内核快照中的任务归属无效");
         globalJobIds.add(job.id);
-        if (!stored.jobScenarios.has(job.id)) throw new Error("任务内核快照缺少任务执行场景");
+        if (job.executorKind === "mock" && !stored.jobScenarios.has(job.id)) throw new Error("任务内核快照缺少任务执行场景");
         const shouldReserve = ["queued", "leased", "running", "billing_unknown"].includes(job.status);
         if (shouldReserve !== stored.jobReservations.has(job.id)) {
           throw new Error("任务内核快照中的任务预留状态无效");
@@ -1375,17 +1466,33 @@ export class InMemoryRunKernel implements RunKernelPort {
   }
 
   private validateBatchInputs(batch: RunBatch): void {
+    this.assertMockBatch(batch);
     this.options.validateInputs?.(batch.tenantId, {
       projectId: batch.projectId,
       constraintSnapshotId: batch.constraintSnapshotId,
-      tool: batch.tool,
+      tool: "product-retouch",
       inputAssetIds: [...batch.inputAssetIds],
       expectedOutputs: batch.expectedOutputs,
       maxCostMinor: batch.maxCostMinor,
       currency: batch.currency,
       idempotencyKey: batch.idempotencyKey,
-      mockScenario: batch.mockScenario,
+      mockScenario: batch.mockScenario!,
     });
+  }
+
+  private assertMockBatch(batch: RunBatch): void {
+    if (batch.tool !== "product-retouch") throw new RunKernelError(409, "image_execution_not_configured", "图片任务尚未接通受控租约执行器，预算保持预留");
+  }
+  private assertFrozenImageExecution(input: ConfirmedImageExecution): void {
+    const execution = ConfirmedImageExecutionSchema.parse(input);
+    const preparation = execution.preparation;
+    if (execution.requestFingerprint !== imageConfirmationFingerprint(preparation.connection, execution.request)
+      || preparation.selectionFingerprint !== imageSnapshotFingerprint(preparation.selection)
+      || preparation.snapshotFingerprint !== imageSnapshotFingerprint({ connection: preparation.connection, requestTemplate: preparation.requestTemplate, constraint: preparation.constraint, pricing: preparation.pricing })
+      || execution.request.constraintChecksumSha256 !== createHash("sha256").update(JSON.stringify(preparation.constraint)).digest("hex")) {
+      throw new Error("图片执行确认摘要损坏");
+    }
+    validateImageProviderRequest(preparation.connection, execution.request, execution.confirmedAt);
   }
 
   private assertAllowed(principal: RunPrincipal, projectId: string, permission: RunPermission): void {

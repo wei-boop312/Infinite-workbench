@@ -24,7 +24,7 @@ test("图片供应商处于目录/准备阶段，真实执行闸门在浏览器�
     const response = await fetch("/studio-api/health", { headers: { "x-canvas-local": "1" } });
     return { status: response.status, cacheControl: response.headers.get("cache-control"), body: await response.json() };
   });
-  expect(health).toMatchObject({ status: 200, cacheControl: "no-store", body: { realExecutorsEnabled: false, imageProviderMode: "catalog-and-preparations-only", runKernelEnabled: true } });
+  expect(health).toMatchObject({ status: 200, cacheControl: "no-store", body: { realExecutorsEnabled: false, imageProviderMode: "catalog-preparations-staged-confirmations", runKernelEnabled: true } });
   await expect(panel.getByRole("button", { name: "查看批次预估" })).toBeEnabled();
   await expect(panel.getByRole("button", { name: "确认模拟成本并排队" })).toHaveCount(0);
   expect(external).toEqual([]);
@@ -50,6 +50,45 @@ test("浏览器目录不自动添加模型，准备入口拒绝伪报价且不�
   expect(checks.budget).toMatchObject({ reservedMinor: 0, spentMinor: 0 });
   await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
   expect(external).toEqual([]);
+});
+
+test("图片确认入口拒绝自报授权/任务/发送摘要，不预留预算", async ({ page }) => {
+  const panel = await prepare(page);
+  const created = page.waitForResponse((response) => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const checks = await page.evaluate(async ({ projectId }) => {
+    const headers = { "x-canvas-local": "1", "content-type": "application/json" }, base = `/studio-api/v1/projects/${encodeURIComponent(projectId)}`;
+    const ack = { expectedSnapshotFingerprint: "a".repeat(64), expectedEstimatedCostMinor: 25, expectedMaxCostMinor: 30, expectedCurrency: "CNY" };
+    const statuses = [];
+    for (const body of [{ ...ack, executionAuthorized: true, jobId: "client-job", payloadChecksumSha256: "b".repeat(64) }, ack]) {
+      const response = await fetch(`${base}/image-preparations/missing-preparation/confirm`, { method: "POST", headers, body: JSON.stringify(body) }); statuses.push(response.status);
+    }
+    return { statuses, budget: await (await fetch(`${base}/budget`, { headers })).json() };
+  }, { projectId: batch.batch.projectId });
+  expect(checks.statuses).toEqual([400, 404]); expect(checks.budget).toMatchObject({ reservedMinor: 0, spentMinor: 0 });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
+});
+
+test("图片排队任务合同夹具显示实际预留上限，不暴露旧模拟执行按钮", async ({ page }) => {
+  // UI-only fixture; backend atomic confirmation/conservation has independent
+  // real loopback HTTP coverage. This does not seed the studio provider catalog.
+  await page.route("**/studio-api/v1/projects/*/run-batches", async (route) => {
+    const response = await route.fetch(), existing = await response.json();
+    const projectId = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2)!);
+    const at = "2026-10-04T00:00:00.000Z";
+    const fixture = { batch: { id: "image-ui-fixture", tenantId: "local-studio", projectId, constraintSnapshotId: "image-fixture-constraint", tool: "image-generate",
+      adapterId: "image-fixture-adapter", inputAssetIds: [], idempotencyKey: "image-ui-confirm", status: "queued", expectedOutputs: 1,
+      estimatedCostMinor: 25, maxCostMinor: 30, currency: "CNY", confirmedBy: "local-designer", confirmedAt: at, createdAt: at },
+      jobs: [{ id: "image-ui-job", batchId: "image-ui-fixture", outputIndex: 0, attempt: 1, executorKind: "provider", adapterId: "image-fixture-adapter",
+        idempotencyKey: "image-ui-job-key", status: "queued", inputAssetIds: [], outputAssetIds: [], estimatedCostMinor: 25, createdAt: at }], ledger: [], audit: [], billingOverages: [] };
+    await route.fulfill({ response, json: [fixture, ...existing] });
+  });
+  const panel = await prepare(page); const current = panel.getByRole("region", { name: "当前批次" });
+  await expect(current).toContainText("受控租约执行器尚未接通，真实生成关闭");
+  await expect(current.getByLabel("输出 1 任务")).toContainText("预留 ¥0.30");
+  await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);
+  await expect(current.getByRole("button", { name: "确认模拟成本并排队" })).toHaveCount(0);
+  await expect(current.getByRole("button", { name: "取消批次" })).toBeEnabled();
 });
 
 async function prepareOverage(page: Page) {

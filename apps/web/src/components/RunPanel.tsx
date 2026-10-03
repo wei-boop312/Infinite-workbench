@@ -313,8 +313,9 @@ export default function RunPanel(props: Props) {
           </p> : null;
         })()}
         <div className="run-actions">
+          {batch.batch.tool !== "product-retouch" && <p className="run-hint">本地图片确认已保存；受控租约执行器尚未接通，真实生成关闭。当前预算仍预留，未执行的任务可取消。</p>}
           {batch.batch.status === "awaiting_confirmation" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "confirm"))}>确认模拟成本并排队</button>}
-          {batch.jobs.some((job) => job.status === "queued") && batch.batch.status !== "billing_unknown" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "dispatch"))}>执行排队任务</button>}
+          {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "queued") && batch.batch.status !== "billing_unknown" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "dispatch"))}>执行排队任务</button>}
           {batch.jobs.some((job) => job.status === "running") && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "reconcile"))}>检查运行状态</button>}
           {["awaiting_confirmation", "queued"].includes(batch.batch.status) && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "cancel"))}>取消批次</button>}
           {batch.jobs.some((job) => job.status === "succeeded") && <button disabled={busy} onClick={() => { props.onAddResults(batch); setMessage("已把模拟结果记录添加到画布，未生成图片文件。"); }}>结果回到画布</button>}
@@ -322,7 +323,7 @@ export default function RunPanel(props: Props) {
         {batch.jobs.length > 0 && <div className="run-progress" role="status">输出进度：{latestJobs(batch.jobs).filter((job) => job.status === "succeeded").length} / {batch.batch.expectedOutputs} 成功</div>}
         <div className="run-jobs">{latestJobs(batch.jobs).map((job) => <article className={`run-job status-${job.status}`} key={job.id} aria-label={`输出 ${job.outputIndex + 1} 任务`}>
           <div><strong>输出 {job.outputIndex + 1} · 第 {job.attempt} 次</strong><span>{RUN_STATUS_LABEL[job.status]}</span></div>
-          <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(job.estimatedCostMinor)}`}</small>
+          <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(batch.batch.tool === "product-retouch" ? job.estimatedCostMinor : batch.batch.maxCostMinor)}`}</small>
           {job.billingEvidenceRef && <small>核账证据：{job.billingEvidenceRef}</small>}
           {["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
           {job.status === "billing_unknown" && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")

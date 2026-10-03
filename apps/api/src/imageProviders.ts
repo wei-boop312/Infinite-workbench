@@ -1,13 +1,22 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImagePreparationRecordSchema, ImageProviderConnectionSchema, ImageProviderRevisionSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema,
-  type CreateImagePreparation, type ImagePreparationRecord, type ImageProviderConnection, type LocalImageQuote } from "@canvas/contracts";
+import { ConfirmImagePreparationSchema, ConfirmedImageExecutionSchema, CreateImagePreparationSchema, ImageExecutionRequestSchema, ImagePreparationRecordSchema, ImageProviderConnectionSchema, ImageProviderRevisionSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema,
+  type ConfirmImagePreparation, type ConfirmedImageExecution, type CreateImagePreparation, type ImagePreparationRecord, type ImageProviderConnection, type LocalImageQuote } from "@canvas/contracts";
 import { ImageProviderContractError, imageProviderPublicView, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 import { constraintContentChecksum, validateLocalImageAssetPolicy } from "./imageAssetPolicy";
 import { assetMetadataFingerprint } from "./verifiedAssets";
 import type { ObjectStorageAuthorizer } from "./objectStorageGateway";
 import { RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
+import type { SqliteRunKernel } from "./sqliteRunKernel";
+import { prepareOpenAiImageRequest } from "./openaiImageProtocol";
+import { prepareCompatibleImageRequest } from "./compatibleImageProtocol";
+import { prepareGoogleImageRequest } from "./googleImageProtocol";
+import type { TrustedImageBytes } from "./imageRequestPayload";
+
+// Fail fast instead of accumulating unbounded decoded inputs in this process.
+// This is not a cross-process resource limit or an untrusted-code sandbox.
+let activeImageConfirmations = 0;
 
 export interface ImageProviderAuthorizer {
   authenticate(request: IncomingMessage): RunPrincipal | null;
@@ -24,20 +33,23 @@ function preparationView(record: ImagePreparationRecord) {
     requestTemplate: record.requestTemplate, pricing: record.pricing };
 }
 
-// Local-only directory and PRE-confirmation snapshots. No execute/confirm method,
+// Local-only directory, preparations and staged confirmations. No executor,
 // credentials resolution, network transport or auto-seeded provider/model.
 export class LocalImageProviders {
   constructor(private readonly options: {
     tenantId: string; stateStore: SqliteRunKernelStateStore;
     authorizer: ImageProviderAuthorizer; runAuthorizer: RunAuthorizer; assetAuthorizer: ObjectStorageAuthorizer;
     estimate: (connection: ImageProviderConnection, selection: CreateImagePreparation, now: string) => LocalImageQuote;
+    runKernel?: Pick<SqliteRunKernel, "stageConfirmedImageBatch" | "getBatch" | "usesStateStore">;
     maxMetadataBytes?: number; clock?: () => number;
   }) {
     const quota = options.maxMetadataBytes ?? 16 * 1024 * 1024;
     if (!options.tenantId.trim() || options.tenantId !== options.tenantId.trim() || options.tenantId.length > 160
       || !Number.isSafeInteger(quota) || quota < 0 || quota > 16 * 1024 * 1024) throw new Error("供应商目录的租户或容量配置无效");
+    if (options.runKernel && !options.runKernel.usesStateStore(options.stateStore)) throw new Error("图片确认必须与任务内核共用同一事务存储实例");
   }
   authenticate(request: IncomingMessage): RunPrincipal | null { return this.options.authorizer.authenticate(request); }
+  get confirmationsEnabled(): boolean { return Boolean(this.options.runKernel); }
   list(principal: RunPrincipal, projectId: string) {
     return this.database(() => {
       this.allow(principal, projectId, "provider:read");
@@ -144,6 +156,86 @@ export class LocalImageProviders {
     });
   }
 
+  async confirmPreparation(principal: RunPrincipal, projectId: string, id: string, input: unknown) {
+    const confirmation = ConfirmImagePreparationSchema.parse(input);
+    try {
+      const initial = this.database(() => {
+        const record = this.confirmationRecord(principal, projectId, id, confirmation);
+        const previous = this.confirmedView(principal, record);
+        if (previous) return { previous };
+        if (activeImageConfirmations >= 2) reject("image_confirmation_capacity", 429);
+        const request = ImageExecutionRequestSchema.parse({ ...record.requestTemplate, jobId: `job-${randomUUID()}`, idempotencyKey: `image-job-key-${randomUUID()}` });
+        this.validateConfirmationCurrent(principal, record, request);
+        const refs = request.operation === "edit" ? [...request.inputs, ...(request.mask ? [request.mask] : [])] : [];
+        const images: TrustedImageBytes[] = refs.map((ref) => {
+          const verified = this.options.stateStore.loadVerifiedImageBytes(principal.tenantId, projectId, ref.assetId);
+          if (!verified) reject("image_input_not_verified");
+          return verified;
+        });
+        return { record, request, images };
+      });
+      if (initial.previous) return initial.previous;
+      if (activeImageConfirmations >= 2) reject("image_confirmation_capacity", 429);
+      activeImageConfirmations++;
+      try {
+        // No SQLite writer lock is held across asynchronous decoding. The actual
+        // server job/key already participates in protocol fingerprints/boundaries.
+        const { record, request, images } = initial;
+        const prepare = record!.connection.protocol === "openai" ? prepareOpenAiImageRequest
+          : record!.connection.protocol === "openai-compatible" ? prepareCompatibleImageRequest : prepareGoogleImageRequest;
+        const prepared = await prepare(record!.connection, request!, images!, this.now());
+        return this.database(() => {
+          const latest = this.confirmationRecord(principal, projectId, id, confirmation);
+          const previous = this.confirmedView(principal, latest);
+          if (previous) return previous; // A competing connection already committed.
+          this.validateConfirmationCurrent(principal, latest, request!);
+          const execution = ConfirmedImageExecutionSchema.parse({ schemaVersion: 1, mode: "local-fixture", realExecutionEnabled: false,
+            batchId: `batch-${randomUUID()}`, preparation: latest, request, requestFingerprint: prepared.requestFingerprint,
+            payloadChecksumSha256: prepared.payloadChecksumSha256, payloadByteSize: prepared.body.byteLength, contentType: prepared.contentType,
+            protocolVersion: "pure-image-protocol-v1", transformedInputs: prepared.transformedInputs, confirmedBy: principal.actorId, confirmedAt: this.now() });
+          this.checkMetadataQuota(principal.tenantId, projectId, execution);
+          this.options.runKernel!.stageConfirmedImageBatch(principal, execution);
+          const committed = this.confirmedView(principal, latest);
+          if (!committed) throw new Error("图片确认提交后缺少任务证据");
+          return committed;
+        });
+      } finally { activeImageConfirmations--; }
+    } catch (error) { throw this.databaseFailure(error); }
+  }
+
+  private confirmationRecord(principal: RunPrincipal, projectId: string, id: string, confirmation: ConfirmImagePreparation): ImagePreparationRecord {
+    this.allow(principal, projectId, "provider:read");
+    if (!["run:create", "run:confirm", "run:read"].every((permission) => this.options.runAuthorizer.allows(principal, projectId, permission as "run:create" | "run:confirm" | "run:read"))) reject("image_confirmation_permission_denied", 403);
+    if (!this.options.runKernel) reject("image_confirmation_not_configured", 503);
+    const record = this.options.stateStore.loadImagePreparation(principal.tenantId, projectId, id);
+    if (!record) reject("image_preparation_not_found", 404);
+    this.assertPreparation(record);
+    const quote = record.pricing.quote;
+    if (confirmation.expectedSnapshotFingerprint !== record.snapshotFingerprint || confirmation.expectedEstimatedCostMinor !== quote.estimatedCostMinor
+      || confirmation.expectedMaxCostMinor !== quote.maxCostMinor || confirmation.expectedCurrency !== quote.currency) reject("image_confirmation_snapshot_mismatch", 409);
+    return record;
+  }
+  private validateConfirmationCurrent(principal: RunPrincipal, record: ImagePreparationRecord, request: ConfirmedImageExecution["request"]) {
+    if (imageSnapshotFingerprint(this.current(principal.tenantId, record.projectId, record.connection.id)) !== imageSnapshotFingerprint(record.connection)) reject("image_connection_changed", 409);
+    if (request.operation === "edit" && !this.options.assetAuthorizer.allows(principal, record.projectId, "asset:read")) reject("image_confirmation_permission_denied", 403);
+    validateImageProviderRequest(record.connection, request, this.now());
+    validateLocalImageAssetPolicy(this.options.stateStore, request);
+  }
+  private confirmedView(principal: RunPrincipal, record: ImagePreparationRecord) {
+    const batches = this.options.stateStore.load()?.batches ?? [];
+    const saved = batches.find((item) => item.aggregate.batch.tenantId === principal.tenantId && item.aggregate.batch.projectId === record.projectId
+      && item.aggregate.batch.idempotencyKey === `image-confirm:${record.id}`);
+    if (!saved) return undefined;
+    const execution = saved.imageExecution;
+    if (!execution || imageSnapshotFingerprint(execution.preparation) !== imageSnapshotFingerprint(record)) throw new Error("图片确认缺少原始准备单证据");
+    const aggregate = this.options.runKernel!.getBatch(principal, execution.batchId); // Recheck full kernel conservation/frozen evidence.
+    return { mode: "local-fixture" as const, realExecutionEnabled: false as const, executionAuthorized: false as const,
+      executionState: "confirmed-not-dispatchable" as const, protocolPreparation: "prepared" as const,
+      preparationId: record.id, preparationFingerprint: record.snapshotFingerprint, executionFingerprint: saved.requestFingerprint,
+      confirmedBy: execution.confirmedBy, confirmedAt: execution.confirmedAt, requestFingerprint: execution.requestFingerprint,
+      payloadChecksumSha256: execution.payloadChecksumSha256, transformedInputs: execution.transformedInputs, aggregate };
+  }
+
   private current(tenantId: string, projectId: string, id: string): ImageProviderConnection {
     const connection = this.options.stateStore.loadImageProviderHistory(tenantId, projectId).filter((item) => item.connection.id === id).at(-1)?.connection;
     if (!connection) reject("image_connection_not_found", 404);
@@ -161,14 +253,19 @@ export class LocalImageProviders {
   private now(): string { return new Date((this.options.clock ?? Date.now)()).toISOString(); }
   private checkMetadataQuota(tenantId: string, projectId: string, record: unknown) {
     const size = Buffer.byteLength(JSON.stringify(record), "utf8");
-    if (size > 512 * 1024 || this.options.stateStore.imageMetadataBytes(tenantId, projectId) + size > (this.options.maxMetadataBytes ?? 16 * 1024 * 1024)) reject("image_metadata_quota", 413);
+    const executionBytes = (this.options.stateStore.load()?.batches ?? []).filter((item) => item.aggregate.batch.tenantId === tenantId && item.aggregate.batch.projectId === projectId)
+      .reduce((total, item) => total + (item.imageExecution ? Buffer.byteLength(JSON.stringify(item.imageExecution), "utf8") : 0), 0);
+    if (size > 512 * 1024 || this.options.stateStore.imageMetadataBytes(tenantId, projectId) + executionBytes + size > (this.options.maxMetadataBytes ?? 16 * 1024 * 1024)) reject("image_metadata_quota", 413);
   }
   private database<T>(action: () => T): T {
     try { return this.options.stateStore.transaction(action); }
     catch (error) {
-      if (error instanceof RunKernelError) throw error;
-      if (error instanceof ImageProviderContractError) throw new RunKernelError(422, error.code, "供应商图片合同拒绝当前准备单");
-      throw new RunKernelError(503, error instanceof SqliteStateStoreError ? error.code : "run_state_unavailable", "图片供应商目录数据库不可用，未启动生成或修改预算");
+      throw this.databaseFailure(error);
     }
+  }
+  private databaseFailure(error: unknown): RunKernelError {
+    if (error instanceof RunKernelError) return error;
+    if (error instanceof ImageProviderContractError) return new RunKernelError(422, error.code, "供应商图片合同拒绝当前准备单");
+    return new RunKernelError(503, error instanceof SqliteStateStoreError ? error.code : "run_state_unavailable", "图片供应商数据库不可用，保持原确认动作编号恢复");
   }
 }

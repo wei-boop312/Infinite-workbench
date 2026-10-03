@@ -211,6 +211,41 @@ export const ImagePreparationRecordSchema = z.object({
     || Date.parse(record.createdAt) >= Date.parse(template.quote.expiresAt)) context.addIssue({ code: "custom", message: "图片准备单的冻结快照不一致" });
 });
 
+export const ConfirmImagePreparationSchema = z.object({
+  expectedSnapshotFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedEstimatedCostMinor: z.number().int().nonnegative(),
+  expectedMaxCostMinor: z.number().int().nonnegative(),
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/),
+}).strict();
+
+// Private server evidence, not a confirmation payload accepted from the browser.
+// Prepared wire bytes are rebuilt from immutable inputs before any future send.
+export const ConfirmedImageExecutionSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.literal("local-fixture"), realExecutionEnabled: z.literal(false),
+  batchId: IdSchema, preparation: ImagePreparationRecordSchema, request: ImageExecutionRequestSchema,
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/), payloadByteSize: z.number().int().positive().max(64 * 1024 * 1024),
+  contentType: z.string().regex(/^(application\/json|multipart\/form-data; boundary=canvas-[a-f0-9]{40})$/),
+  protocolVersion: z.literal("pure-image-protocol-v1"), transformedInputs: z.array(ImageInputTransformSchema).max(21),
+  confirmedBy: IdSchema, confirmedAt: IsoDateSchema,
+}).strict().superRefine((record, context) => {
+  const { jobId: _job, idempotencyKey: _key, ...template } = record.request;
+  const refs = record.request.operation === "edit" ? [...record.request.inputs, ...(record.request.mask ? [record.request.mask] : [])] : [];
+  if (JSON.stringify(template) !== JSON.stringify(record.preparation.requestTemplate)
+    || Date.parse(record.confirmedAt) < Date.parse(record.preparation.createdAt)
+    || Date.parse(record.confirmedAt) >= Date.parse(record.request.quote.expiresAt)
+    || refs.length !== record.transformedInputs.length
+    || refs.some((ref, index) => record.transformedInputs[index]?.assetId !== ref.assetId
+      || record.transformedInputs[index]?.originalChecksumSha256 !== ref.checksumSha256
+      || (ref !== (record.request.operation === "edit" ? record.request.mask : undefined)
+        ? record.transformedInputs[index]?.transform !== "exif-srgb-png-v1"
+        : record.transformedInputs[index]?.transform === "exif-srgb-png-v1"))) {
+    context.addIssue({ code: "custom", message: "图片确认、输入转换或执行快照不一致" });
+  }
+});
+export type ConfirmImagePreparation = z.infer<typeof ConfirmImagePreparationSchema>;
+export type ConfirmedImageExecution = z.infer<typeof ConfirmedImageExecutionSchema>;
+
 // Immutable server output/provenance, never a client-submitted verification.
 export const GeneratedImageRecordSchema = z.object({
   schemaVersion: z.literal(1),
@@ -252,11 +287,11 @@ export const RunBatchSchema = z.object({
   tenantId: IdSchema,
   projectId: IdSchema,
   constraintSnapshotId: IdSchema,
-  tool: z.literal("product-retouch"),
+  tool: z.enum(["product-retouch", "image-generate", "image-edit"]),
   adapterId: IdSchema,
-  inputAssetIds: z.array(IdSchema).min(1).max(20),
+  inputAssetIds: z.array(IdSchema).max(21),
   idempotencyKey: IdSchema,
-  mockScenario: z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]),
+  mockScenario: z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]).optional(),
   status: z.enum(["draft", "awaiting_confirmation", "queued", "running", "partial", "succeeded", "failed", "billing_unknown", "cancelled"]),
   expectedOutputs: z.number().int().positive(),
   estimatedCostMinor: z.number().int().nonnegative(),
@@ -265,7 +300,12 @@ export const RunBatchSchema = z.object({
   confirmedBy: IdSchema.optional(),
   confirmedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
-}).strict();
+}).strict().superRefine((batch, context) => {
+  if (batch.tool === "product-retouch" ? (!batch.mockScenario || !batch.inputAssetIds.length || batch.inputAssetIds.length > 20)
+    : (batch.mockScenario !== undefined || batch.expectedOutputs !== 1 || (batch.tool === "image-generate" ? batch.inputAssetIds.length !== 0 : batch.inputAssetIds.length === 0))) {
+    context.addIssue({ code: "custom", message: "任务工具与输入或模拟场景不一致" });
+  }
+});
 
 export const RunJobSchema = z.object({
   id: IdSchema,
@@ -527,6 +567,7 @@ export const RunKernelBudgetStateSchema = z.object({
 
 export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
+  imageExecution: ConfirmedImageExecutionSchema.optional(),
   requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   reservedMinor: z.number().int().nonnegative(),
   actualMinor: z.number().int().nonnegative(),

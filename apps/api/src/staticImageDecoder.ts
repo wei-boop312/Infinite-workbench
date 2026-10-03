@@ -5,6 +5,13 @@ export const MAX_STATIC_IMAGE_PIXELS = 16_000_000;
 export const MAX_STATIC_IMAGE_EDGE = 8192;
 let activeDecodes = 0;
 function reject(code: string, message: string, status = 422): never { throw new RunKernelError(status, code, message); }
+// Verification and protocol input normalization share this same process slot.
+export async function withStaticImageDecodeSlot<T>(action: () => Promise<T>): Promise<T> {
+  if (activeDecodes >= 2) reject("verified_asset_busy", "本机正在核验其他图片，请稍后重试", 429);
+  activeDecodes++;
+  try { return await action(); }
+  finally { activeDecodes--; }
+}
 export function imageMagicMime(body: Buffer): string | null {
   if (body.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
   if (body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff) return "image/jpeg";
@@ -43,9 +50,7 @@ export function rejectStaticImageAnimation(body: Buffer, mime: string): void {
 export async function decodeStaticImage(body: Buffer, mime: string): Promise<{ width: number; height: number; hasAlpha: boolean; hasTransparency: boolean }> {
   if (imageMagicMime(body) !== mime) reject("verified_asset_mime_mismatch", "图片魔数与文件类型不一致");
   rejectStaticImageAnimation(body, mime);
-  if (activeDecodes >= 2) reject("verified_asset_busy", "本机正在核验其他图片，请稍后重试", 429);
-  activeDecodes += 1;
-  try {
+  return withStaticImageDecodeSlot(async () => { try {
     const image = sharp(body, { failOn: "warning", limitInputPixels: MAX_STATIC_IMAGE_PIXELS, sequentialRead: true });
     const metadata = await image.metadata();
     const expectedFormat = mime === "image/avif" ? "heif" : mime.slice(6);
@@ -66,5 +71,5 @@ export async function decodeStaticImage(body: Buffer, mime: string): Promise<{ w
   } catch (error) {
     if (error instanceof RunKernelError) throw error;
     return reject("verified_asset_decode_failed", "无法完整解码图片，拒绝伪造或截断文件");
-  } finally { activeDecodes -= 1; }
+  } });
 }

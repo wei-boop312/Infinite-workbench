@@ -7,10 +7,12 @@ type Options = Omit<RunKernelOptions, "stateStore" | "recoverRunningJobsOnRestor
 // Each command reloads under BEGIN IMMEDIATE. Never reuse stale process-local budgets or leases.
 export class SqliteRunKernel implements RunKernelPort {
   constructor(private readonly options: Options) { this.run(() => undefined); }
+  usesStateStore(store: SqliteRunKernelStateStore): boolean { return this.options.stateStore === store; }
 
   authenticate(request: IncomingMessage): RunPrincipal | null { return this.options.authorizer.authenticate(request); }
   registerLocalProject(budget: ProjectBudgetConfig): void { this.run((kernel) => kernel.registerLocalProject(budget)); }
   createBatch: RunKernelPort["createBatch"] = (...args) => this.run((kernel) => kernel.createBatch(...args));
+  stageConfirmedImageBatch: InMemoryRunKernel["stageConfirmedImageBatch"] = (...args) => this.run((kernel) => kernel.stageConfirmedImageBatch(...args));
   getBatch: RunKernelPort["getBatch"] = (...args) => this.run((kernel) => kernel.getBatch(...args));
   listBatches: RunKernelPort["listBatches"] = (...args) => this.run((kernel) => kernel.listBatches(...args));
   confirmBatch: RunKernelPort["confirmBatch"] = (...args) => this.run((kernel) => kernel.confirmBatch(...args));

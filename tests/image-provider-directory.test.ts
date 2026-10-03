@@ -262,7 +262,9 @@ describe("持久化供应商目录与未确认图片准备单（不启动任务�
     expect((await call(url, "image-providers", connection())).status).toBe(404);
     const created = await call(url, "image-preparations", selection()); expect(created.status).toBe(201); const prepared = await created.json(); expect(prepared.executionAuthorized).toBe(false);
     expect(await (await call(url, `image-preparations/${prepared.id}`)).json()).toEqual(prepared);
-    expect((await call(url, `image-preparations/${prepared.id}/confirm`, {})).status).toBe(404);
+    expect((await call(url, `image-preparations/${prepared.id}/confirm`, {})).status).toBe(400);
+    expect((await call(url, `image-preparations/${prepared.id}/confirm`, { expectedSnapshotFingerprint: prepared.snapshotFingerprint,
+      expectedEstimatedCostMinor: 25, expectedMaxCostMinor: 30, expectedCurrency: "CNY" })).status).toBe(503);
     expect((await call(url, "image-preparations", selection({ projectId: "foreign" }))).status).toBe(422);
     expect((await call(url, "image-preparations", selection({ apiKey: "fake", quote: { estimatedCostMinor: 0 } }))).status).toBe(400);
     expect((await call(url, "image-preparations", { oversized: "x".repeat(129 * 1024) })).status).toBe(413);
