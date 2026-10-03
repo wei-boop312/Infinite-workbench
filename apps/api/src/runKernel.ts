@@ -114,6 +114,8 @@ export type RunKernelOptions = {
   authorizer: RunAuthorizer;
   budgets: readonly ProjectBudgetConfig[];
   stateStore?: RunKernelStateStore;
+  // Shared stores reload before each command. Other processes' live jobs are not restart casualties.
+  recoverRunningJobsOnRestore?: boolean;
   validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
   unitEstimateMinor?: number;
   unitActualMinor?: number;
@@ -972,7 +974,8 @@ export class InMemoryRunKernel implements RunKernelPort {
     let recoveredRunningJobs = false;
     for (const stored of this.batches.values()) {
       const batch = stored.aggregate.batch;
-      for (const job of stored.aggregate.jobs.filter((candidate) => candidate.status === "running")) {
+      for (const job of stored.aggregate.jobs.filter((candidate) => candidate.status === "running"
+        && this.options.recoverRunningJobsOnRestore !== false)) {
         const recoveredAt = new Date(this.clock()).toISOString();
         const reservation = stored.jobReservations.get(job.id) ?? 0;
         this.replaceJob(stored.aggregate, {

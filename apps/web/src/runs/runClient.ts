@@ -11,6 +11,8 @@ import {
 } from "@canvas/contracts";
 
 const ERROR_LABELS: Record<string, string> = {
+  run_state_busy: "任务数据库正在处理另一个操作，请保留原动作编号后重试。",
+  run_state_unavailable: "任务数据库不可用，未重置任何预算，请保留原动作编号并检查服务。",
   project_budget_exceeded: "项目模拟预算不足，请先处理仍占用预算的任务。",
   batch_cost_ceiling_exceeded: "预估或重试成本超过本批次上限。",
   confirmation_snapshot_mismatch: "确认金额已变化，请刷新后重新查看。",

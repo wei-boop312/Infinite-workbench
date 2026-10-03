@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,16 +6,21 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { RegisterRunContextRequest, RunBatchAggregate } from "@canvas/contracts";
 import { createLocalStudioMiddleware } from "../apps/api/src/localStudio";
 import { InMemoryRunKernel, RunKernelError } from "../apps/api/src/runKernel";
+import { SqliteRunKernelStateStore } from "../apps/api/src/sqliteRunKernelStore";
+import { FileRunKernelStateStore } from "../apps/api/src/runKernelStore";
 
 const directories: string[] = [];
 const servers: Server[] = [];
+const studios: Array<ReturnType<typeof createLocalStudioMiddleware>> = [];
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
+  for (const studio of studios.splice(0)) studio.close();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 function directory() { const path = mkdtempSync(join(tmpdir(), "canvas-studio-test-")); directories.push(path); return path; }
 async function listen(path: string) {
   const middleware = createLocalStudioMiddleware(path);
+  studios.push(middleware);
   const server = createServer((request, response) => middleware(request, response, () => { response.writeHead(404); response.end(); }));
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -92,7 +97,9 @@ describe("本地画布任务桥接", () => {
     const third = await listen(path);
     expect(await (await call(third, "/v1/projects/project-a/budget")).json()).toMatchObject({ reservedMinor: 0, spentMinor: 40, availableMinor: 9960 });
     expect((await (await call(third, "/v1/run-batches", request())).json() as RunBatchAggregate).batch.id).toBe(draft.batch.id);
-    expect(readFileSync(join(path, "runs.json"), "utf8")).not.toContain("Bearer");
+    const database = new SqliteRunKernelStateStore(join(path, "studio.sqlite"));
+    try { expect(JSON.stringify(database.load())).not.toContain("Bearer"); }
+    finally { database.close(); }
   });
 
   it("待确认和重试时重新验证输入，验证失败不预留预算", () => {
@@ -111,5 +118,69 @@ describe("本地画布任务桥接", () => {
     expect(() => kernel.retryJob(principal, failed.jobs[0].id, { expectedEstimatedCostMinor: 25, expectedCurrency: "CNY", mockScenario: "success" })).toThrow(/无效输入/);
     expect(kernel.getBudget(principal, "project-a").reservedMinor).toBe(0);
     expect(kernel.getBatch(principal, draft.batch.id).jobs).toHaveLength(2);
+  });
+
+  it("旧 JSON 原子迁移至数据库，保留原文件，不再从旧文件覆盖新账本", async () => {
+    const path = directory(); const catalogPath = join(path, "catalog.json"); const runsPath = join(path, "runs.json");
+    writeFileSync(catalogPath, JSON.stringify({ schemaVersion: 1, projects: [context()] }));
+    const legacy = new InMemoryRunKernel({ authorizer: { authenticate: () => null, allows: () => true },
+      budgets: [{ tenantId: "local-studio", projectId: "project-a", currency: "CNY", limitMinor: 10_000 }], stateStore: new FileRunKernelStateStore(runsPath) });
+    const principal = { tenantId: "local-studio", actorId: "local-designer" };
+    const draft = legacy.createBatch(principal, request());
+    legacy.confirmBatch(principal, draft.batch.id, { expectedEstimatedCostMinor: 50, expectedCurrency: "CNY" });
+    const oldRuns = readFileSync(runsPath, "utf8"); const oldCatalog = readFileSync(catalogPath, "utf8");
+    const first = await listen(path);
+    expect((await (await call(first, "/v1/run-batches", request())).json() as RunBatchAggregate).batch.id).toBe(draft.batch.id);
+    expect(await (await call(first, "/v1/projects/project-a/budget")).json()).toMatchObject({ reservedMinor: 50, spentMinor: 0 });
+    await call(first, `/v1/run-batches/${draft.batch.id}/dispatch`, {});
+    const second = await listen(path);
+    expect(await (await call(second, "/v1/projects/project-a/budget")).json()).toMatchObject({ reservedMinor: 0, spentMinor: 40 });
+    expect(readFileSync(runsPath, "utf8")).toBe(oldRuns);
+    expect(readFileSync(catalogPath, "utf8")).toBe(oldCatalog);
+  });
+
+  it("旧记录损坏时迁移整体回滚，不留下半个项目目录", () => {
+    const path = directory();
+    writeFileSync(join(path, "catalog.json"), JSON.stringify({ schemaVersion: 1, projects: [context()] }));
+    writeFileSync(join(path, "runs.json"), "not-json");
+    expect(() => createLocalStudioMiddleware(path)).toThrow();
+    const store = new SqliteRunKernelStateStore(join(path, "studio.sqlite"));
+    try { expect(store.load()).toBeNull(); expect(store.loadCatalog()).toBeNull(); }
+    finally { store.close(); }
+    expect(readFileSync(join(path, "runs.json"), "utf8")).toBe("not-json");
+  });
+
+  it("旧单进程文件中中断的运行任务仅恢复一次，并继续冻结预算", async () => {
+    const path = directory();
+    writeFileSync(join(path, "catalog.json"), JSON.stringify({ schemaVersion: 1, projects: [context()] }));
+    const legacy = new InMemoryRunKernel({ authorizer: { authenticate: () => null, allows: () => true },
+      budgets: [{ tenantId: "local-studio", projectId: "project-a", currency: "CNY", limitMinor: 10_000 }],
+      stateStore: new FileRunKernelStateStore(join(path, "runs.json")) });
+    const principal = { tenantId: "local-studio", actorId: "local-designer" };
+    const draft = legacy.createBatch(principal, { ...request(), mockScenario: "slow" });
+    legacy.confirmBatch(principal, draft.batch.id, { expectedEstimatedCostMinor: 50, expectedCurrency: "CNY" });
+    expect(legacy.dispatchBatch(principal, draft.batch.id).jobs.every((job) => job.status === "running")).toBe(true);
+    const first = await listen(path); const second = await listen(path);
+    const recovered = await (await call(first, `/v1/run-batches/${draft.batch.id}`)).json() as RunBatchAggregate;
+    expect(recovered.jobs.every((job) => job.status === "billing_unknown")).toBe(true);
+    expect(recovered.ledger.filter((entry) => entry.settlement === "unknown")).toHaveLength(2);
+    expect(await (await call(second, "/v1/projects/project-a/budget")).json()).toMatchObject({ reservedMinor: 50, spentMinor: 0 });
+    expect((await (await call(second, `/v1/run-batches/${draft.batch.id}`)).json() as RunBatchAggregate).ledger).toEqual(recovered.ledger);
+  });
+
+  it("共享状态的两个服务及时看见新增项目和输入，不覆盖对方目录或预算", async () => {
+    const path = directory(); const first = await listen(path); const second = await listen(path);
+    await Promise.all([call(first, "/context", context()), call(second, "/context", context("project-b"))]);
+    expect((await call(second, "/v1/run-batches", request())).status).toBe(201);
+    expect((await call(first, "/v1/run-batches", request("project-b"))).status).toBe(201);
+    const a = context(); const b = context();
+    a.assets[0].id = "extra-a"; b.assets[0].id = "extra-b";
+    expect((await Promise.all([call(first, "/context", a), call(second, "/context", b)])).every((response) => response.status === 200)).toBe(true);
+    const store = new SqliteRunKernelStateStore(join(path, "studio.sqlite"));
+    try {
+      expect(store.loadCatalog()?.projects).toHaveLength(2);
+      expect(store.loadCatalog()?.projects.find((item) => item.projectId === "project-a")?.assets).toHaveLength(3);
+      expect(store.load()?.budgets).toHaveLength(2);
+    } finally { store.close(); }
   });
 });

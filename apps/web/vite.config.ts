@@ -8,7 +8,9 @@ export default defineConfig({
     name: "local-studio-mock-api",
     configureServer(server) {
       const directory = process.env.CANVAS_STUDIO_STATE_DIR ?? resolve(server.config.root, "../../work/local-studio-state");
-      server.middlewares.use(createLocalStudioMiddleware(directory));
+      const studio = createLocalStudioMiddleware(directory);
+      server.middlewares.use(studio);
+      server.httpServer?.once("close", studio.close);
     },
   }],
 });

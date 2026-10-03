@@ -23,6 +23,10 @@ describe("画布任务客户端", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new StudioRunClient(new AbortController().signal);
     await expect(client.budget("project-a")).rejects.toThrow(/模拟预算不足/);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "run_state_busy" }), { status: 503 }));
+    await expect(client.budget("project-a")).rejects.toThrow(/保留原动作编号/);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "run_state_unavailable" }), { status: 503 }));
+    await expect(client.budget("project-a")).rejects.toThrow(/未重置任何预算/);
     fetchMock.mockRejectedValueOnce(new TypeError("offline"));
     await expect(client.budget("project-a")).rejects.toThrow(/可安全重试/);
     fetchMock.mockResolvedValueOnce(new Response("<html></html>", { status: 200 }));
