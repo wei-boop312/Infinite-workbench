@@ -287,6 +287,58 @@ export const ResolveBillingUnknownRequestSchema = z.discriminatedUnion("resoluti
   }).strict(),
 ]);
 
+export const RequestBillingOverageSchema = z.object({
+  requestId: IdSchema,
+  expectedReservedMinor: z.number().int().nonnegative(),
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/),
+  expectedBatchMaxCostMinor: z.number().int().nonnegative(),
+  actualCostMinor: z.number().int().positive(),
+  requestedBatchMaxCostMinor: z.number().int().nonnegative(),
+  evidenceRef: IdSchema,
+  reason: IdSchema,
+}).strict();
+
+export const ReviewBillingOverageSchema = z.object({
+  reviewId: IdSchema,
+  decision: z.enum(["approve", "reject"]),
+  expectedReservedMinor: z.number().int().nonnegative(),
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/),
+  expectedActualCostMinor: z.number().int().positive(),
+  expectedBatchMaxCostMinor: z.number().int().nonnegative(),
+  expectedRequestedBatchMaxCostMinor: z.number().int().nonnegative(),
+  evidenceRef: IdSchema,
+  note: IdSchema,
+}).strict();
+
+const BillingOverageBaseSchema = z.object({
+  id: IdSchema,
+  jobId: IdSchema,
+  requestId: IdSchema,
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  requestedBy: IdSchema,
+  requestedAt: IsoDateSchema,
+  reservedMinor: z.number().int().nonnegative(),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  actualCostMinor: z.number().int().positive(),
+  batchMaxCostMinor: z.number().int().nonnegative(),
+  requestedBatchMaxCostMinor: z.number().int().nonnegative(),
+  evidenceRef: IdSchema,
+  reason: IdSchema,
+}).strict();
+const ReviewedBillingOverageFields = {
+  reviewId: IdSchema,
+  reviewFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  reviewedBy: IdSchema,
+  reviewedAt: IsoDateSchema,
+  reviewEvidenceRef: IdSchema,
+  reviewNote: IdSchema,
+};
+export const BillingOverageSchema = z.discriminatedUnion("status", [
+  BillingOverageBaseSchema.extend({ status: z.literal("pending") }).strict(),
+  BillingOverageBaseSchema.extend({ status: z.literal("approved"), ...ReviewedBillingOverageFields }).strict(),
+  BillingOverageBaseSchema.extend({ status: z.literal("rejected"), ...ReviewedBillingOverageFields }).strict(),
+]);
+
 export const RunAuditEventSchema = z.object({
   id: IdSchema,
   tenantId: IdSchema,
@@ -311,6 +363,10 @@ export const RunAuditEventSchema = z.object({
     "billing-resolution-rejected",
     "billing-resolved-charged",
     "billing-resolved-not-charged",
+    "billing-overage-requested",
+    "billing-overage-approved",
+    "billing-overage-rejected",
+    "billing-overage-review-blocked",
     "cost-settled",
     "job-retry-created",
     "batch-cancelled",
@@ -335,6 +391,7 @@ export const RunBatchAggregateSchema = z.object({
   jobs: z.array(RunJobSchema),
   ledger: z.array(CostLedgerSchema),
   audit: z.array(RunAuditEventSchema),
+  billingOverages: z.array(BillingOverageSchema).default([]),
 }).strict();
 
 export const RunBatchListSchema = z.array(RunBatchAggregateSchema);
@@ -429,6 +486,9 @@ export type RetryRunJobRequest = z.infer<typeof RetryRunJobRequestSchema>;
 export type ClaimRunJobsRequest = z.infer<typeof ClaimRunJobsRequestSchema>;
 export type ExecuteRunJobRequest = z.infer<typeof ExecuteRunJobRequestSchema>;
 export type ResolveBillingUnknownRequest = z.infer<typeof ResolveBillingUnknownRequestSchema>;
+export type RequestBillingOverage = z.infer<typeof RequestBillingOverageSchema>;
+export type ReviewBillingOverage = z.infer<typeof ReviewBillingOverageSchema>;
+export type BillingOverage = z.infer<typeof BillingOverageSchema>;
 export type RunAuditEvent = z.infer<typeof RunAuditEventSchema>;
 export type ProjectBudgetSnapshot = z.infer<typeof ProjectBudgetSnapshotSchema>;
 export type RunBatchAggregate = z.infer<typeof RunBatchAggregateSchema>;

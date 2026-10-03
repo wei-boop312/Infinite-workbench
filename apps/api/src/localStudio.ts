@@ -17,7 +17,7 @@ function json(response: ServerResponse, status: number, value: unknown): void {
   response.end(JSON.stringify(value));
 }
 
-// Development-only bridge: one local designer identity, mock executor, no provider credentials.
+// Development-only role simulation, mock executor, no provider credentials or real multi-user authentication.
 export function createLocalStudioMiddleware(directory: string) {
   const catalogPath = join(directory, "catalog.json");
   const catalog = existsSync(catalogPath)
@@ -25,11 +25,15 @@ export function createLocalStudioMiddleware(directory: string) {
     : LocalRunCatalogSchema.parse({ schemaVersion: 1, projects: [] });
   const projects = new Map(catalog.projects.map((project) => [project.projectId, project]));
   const token = randomUUID();
+  const reviewerToken = randomUUID();
   const tenantId = "local-studio";
   const actorId = "local-designer";
   const authorizer: RunAuthorizer = {
-    authenticate: (request) => request.headers.authorization === `Bearer ${token}` ? { tenantId, actorId } : null,
-    allows: (principal, projectId) => principal.tenantId === tenantId && principal.actorId === actorId && projects.has(projectId),
+    authenticate: (request) => request.headers.authorization === `Bearer ${token}` ? { tenantId, actorId }
+      : request.headers.authorization === `Bearer ${reviewerToken}` ? { tenantId, actorId: "local-reviewer" } : null,
+    allows: (principal, projectId, permission) => principal.tenantId === tenantId && projects.has(projectId)
+      && ((principal.actorId === actorId && permission !== "run:approve-billing-overage")
+        || (principal.actorId === "local-reviewer" && ["run:read", "run:approve-billing-overage"].includes(permission))),
   };
   const stateStore = new FileRunKernelStateStore(join(directory, "runs.json"));
   const saved = stateStore.load();
@@ -140,7 +144,10 @@ export function createLocalStudioMiddleware(directory: string) {
       return;
     }
     request.url = request.url.slice("/studio-api".length);
-    request.headers.authorization = `Bearer ${token}`;
+    const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+    // Only this development bridge supplies the simulated reviewer identity for explicit review actions.
+    const isReview = /^\/v1\/run-jobs\/[^/]+\/billing-overages\/[^/]+\/review$/.test(pathname) && request.method === "POST";
+    request.headers.authorization = `Bearer ${isReview ? reviewerToken : token}`;
     api.emit("request", request, response);
   };
 }

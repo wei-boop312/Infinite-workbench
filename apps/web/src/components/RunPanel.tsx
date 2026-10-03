@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type {
   Asset, ConstraintSnapshot, CreateRunBatchRequest, ProjectBudgetSnapshot,
-  ResolveBillingUnknownRequest, RunBatchAggregate, RunJob,
+  ResolveBillingUnknownRequest, RunBatchAggregate, RunJob, BillingOverage,
 } from "@canvas/contracts";
 import { money, parseMoney, RUN_STATUS_LABEL, StudioRunClient } from "../runs/runClient";
 import "./RunPanel.css";
@@ -15,7 +15,8 @@ type Props = {
   onBatches: (batches: RunBatchAggregate[]) => void;
   onAddResults: (batch: RunBatchAggregate) => void;
 };
-type Decision = { kind: "retry" | "billing"; job: RunJob; batch: RunBatchAggregate };
+type Decision = { kind: "retry" | "billing"; job: RunJob; batch: RunBatchAggregate }
+  | { kind: "overage-review"; job: RunJob; batch: RunBatchAggregate; overage: BillingOverage };
 
 function latestJobs(jobs: RunJob[]): RunJob[] {
   return jobs.filter((job) => !jobs.some((other) => other.outputIndex === job.outputIndex && other.attempt > job.attempt));
@@ -29,6 +30,8 @@ const AUDIT_LABEL: Record<string, string> = {
   "billing-unknown": "计费待核对", "billing-resolution-rejected": "核账被拒绝", "billing-resolved-charged": "确认已扣费",
   "billing-resolved-not-charged": "确认未扣费", "cost-settled": "成本结算", "job-retry-created": "人工重试",
   "batch-cancelled": "取消批次", "budget-released": "释放预算",
+  "billing-overage-requested": "提交超额申请", "billing-overage-approved": "批准超额结算",
+  "billing-overage-rejected": "拒绝超额申请", "billing-overage-review-blocked": "审批受预算限制",
 };
 
 export default function RunPanel(props: Props) {
@@ -51,6 +54,9 @@ export default function RunPanel(props: Props) {
   const [evidence, setEvidence] = useState("");
   const [decisionId, setDecisionId] = useState("");
   const [decisionSubmitted, setDecisionSubmitted] = useState(false);
+  const [requestedCeiling, setRequestedCeiling] = useState("2.00");
+  const [reason, setReason] = useState("");
+  const [reviewDecision, setReviewDecision] = useState<"approve" | "reject">("approve");
   const alive = useRef(false);
   const pending = useRef(false);
   const clientRef = useRef<StudioRunClient | null>(null);
@@ -64,6 +70,10 @@ export default function RunPanel(props: Props) {
   const inputAssets = assets.filter((asset) => asset.kind === "image" && asset.purpose !== "mask" && !missingOriginalAssetIds.has(asset.id));
   const batch = batches.find((item) => item.batch.id === selectedBatchId);
   const pendingKey = `ai-commerce-canvas.pending-run.${projectId}`;
+  let enteredActualMinor: number | null = null;
+  try { enteredActualMinor = parseMoney(actualCost); } catch { /* Invalid input is reported on submission. */ }
+  const needsOverage = decision?.kind === "billing" && resolution === "charged"
+    && enteredActualMinor !== null && enteredActualMinor > decision.job.estimatedCostMinor;
 
   const applyBatches = (records: RunBatchAggregate[]) => {
     if (!alive.current) return;
@@ -162,12 +172,20 @@ export default function RunPanel(props: Props) {
     sessionStorage.removeItem(pendingKey);
     return created;
   });
-  const openDecision = (kind: Decision["kind"], job: RunJob) => {
+  const openDecision = (kind: "retry" | "billing", job: RunJob) => {
     if (!batch) return;
     setDecision({ kind, job, batch });
     setDecisionId(`billing-${crypto.randomUUID()}`);
     setResolution("not-charged"); setEvidence(""); setDecisionSubmitted(false);
     setActualCost((job.estimatedCostMinor / 100).toFixed(2));
+    setRequestedCeiling((batch.batch.maxCostMinor / 100).toFixed(2)); setReason("");
+  };
+  const openReview = (overage: BillingOverage) => {
+    const job = batch?.jobs.find((item) => item.id === overage.jobId);
+    if (!batch || !job || overage.status !== "pending") return;
+    setDecision({ kind: "overage-review", job, batch, overage });
+    setDecisionId(`review-${crypto.randomUUID()}`); setDecisionSubmitted(false);
+    setReviewDecision("approve"); setEvidence(""); setReason("");
   };
   const submitDecision = () => run(async (client) => {
     if (!decision) return;
@@ -177,6 +195,38 @@ export default function RunPanel(props: Props) {
       return result;
     }
     if (!evidence.trim()) throw new Error("请填写账单或工单的证据引用。");
+    if (decision.kind === "overage-review") {
+      if (!reason.trim()) throw new Error("请填写审批意见。");
+      const { overage } = decision;
+      setDecisionSubmitted(true);
+      const result = await client.reviewOverage(decision.job.id, overage.id, {
+        reviewId: decisionId, decision: reviewDecision, expectedReservedMinor: overage.reservedMinor,
+        expectedCurrency: overage.currency, expectedActualCostMinor: overage.actualCostMinor,
+        expectedBatchMaxCostMinor: overage.batchMaxCostMinor, expectedRequestedBatchMaxCostMinor: overage.requestedBatchMaxCostMinor,
+        evidenceRef: evidence.trim(), note: reason.trim(),
+      });
+      if (alive.current) setDecision(null);
+      return result;
+    }
+    if (needsOverage) {
+      if (!reason.trim()) throw new Error("请填写超额原因。");
+      const actualCostMinor = parseMoney(actualCost);
+      const requestedBatchMaxCostMinor = parseMoney(requestedCeiling);
+      const exposure = decision.batch.jobs.reduce((total, job) => total + (job.actualCostMinor ?? 0)
+        + (["queued", "leased", "running", "billing_unknown"].includes(job.status) ? job.estimatedCostMinor : 0), 0)
+        - decision.job.estimatedCostMinor + actualCostMinor;
+      if (requestedBatchMaxCostMinor < Math.max(decision.batch.batch.maxCostMinor, exposure)) {
+        throw new Error(`拟审批上限至少需要 ${money(Math.max(decision.batch.batch.maxCostMinor, exposure))}，包括其他输出的现有预留。`);
+      }
+      setDecisionSubmitted(true);
+      const result = await client.requestOverage(decision.job.id, {
+        requestId: decisionId, expectedReservedMinor: decision.job.estimatedCostMinor,
+        expectedCurrency: decision.batch.batch.currency, expectedBatchMaxCostMinor: decision.batch.batch.maxCostMinor,
+        actualCostMinor, requestedBatchMaxCostMinor, evidenceRef: evidence.trim(), reason: reason.trim(),
+      });
+      if (alive.current) setDecision(null);
+      return result;
+    }
     const base = {
       resolutionId: decisionId, expectedReservedMinor: decision.job.estimatedCostMinor,
       expectedCurrency: decision.batch.batch.currency, evidenceRef: evidence.trim(),
@@ -200,7 +250,7 @@ export default function RunPanel(props: Props) {
         <div><dt>预留</dt><dd>{money(budget.reservedMinor)}</dd></div>
         <div><dt>已结算</dt><dd>{money(budget.spentMinor)}</dd></div>
       </dl>}
-      {error && <p className="run-error" role="alert">{error}</p>}
+      {error && !decision && <p className="run-error" role="alert">{error}</p>}
       {message && <p role="status" className="run-hint">{message}</p>}
       <button className="run-secondary" disabled={busy} onClick={() => void run(async (client) => {
         await client.register(contextRef.current); setReady(true); await refresh(client);
@@ -224,7 +274,7 @@ export default function RunPanel(props: Props) {
         <button className="run-primary" disabled={!assetId || !constraintId} onClick={() => void create()}>查看批次预估</button>
         {(!assetId || !constraintId) && <small>通过工具栏导入图片，并在约束节点保存快照后，即可创建预估。</small>}
       </fieldset>
-      {batches.length > 0 && <label className="run-batch-select">批次记录<select aria-label="选择任务批次" value={selectedBatchId} onChange={(event) => { setSelectedBatchId(event.target.value); setDecision(null); }}>
+      {batches.length > 0 && <label className="run-batch-select">批次记录<select aria-label="选择任务批次" disabled={busy} value={selectedBatchId} onChange={(event) => { setSelectedBatchId(event.target.value); setDecision(null); }}>
         {batches.map((item) => <option key={item.batch.id} value={item.batch.id}>{item.batch.id.slice(-6)} · {RUN_STATUS_LABEL[item.batch.status]} · {item.batch.expectedOutputs} 个输出</option>)}
       </select></label>}
       {batch && <section className="run-batch" aria-label="当前批次">
@@ -251,25 +301,54 @@ export default function RunPanel(props: Props) {
           <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(job.estimatedCostMinor)}`}</small>
           {job.billingEvidenceRef && <small>核账证据：{job.billingEvidenceRef}</small>}
           {["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
-          {job.status === "billing_unknown" && <button disabled={busy} onClick={() => openDecision("billing", job)}>核对输出 {job.outputIndex + 1} 计费</button>}
+          {job.status === "billing_unknown" && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")
+            ? <small>超额申请待审批，原预留保持冻结。</small>
+            : <button disabled={busy} onClick={() => openDecision("billing", job)}>核对输出 {job.outputIndex + 1} 计费</button>)}
         </article>)}</div>
+        {batch.billingOverages.length > 0 && <section className="run-overages" aria-label="超额审批记录">
+          <strong>超额审批记录</strong>
+          {batch.billingOverages.map((item) => <article key={item.id} className={`run-overage overage-${item.status}`} aria-label={`超额申请 ${item.id.slice(-6)}`}>
+            <strong>{item.status === "pending" ? "待审批" : item.status === "approved" ? "已批准并结算" : "已拒绝 · 预留未释放"}</strong>
+            <p>核实费用 {money(item.actualCostMinor)} · 原预留 {money(item.reservedMinor)}</p>
+            <p>批次上限 {money(item.batchMaxCostMinor)} → {money(item.requestedBatchMaxCostMinor)}</p>
+            <small>申请证据：{item.evidenceRef} · 原因：{item.reason}</small>
+            {item.status === "pending" ? <button disabled={busy} onClick={() => openReview(item)}>审批超额申请</button>
+              : <small>审批证据：{item.reviewEvidenceRef} · 意见：{item.reviewNote}</small>}
+          </article>)}
+        </section>}
         <details className="run-audit"><summary>账本与操作记录（{batch.audit.length}）</summary>
           {batch.ledger.map((entry) => <p key={entry.id}>{entry.settlement === "estimated" ? "预估" : entry.settlement === "reserved" ? "冻结" : entry.settlement === "settled" ? "结算" : entry.settlement === "released" ? "释放" : "待核对"} · {money(entry.settlement === "estimated" ? entry.estimatedMinor : entry.actualMinor ?? entry.reservedMinor)}</p>)}
-          {batch.audit.slice(-8).map((event) => <p key={event.id}>{AUDIT_LABEL[event.eventType] ?? event.eventType} · {event.actorId === "local-designer" ? "本地设计师" : "系统"}</p>)}
+          {batch.audit.slice(-8).map((event) => <p key={event.id}>{AUDIT_LABEL[event.eventType] ?? event.eventType} · {event.actorId === "local-designer" ? "本地设计师" : event.actorId === "local-reviewer" ? "模拟审批人" : "系统"}</p>)}
         </details>
       </section>}
-      {decision && <section ref={decisionRef} tabIndex={-1} className="run-decision" role="alertdialog" aria-label={decision.kind === "retry" ? "确认任务重试" : "确认计费核账"}>
-        <strong>{decision.kind === "retry" ? "确认重试成本" : "人工核对模拟计费"}</strong>
+      {decision && <section ref={decisionRef} tabIndex={-1} className="run-decision" role="alertdialog" aria-label={decision.kind === "retry" ? "确认任务重试" : decision.kind === "overage-review" ? "审批超额结算" : "确认计费核账"}>
+        <strong>{decision.kind === "retry" ? "确认重试成本" : decision.kind === "overage-review" ? "审批超额结算" : "人工核对模拟计费"}</strong>
+        {error && <p className="run-error" role="alert">{error}</p>}
         <p>输出 {decision.job.outputIndex + 1} · 当前预留 {money(decision.job.estimatedCostMinor)} · 批次上限 {money(decision.batch.batch.maxCostMinor)}</p>
         {decision.kind === "billing" ? <>
           <label>核账结论<select aria-label="核账结论" value={resolution} disabled={decisionSubmitted} onChange={(event) => setResolution(event.target.value as "charged" | "not-charged")}>
             <option value="not-charged">确认未扣费，释放预留</option><option value="charged">确认已扣费，按实际金额结算</option>
           </select></label>
           {resolution === "charged" && <label>核实扣费（元）<input aria-label="核实扣费金额" inputMode="decimal" disabled={decisionSubmitted} value={actualCost} onChange={(event) => setActualCost(event.target.value)} /></label>}
+          {needsOverage && <>
+            <p className="run-overage-notice">费用超过原预留，必须提交审批；审批前不结算、不释放预留。</p>
+            <label>拟审批批次上限（元）<input aria-label="拟审批批次上限" inputMode="decimal" disabled={decisionSubmitted} value={requestedCeiling} onChange={(event) => setRequestedCeiling(event.target.value)} /></label>
+            <label>超额原因<input aria-label="超额原因" maxLength={160} disabled={decisionSubmitted} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+          </>}
           <label>账单或工单引用<input aria-label="核账证据引用" maxLength={160} disabled={decisionSubmitted} value={evidence} onChange={(event) => setEvidence(event.target.value)} /></label>
           <small>当前为模拟演练。结论提交后保留证据，不会自动重试。</small>
+        </> : decision.kind === "overage-review" ? <>
+          <p>核实费用 {money(decision.overage.actualCostMinor)} · 额外支出 {money(decision.overage.actualCostMinor - decision.overage.reservedMinor)}</p>
+          <p>批次上限 {money(decision.overage.batchMaxCostMinor)} → {money(decision.overage.requestedBatchMaxCostMinor)}</p>
+          <small>申请证据：{decision.overage.evidenceRef} · 原因：{decision.overage.reason}</small>
+          <p className="run-overage-notice">本地模拟审批角色，不是真实多人鉴权。批准需剩余项目预算足够；拒绝保持冻结。两者均不自动重试。</p>
+          <label>审批结论<select aria-label="超额审批结论" disabled={decisionSubmitted} value={reviewDecision} onChange={(event) => setReviewDecision(event.target.value as "approve" | "reject")}>
+            <option value="approve">批准超额并按实际金额结算</option><option value="reject">拒绝申请，保留原预留</option>
+          </select></label>
+          <label>审批证据引用<input aria-label="审批证据引用" maxLength={160} disabled={decisionSubmitted} value={evidence} onChange={(event) => setEvidence(event.target.value)} /></label>
+          <label>审批意见<input aria-label="审批意见" maxLength={160} disabled={decisionSubmitted} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
         </> : <p>这次重试预计 {money(decision.job.estimatedCostMinor)}，将创建新尝试，原失败记录保留。</p>}
-        <div className="run-actions"><button className="run-primary" disabled={busy || (decision.kind === "billing" && !evidence.trim())} onClick={() => void submitDecision()}>{decision.kind === "retry" ? "确认重试" : "提交核账结论"}</button>
+        <div className="run-actions"><button className="run-primary" disabled={busy || (decision.kind !== "retry" && !evidence.trim()) || ((needsOverage || decision.kind === "overage-review") && !reason.trim())} onClick={() => void submitDecision()}>{decision.kind === "retry" ? "确认重试" : decision.kind === "overage-review" ? "提交审批结论" : needsOverage ? "提交超额审批申请" : "提交核账结论"}</button>
           <button disabled={busy} onClick={() => setDecision(null)}>返回任务</button></div>
       </section>}
       {!batches.length && ready && <p className="run-hint">此项目还没有批次。创建预估后，确认按钮才会冻结模拟预算。</p>}

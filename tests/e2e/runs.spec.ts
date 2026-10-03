@@ -16,6 +16,26 @@ async function prepare(page: Page) {
   return panel;
 }
 
+async function prepareOverage(page: Page) {
+  const panel = await prepare(page);
+  await panel.getByLabel("任务输出数量").fill("1");
+  await panel.getByLabel("任务成本上限").fill("0.25");
+  await panel.getByText("模拟运行情况", { exact: true }).click();
+  await panel.getByLabel("模拟运行情况").selectOption("billing-unknown");
+  await panel.getByRole("button", { name: "查看批次预估" }).click();
+  await panel.getByRole("button", { name: "确认模拟成本并排队" }).click();
+  await panel.getByRole("button", { name: "执行排队任务" }).click();
+  await panel.getByRole("button", { name: "核对输出 1 计费" }).click();
+  const decision = panel.getByRole("alertdialog", { name: "确认计费核账" });
+  await decision.getByLabel("核账结论").selectOption("charged");
+  await decision.getByLabel("核实扣费金额").fill("0.40");
+  await expect(decision.getByRole("button", { name: "提交超额审批申请" })).toBeDisabled();
+  await decision.getByLabel("拟审批批次上限").fill("0.40");
+  await decision.getByLabel("超额原因").fill("供应商账单与估价不一致，需要人工核实");
+  await decision.getByLabel("核账证据引用").fill("invoice-overage-040");
+  return { panel, decision };
+}
+
 test("画布内预估、确认、部分失败和人工重试，结果可回画布且刷新恢复", async ({ page }) => {
   const external: string[] = [];
   page.on("request", (request) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(request.url())) external.push(request.url()); });
@@ -107,6 +127,96 @@ test("创建响应丢失后重试复用原批次，取消不会保留预算", as
   await expect(panel.locator(".run-budget")).toContainText("预留¥0.00");
 });
 
+test("超额申请刷新恢复，审批响应丢失后重放不重复结算", async ({ page }) => {
+  const { panel, decision } = await prepareOverage(page);
+  const batchId = await panel.getByLabel("选择任务批次").inputValue();
+  const before = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
+  await decision.getByRole("button", { name: "提交超额审批申请" }).click();
+  await expect(panel.getByLabel("超额审批记录")).toContainText("待审批");
+  await expect(panel.getByRole("button", { name: "核对输出 1 计费" })).toHaveCount(0);
+  const pending = await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json();
+  expect(pending.batch.maxCostMinor).toBe(25);
+  expect(pending.jobs[0].status).toBe("billing_unknown");
+  await page.reload();
+  await page.getByRole("button", { name: "任务与预算", exact: true }).click();
+  await panel.getByLabel("选择任务批次").selectOption(batchId);
+  await panel.getByRole("button", { name: "审批超额申请" }).click();
+  const review = panel.getByRole("alertdialog", { name: "审批超额结算" });
+  await expect(review).toContainText("不是真实多人鉴权");
+  await expect(review).toContainText("额外支出 ¥0.15");
+  await expect(review.getByRole("button", { name: "提交审批结论" })).toBeDisabled();
+  await review.getByLabel("审批证据引用").fill("verified-invoice-040");
+  await review.getByLabel("审批意见").fill("核实账单无误，同意从剩余模拟预算结算");
+  await page.screenshot({ path: resolve("test-results/billing-overage-review-desktop.png") });
+  await page.route("**/studio-api/v1/run-jobs/*/billing-overages/*/review", async (route) => { await route.fetch(); await route.abort("failed"); }, { times: 1 });
+  await review.getByRole("button", { name: "提交审批结论" }).click();
+  await expect(panel.getByRole("alert")).toContainText("可安全重试");
+  await expect(review.getByLabel("审批证据引用")).toBeDisabled();
+  await review.getByRole("button", { name: "提交审批结论" }).click();
+  await expect(review).toBeHidden();
+  await expect(panel.getByLabel("超额审批记录")).toContainText("已批准并结算");
+  const after = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
+  expect(after.spentMinor).toBe(before.spentMinor + 40); expect(after.reservedMinor).toBe(before.reservedMinor - 25);
+  expect(after.limitMinor).toBe(before.limitMinor);
+  const approved = await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json();
+  expect(approved.billingOverages[0]).toMatchObject({ requestedBy: "local-designer", reviewedBy: "local-reviewer", status: "approved" });
+  expect(approved.ledger.filter((entry: { settlement: string }) => entry.settlement === "settled")).toHaveLength(1);
+  expect(approved.jobs).toHaveLength(1); expect(approved.batch.maxCostMinor).toBe(40);
+  await expect(panel.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);
+});
+
+test("拒绝超额申请保留冻结与证据，并可补证重新提交", async ({ page }) => {
+  const { panel, decision } = await prepareOverage(page);
+  await decision.getByRole("button", { name: "提交超额审批申请" }).click();
+  const batchId = await panel.getByLabel("选择任务批次").inputValue();
+  await panel.getByRole("button", { name: "审批超额申请" }).click();
+  const review = panel.getByRole("alertdialog", { name: "审批超额结算" });
+  await review.getByLabel("超额审批结论").selectOption("reject");
+  await review.getByLabel("审批证据引用").fill("dispute-ticket-001");
+  await review.getByLabel("审批意见").fill("证据不完整，请补充明细");
+  await review.getByRole("button", { name: "提交审批结论" }).click();
+  await expect(panel.getByLabel("超额审批记录")).toContainText("已拒绝 · 预留未释放");
+  const rejected = await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json();
+  expect(rejected.batch.maxCostMinor).toBe(25); expect(rejected.jobs[0].status).toBe("billing_unknown");
+  await panel.getByRole("button", { name: "核对输出 1 计费" }).click();
+  const again = panel.getByRole("alertdialog", { name: "确认计费核账" });
+  await again.getByLabel("核账结论").selectOption("charged");
+  await again.getByLabel("核实扣费金额").fill("0.40");
+  await again.getByLabel("拟审批批次上限").fill("0.40");
+  await again.getByLabel("超额原因").fill("已补齐扣费明细");
+  await again.getByLabel("核账证据引用").fill("updated-invoice-040");
+  await again.getByRole("button", { name: "提交超额审批申请" }).click();
+  await expect(panel.getByLabel("超额审批记录").getByRole("article")).toHaveCount(2);
+  await expect(panel.getByLabel("超额审批记录")).toContainText("证据不完整，请补充明细");
+  await expect(panel.getByLabel("超额审批记录")).toContainText("待审批");
+});
+
+test("超额审批不能提高项目预算，预算不足时可返回并改为拒绝", async ({ page }) => {
+  const { panel, decision } = await prepareOverage(page);
+  await decision.getByLabel("核实扣费金额").fill("101.00");
+  await decision.getByLabel("拟审批批次上限").fill("101.00");
+  const batchId = await panel.getByLabel("选择任务批次").inputValue();
+  const before = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
+  await decision.getByRole("button", { name: "提交超额审批申请" }).click();
+  await panel.getByRole("button", { name: "审批超额申请" }).click();
+  const review = panel.getByRole("alertdialog", { name: "审批超额结算" });
+  await review.getByLabel("审批证据引用").fill("budget-test-proof");
+  await review.getByLabel("审批意见").fill("测试项目额度保护");
+  await review.getByRole("button", { name: "提交审批结论" }).click();
+  await expect(review.getByRole("alert")).toContainText("模拟预算不足");
+  const after = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
+  expect(after).toEqual(before);
+  const blocked = await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json();
+  expect(blocked.billingOverages[0].status).toBe("pending"); expect(blocked.batch.maxCostMinor).toBe(25);
+  await review.getByRole("button", { name: "返回任务" }).click();
+  await panel.getByRole("button", { name: "审批超额申请" }).click();
+  await review.getByLabel("超额审批结论").selectOption("reject");
+  await review.getByLabel("审批证据引用").fill("budget-dispute-ticket");
+  await review.getByLabel("审批意见").fill("项目预算不足，进入人工争议处理");
+  await review.getByRole("button", { name: "提交审批结论" }).click();
+  await expect(panel.getByLabel("超额审批记录")).toContainText("已拒绝 · 预留未释放");
+});
+
 test.describe("390 像素任务布局", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   test("触控可打开任务面板且面板内部无横向溢出", async ({ page }) => {
@@ -120,5 +230,15 @@ test.describe("390 像素任务布局", () => {
     await page.screenshot({ path: resolve("test-results/run-panel-mobile.png") });
     await panel.getByRole("button", { name: "关闭任务面板" }).tap();
     await expect(panel).toBeHidden();
+  });
+  test("窄屏超额申请表单可填写且不横向溢出", async ({ page }) => {
+    const { panel, decision } = await prepareOverage(page);
+    await expect(decision.getByRole("button", { name: "提交超额审批申请" })).toBeEnabled();
+    const sizes = await panel.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth, body: document.body.scrollWidth, width: window.innerWidth }));
+    expect(sizes.scroll).toBe(sizes.client); expect(sizes.body).toBe(sizes.width);
+    await decision.getByRole("button", { name: "提交超额审批申请" }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve("test-results/billing-overage-request-mobile.png") });
+    await decision.getByRole("button", { name: "提交超额审批申请" }).tap();
+    await expect(panel.getByLabel("超额审批记录")).toContainText("待审批");
   });
 });

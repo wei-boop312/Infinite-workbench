@@ -5,6 +5,8 @@ import {
   type CreateRunBatchRequest,
   type RegisterRunContextRequest,
   type ResolveBillingUnknownRequest,
+  type RequestBillingOverage,
+  type ReviewBillingOverage,
   type RunBatchAggregate,
 } from "@canvas/contracts";
 
@@ -30,11 +32,21 @@ const ERROR_LABELS: Record<string, string> = {
   run_job_not_retryable: "此任务当前不能重试，请刷新记录。",
   run_batch_not_confirmable: "批次状态已变化，请刷新记录。",
   billing_state_not_unknown: "此任务已经不处于计费待核对状态，请刷新记录。",
+  billing_overage_pending: "该任务已有待审批申请，请完成审批后再处理核账。",
+  billing_overage_snapshot_mismatch: "审批所见金额或批次上限已变化，请刷新；必要时拒绝旧申请并重新提交。",
+  billing_overage_ceiling_insufficient: "拟审批上限必须覆盖现有批次费用与其他预留，且不能低于当前上限。",
+  billing_overage_not_needed: "此金额未超过预留，请使用普通核账。",
+  billing_overage_self_review: "申请人不能审批自己的超额申请。",
+  billing_overage_idempotency_conflict: "这次申请动作已对应其他参数，请刷新记录。",
+  billing_overage_already_reviewed: "这项申请已经处理，请刷新查看结论。",
+  billing_overage_review_idempotency_conflict: "这次审批已提交其他结论或参数，请刷新记录。",
+  billing_overage_not_found: "该任务没有此审批申请，请刷新记录。",
+  invalid_billing_overage: "申请或审批字段不完整，请填写金额、理由和证据引用。",
   invalid_billing_resolution: "请填写有效的核账金额和证据引用。",
   local_studio_origin_denied: "本地任务服务仅接受当前工作台的请求。",
 };
 
-export function money(minor: number): string { return `¥${(minor / 100).toFixed(2)}`; }
+export function money(minor: number): string { return `¥${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`; }
 
 export function parseMoney(value: string): number {
   if (!/^\d+(\.\d{1,2})?$/.test(value.trim())) throw new Error("金额需要是非负数字，最多两位小数。");
@@ -99,5 +111,11 @@ export class StudioRunClient {
   }
   resolve(jobId: string, request: ResolveBillingUnknownRequest) {
     return this.request(`/v1/run-jobs/${encodeURIComponent(jobId)}/resolve-billing`, RunBatchAggregateSchema, request);
+  }
+  requestOverage(jobId: string, request: RequestBillingOverage) {
+    return this.request(`/v1/run-jobs/${encodeURIComponent(jobId)}/billing-overages`, RunBatchAggregateSchema, request);
+  }
+  reviewOverage(jobId: string, overageId: string, request: ReviewBillingOverage) {
+    return this.request(`/v1/run-jobs/${encodeURIComponent(jobId)}/billing-overages/${encodeURIComponent(overageId)}/review`, RunBatchAggregateSchema, request);
   }
 }

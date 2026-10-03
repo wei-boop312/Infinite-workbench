@@ -11,6 +11,9 @@ import {
   type ExecuteRunJobRequest,
   type ProjectBudgetSnapshot,
   type ResolveBillingUnknownRequest,
+  type RequestBillingOverage,
+  type ReviewBillingOverage,
+  type BillingOverage,
   type RetryRunJobRequest,
   type RunAuditEvent,
   type RunBatch,
@@ -27,7 +30,7 @@ export type RunPrincipal = {
   actorId: string;
 };
 
-export type RunPermission = "run:read" | "run:create" | "run:confirm" | "run:cancel" | "run:execute" | "run:retry" | "run:reconcile-billing";
+export type RunPermission = "run:read" | "run:create" | "run:confirm" | "run:cancel" | "run:execute" | "run:retry" | "run:reconcile-billing" | "run:approve-billing-overage";
 
 export type StaticRunAccess = RunPrincipal & {
   bearerToken: string;
@@ -131,6 +134,8 @@ export interface RunKernelPort {
   claimBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest): RunJobClaimResult;
   executeLeasedJob(principal: RunPrincipal, jobId: string, request: ExecuteRunJobRequest): RunBatchAggregate;
   resolveBillingUnknown(principal: RunPrincipal, jobId: string, request: ResolveBillingUnknownRequest): RunBatchAggregate;
+  requestBillingOverage(principal: RunPrincipal, jobId: string, request: RequestBillingOverage): RunBatchAggregate;
+  reviewBillingOverage(principal: RunPrincipal, jobId: string, overageId: string, request: ReviewBillingOverage): RunBatchAggregate;
   dispatchBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   reconcileBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
   retryJob(principal: RunPrincipal, jobId: string, request: RetryRunJobRequest): RunBatchAggregate;
@@ -178,6 +183,11 @@ function billingResolutionFingerprint(request: ResolveBillingUnknownRequest): st
       expectedCurrency: request.expectedCurrency,
       evidenceRef: request.evidenceRef,
     };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function overageFingerprint(request: RequestBillingOverage | ReviewBillingOverage): string {
+  const canonical = Object.fromEntries(Object.entries(request).sort(([left], [right]) => left.localeCompare(right)));
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
@@ -322,6 +332,7 @@ export class InMemoryRunKernel implements RunKernelPort {
         expectedOutputs: String(request.expectedOutputs),
         estimatedCostMinor: String(estimatedCostMinor),
       })],
+      billingOverages: [],
     };
     const parsed = RunBatchAggregateSchema.parse(aggregate);
     this.batches.set(batchId, {
@@ -678,6 +689,9 @@ export class InMemoryRunKernel implements RunKernelPort {
     if (job.status !== "billing_unknown") {
       throw new RunKernelError(409, "billing_state_not_unknown", "只有计费待核对任务可以执行核账");
     }
+    if (stored.aggregate.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")) {
+      throw new RunKernelError(409, "billing_overage_pending", "该任务存在待审批申请，不能绕过审批核账");
+    }
     const latest = this.latestJobs(stored.aggregate.jobs).find((candidate) => candidate.outputIndex === job.outputIndex);
     if (!latest || latest.id !== job.id) throw new RunKernelError(409, "run_job_superseded", "该任务已有后续尝试");
     const reservedMinor = stored.jobReservations.get(job.id) ?? 0;
@@ -701,6 +715,110 @@ export class InMemoryRunKernel implements RunKernelPort {
       throw new RunKernelError(422, "billing_actual_exceeds_reservation", "外部实际扣费超过预留，必须升级处理而不能自动入账");
     }
 
+    return this.finalizeBilling(stored, job, principal, request);
+  }
+
+  requestBillingOverage(principal: RunPrincipal, jobId: string, request: RequestBillingOverage): RunBatchAggregate {
+    const { stored, job } = this.findJob(principal, jobId);
+    const batch = stored.aggregate.batch;
+    this.assertAllowed(principal, batch.projectId, "run:reconcile-billing");
+    const fingerprint = overageFingerprint(request);
+    const repeated = stored.aggregate.billingOverages.find((item) => item.jobId === jobId && item.requestId === request.requestId);
+    if (repeated) {
+      if (repeated.requestFingerprint !== fingerprint || repeated.requestedBy !== principal.actorId) {
+        throw new RunKernelError(409, "billing_overage_idempotency_conflict", "相同超额申请动作对应不同参数或提交人");
+      }
+      return this.copy(stored.aggregate);
+    }
+    if (job.status !== "billing_unknown") throw new RunKernelError(409, "billing_state_not_unknown", "任务不再等待核账");
+    if (stored.aggregate.billingOverages.some((item) => item.jobId === jobId && item.status === "pending")) {
+      throw new RunKernelError(409, "billing_overage_pending", "同一任务只能有一个待审批申请");
+    }
+    const reservedMinor = stored.jobReservations.get(jobId) ?? 0;
+    if (request.expectedReservedMinor !== reservedMinor || request.expectedCurrency !== batch.currency
+      || request.expectedBatchMaxCostMinor !== batch.maxCostMinor) {
+      throw new RunKernelError(409, "billing_overage_snapshot_mismatch", "超额申请所见预留或批次上限已变化");
+    }
+    if (request.actualCostMinor <= reservedMinor) throw new RunKernelError(422, "billing_overage_not_needed", "未超过预留，应走普通核账流程");
+    const exposure = stored.actualMinor + (stored.reservedMinor - reservedMinor) + request.actualCostMinor;
+    if (request.requestedBatchMaxCostMinor < batch.maxCostMinor || request.requestedBatchMaxCostMinor < exposure) {
+      throw new RunKernelError(422, "billing_overage_ceiling_insufficient", "申请上限不能降低现有上限且必须覆盖全部批次费用和预留");
+    }
+    const overage: BillingOverage = {
+      id: `overage-${randomUUID()}`, jobId, requestId: request.requestId, requestFingerprint: fingerprint,
+      requestedBy: principal.actorId, requestedAt: new Date(this.clock()).toISOString(),
+      reservedMinor, currency: batch.currency, actualCostMinor: request.actualCostMinor,
+      batchMaxCostMinor: batch.maxCostMinor, requestedBatchMaxCostMinor: request.requestedBatchMaxCostMinor,
+      evidenceRef: request.evidenceRef, reason: request.reason, status: "pending",
+    };
+    stored.aggregate.billingOverages.push(overage);
+    stored.aggregate.audit.push(this.audit(batch, principal.actorId, "billing-overage-requested", {
+      jobId, overageId: overage.id, actualCostMinor: String(overage.actualCostMinor),
+      requestedBatchMaxCostMinor: String(overage.requestedBatchMaxCostMinor), evidenceRef: overage.evidenceRef,
+    }));
+    this.persist();
+    return this.copy(stored.aggregate);
+  }
+
+  reviewBillingOverage(principal: RunPrincipal, jobId: string, overageId: string, request: ReviewBillingOverage): RunBatchAggregate {
+    const { stored, job } = this.findJob(principal, jobId);
+    const batch = stored.aggregate.batch;
+    this.assertAllowed(principal, batch.projectId, "run:approve-billing-overage");
+    const index = stored.aggregate.billingOverages.findIndex((item) => item.id === overageId && item.jobId === jobId);
+    const overage = stored.aggregate.billingOverages[index];
+    if (!overage) throw new RunKernelError(404, "billing_overage_not_found", "该任务没有此审批申请");
+    if (overage.requestedBy === principal.actorId) throw new RunKernelError(403, "billing_overage_self_review", "申请人不能审批自己的申请");
+    const fingerprint = overageFingerprint(request);
+    if (overage.status !== "pending") {
+      if (overage.reviewId !== request.reviewId) throw new RunKernelError(409, "billing_overage_already_reviewed", "此申请已处理，不能覆盖结论");
+      if (overage.reviewFingerprint !== fingerprint || overage.reviewedBy !== principal.actorId) {
+        throw new RunKernelError(409, "billing_overage_review_idempotency_conflict", "相同审批动作对应不同参数或审批人");
+      }
+      return this.copy(stored.aggregate);
+    }
+    if (request.expectedReservedMinor !== overage.reservedMinor || request.expectedCurrency !== overage.currency
+      || request.expectedActualCostMinor !== overage.actualCostMinor || request.expectedBatchMaxCostMinor !== overage.batchMaxCostMinor
+      || request.expectedRequestedBatchMaxCostMinor !== overage.requestedBatchMaxCostMinor) {
+      throw new RunKernelError(409, "billing_overage_snapshot_mismatch", "审批金额与申请快照不一致");
+    }
+    if (job.status !== "billing_unknown" || stored.jobReservations.get(jobId) !== overage.reservedMinor) {
+      throw new RunKernelError(409, "billing_overage_snapshot_mismatch", "任务核账状态或预留已变化");
+    }
+    if (request.decision === "approve") {
+      if (batch.maxCostMinor !== overage.batchMaxCostMinor) throw new RunKernelError(409, "billing_overage_snapshot_mismatch", "批次上限已被其他审批改变，请拒绝后重新申请");
+      const exposure = stored.actualMinor + (stored.reservedMinor - overage.reservedMinor) + overage.actualCostMinor;
+      if (exposure > overage.requestedBatchMaxCostMinor) throw new RunKernelError(422, "billing_overage_ceiling_insufficient", "批次其他支出已增加，当前申请上限不足");
+      const budget = this.requireBudget(batch.tenantId, batch.projectId);
+      const available = budget.limitMinor - budget.reservedMinor - budget.spentMinor;
+      if (available < overage.actualCostMinor - overage.reservedMinor) {
+        stored.aggregate.audit.push(this.audit(batch, principal.actorId, "billing-overage-review-blocked", { jobId, overageId, reason: "project-budget-exceeded" }));
+        this.persist();
+        throw new RunKernelError(422, "project_budget_exceeded", "剩余项目预算不能覆盖超额费用，保持冻结");
+      }
+    }
+    const reviewed = {
+      ...overage, status: request.decision === "approve" ? "approved" as const : "rejected" as const,
+      reviewId: request.reviewId, reviewFingerprint: fingerprint, reviewedBy: principal.actorId,
+      reviewedAt: new Date(this.clock()).toISOString(), reviewEvidenceRef: request.evidenceRef, reviewNote: request.note,
+    };
+    stored.aggregate.billingOverages[index] = reviewed;
+    stored.aggregate.audit.push(this.audit(batch, principal.actorId, request.decision === "approve" ? "billing-overage-approved" : "billing-overage-rejected", {
+      jobId, overageId, reviewId: request.reviewId, evidenceRef: request.evidenceRef,
+      previousBatchMaxCostMinor: String(batch.maxCostMinor), requestedBatchMaxCostMinor: String(overage.requestedBatchMaxCostMinor),
+    }));
+    if (request.decision === "reject") { this.persist(); return this.copy(stored.aggregate); }
+    stored.aggregate.batch = { ...batch, maxCostMinor: overage.requestedBatchMaxCostMinor };
+    return this.finalizeBilling(stored, job, principal, {
+      resolutionId: request.reviewId, resolution: "charged", expectedReservedMinor: overage.reservedMinor,
+      expectedCurrency: overage.currency, actualCostMinor: overage.actualCostMinor, evidenceRef: overage.evidenceRef,
+    });
+  }
+
+  private finalizeBilling(stored: StoredBatch, job: RunJob, principal: RunPrincipal, request: ResolveBillingUnknownRequest): RunBatchAggregate {
+    const batch = stored.aggregate.batch;
+    const actualCostMinor = request.resolution === "charged" ? request.actualCostMinor : 0;
+    const fingerprint = billingResolutionFingerprint(request);
+    const jobId = job.id;
     const resolvedAt = new Date(this.clock()).toISOString();
     const resolved: RunJob = {
       ...job,
@@ -918,6 +1036,55 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       const jobsById = new Map(jobs.map((job) => [job.id, job]));
       if (jobsById.size !== jobs.length) throw new Error("任务内核快照中的任务编号重复");
+      const overageIds = new Set<string>();
+      const requestIds = new Set<string>();
+      const pendingJobs = new Set<string>();
+      const approvedJobs = new Set<string>();
+      for (const overage of stored.aggregate.billingOverages) {
+        const job = jobsById.get(overage.jobId);
+        const actionKey = `${overage.jobId}\u0000${overage.requestId}`;
+        if (!job || overageIds.has(overage.id) || requestIds.has(actionKey)
+          || overage.currency !== batch.currency || overage.actualCostMinor <= overage.reservedMinor
+          || overage.requestedBatchMaxCostMinor < overage.batchMaxCostMinor) {
+          throw new Error("任务内核快照中的超额申请归属或金额无效");
+        }
+        overageIds.add(overage.id); requestIds.add(actionKey);
+        const submitted: RequestBillingOverage = {
+          requestId: overage.requestId, expectedReservedMinor: overage.reservedMinor, expectedCurrency: overage.currency,
+          expectedBatchMaxCostMinor: overage.batchMaxCostMinor, actualCostMinor: overage.actualCostMinor,
+          requestedBatchMaxCostMinor: overage.requestedBatchMaxCostMinor, evidenceRef: overage.evidenceRef, reason: overage.reason,
+        };
+        if (overage.requestFingerprint !== overageFingerprint(submitted)
+          || !stored.aggregate.audit.some((event) => event.eventType === "billing-overage-requested"
+            && event.metadata.overageId === overage.id && event.actorId === overage.requestedBy)) {
+          throw new Error("任务内核快照缺少超额申请证据");
+        }
+        if (overage.status === "pending") {
+          if (pendingJobs.has(job.id) || job.status !== "billing_unknown" || stored.jobReservations.get(job.id) !== overage.reservedMinor) {
+            throw new Error("任务内核快照中的待审批预留状态无效");
+          }
+          pendingJobs.add(job.id);
+        } else {
+          const reviewed: ReviewBillingOverage = {
+            reviewId: overage.reviewId, decision: overage.status === "approved" ? "approve" : "reject",
+            expectedReservedMinor: overage.reservedMinor, expectedCurrency: overage.currency, expectedActualCostMinor: overage.actualCostMinor,
+            expectedBatchMaxCostMinor: overage.batchMaxCostMinor, expectedRequestedBatchMaxCostMinor: overage.requestedBatchMaxCostMinor,
+            evidenceRef: overage.reviewEvidenceRef, note: overage.reviewNote,
+          };
+          if (overage.reviewedBy === overage.requestedBy || overage.reviewFingerprint !== overageFingerprint(reviewed)
+            || !stored.aggregate.audit.some((event) => event.eventType === `billing-overage-${overage.status}`
+              && event.metadata.overageId === overage.id && event.actorId === overage.reviewedBy && event.metadata.reviewId === overage.reviewId)) {
+            throw new Error("任务内核快照中的超额审批证据无效");
+          }
+          if (overage.status === "approved") {
+            if (approvedJobs.has(job.id) || job.actualCostMinor !== overage.actualCostMinor || job.billingResolutionId !== overage.reviewId
+              || job.billingResolvedBy !== overage.reviewedBy || batch.maxCostMinor < overage.requestedBatchMaxCostMinor) {
+              throw new Error("任务内核快照中的超额结算状态无效");
+            }
+            approvedJobs.add(job.id);
+          }
+        }
+      }
       for (const job of jobs) {
         if (globalJobIds.has(job.id) || job.batchId !== batch.id) throw new Error("任务内核快照中的任务归属无效");
         globalJobIds.add(job.id);
@@ -1144,6 +1311,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       jobId: job.id,
       actualMinor: String(actualMinor),
       releasedMinor: String(Math.max(0, reservedMinor - actualMinor)),
+      additionalMinor: String(Math.max(0, actualMinor - reservedMinor)),
     }));
   }
 

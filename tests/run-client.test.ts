@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseMoney, StudioRunClient } from "../apps/web/src/runs/runClient";
+import { money, parseMoney, StudioRunClient } from "../apps/web/src/runs/runClient";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("画布任务客户端", () => {
   it("金额解析不使用浮点四舍五入，拒绝负数和额外精度", () => {
     expect(parseMoney("0.29")).toBe(29);
     expect(parseMoney(" 2.5 ")).toBe(250);
+    expect(money(Number.MAX_SAFE_INTEGER)).toBe("¥90071992547409.91");
+    expect(parseMoney("90071992547409.91")).toBe(Number.MAX_SAFE_INTEGER);
     for (const value of ["-1", "NaN", "1e2", "0.001", "9007199254740992"]) expect(() => parseMoney(value)).toThrow();
   });
   it("请求固定走同源接口，编码项目名，不携带供应商凭证", async () => {
