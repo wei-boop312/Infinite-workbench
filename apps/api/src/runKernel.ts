@@ -111,6 +111,7 @@ export type RunKernelOptions = {
   authorizer: RunAuthorizer;
   budgets: readonly ProjectBudgetConfig[];
   stateStore?: RunKernelStateStore;
+  validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
   unitEstimateMinor?: number;
   unitActualMinor?: number;
   maxConcurrentJobs?: number;
@@ -125,6 +126,7 @@ export interface RunKernelPort {
   authenticate(request: IncomingMessage): RunPrincipal | null;
   createBatch(principal: RunPrincipal, request: CreateRunBatchRequest): RunBatchAggregate;
   getBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate;
+  listBatches(principal: RunPrincipal, projectId: string): RunBatchAggregate[];
   confirmBatch(principal: RunPrincipal, batchId: string, confirmation: ConfirmRunBatchRequest): RunBatchAggregate;
   claimBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest): RunJobClaimResult;
   executeLeasedJob(principal: RunPrincipal, jobId: string, request: ExecuteRunJobRequest): RunBatchAggregate;
@@ -241,6 +243,29 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.options.authorizer.authenticate(request);
   }
 
+  registerLocalProject(budget: ProjectBudgetConfig): void {
+    const key = scopedProjectKey(budget.tenantId, budget.projectId);
+    const existing = this.budgets.get(key);
+    if (existing) {
+      if (existing.currency !== budget.currency || existing.limitMinor !== budget.limitMinor) throw new Error("项目预算配置冲突");
+      return;
+    }
+    if (!/^[A-Z]{3}$/.test(budget.currency) || !Number.isSafeInteger(budget.limitMinor) || budget.limitMinor < 0) {
+      throw new Error("项目预算配置无效");
+    }
+    this.budgets.set(key, { ...budget, reservedMinor: 0, spentMinor: 0 });
+    this.projectLimits.set(key, this.maxConcurrentJobs);
+    this.persist();
+  }
+
+  listBatches(principal: RunPrincipal, projectId: string): RunBatchAggregate[] {
+    this.assertAllowed(principal, projectId, "run:read");
+    return [...this.batches.values()]
+      .filter(({ aggregate }) => aggregate.batch.tenantId === principal.tenantId && aggregate.batch.projectId === projectId)
+      .sort((left, right) => right.aggregate.batch.createdAt.localeCompare(left.aggregate.batch.createdAt))
+      .map(({ aggregate }) => this.copy(aggregate));
+  }
+
   createBatch(principal: RunPrincipal, request: CreateRunBatchRequest): RunBatchAggregate {
     this.assertAllowed(principal, request.projectId, "run:create");
     const budget = this.requireBudget(principal.tenantId, request.projectId);
@@ -259,6 +284,7 @@ export class InMemoryRunKernel implements RunKernelPort {
 
     const now = new Date(this.clock()).toISOString();
     const batchId = `batch-${randomUUID()}`;
+    this.options.validateInputs?.(principal.tenantId, request);
     const estimatedCostMinor = request.expectedOutputs * this.unitEstimateMinor;
     const batch: RunBatch = {
       id: batchId,
@@ -346,6 +372,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       throw new RunKernelError(422, "project_budget_exceeded", "项目可用预算不足");
     }
 
+    this.validateBatchInputs(batch);
     budget.reservedMinor += batch.estimatedCostMinor;
     const confirmedAt = new Date(this.clock()).toISOString();
     aggregate.batch = {
@@ -583,6 +610,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     const availableMinor = budget.limitMinor - budget.reservedMinor - budget.spentMinor;
     if (availableMinor < this.unitEstimateMinor) throw new RunKernelError(422, "project_budget_exceeded", "项目可用预算不足");
 
+    this.validateBatchInputs(batch);
     budget.reservedMinor += this.unitEstimateMinor;
     stored.reservedMinor += this.unitEstimateMinor;
     const createdAt = new Date(this.clock()).toISOString();
@@ -1122,6 +1150,7 @@ export class InMemoryRunKernel implements RunKernelPort {
   private refreshBatchStatus(stored: StoredBatch): void {
     if (stored.aggregate.batch.status === "cancelled") return;
     const jobs = this.latestJobs(stored.aggregate.jobs);
+    if (jobs.length === 0) return;
     let status: RunBatch["status"];
     if (jobs.some((job) => job.status === "billing_unknown")) status = "billing_unknown";
     else if (jobs.some((job) => job.status === "running")) status = "running";
@@ -1168,6 +1197,20 @@ export class InMemoryRunKernel implements RunKernelPort {
     const budget = this.budgets.get(scopedProjectKey(tenantId, projectId));
     if (!budget) throw new RunKernelError(404, "project_budget_not_found", "项目预算不存在");
     return budget;
+  }
+
+  private validateBatchInputs(batch: RunBatch): void {
+    this.options.validateInputs?.(batch.tenantId, {
+      projectId: batch.projectId,
+      constraintSnapshotId: batch.constraintSnapshotId,
+      tool: batch.tool,
+      inputAssetIds: [...batch.inputAssetIds],
+      expectedOutputs: batch.expectedOutputs,
+      maxCostMinor: batch.maxCostMinor,
+      currency: batch.currency,
+      idempotencyKey: batch.idempotencyKey,
+      mockScenario: batch.mockScenario,
+    });
   }
 
   private assertAllowed(principal: RunPrincipal, projectId: string, permission: RunPermission): void {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "ai-commerce-canvas-shell-v1";
+const CACHE_NAME = "ai-commerce-canvas-shell-v2";
 const APP_SHELL = ["/"];
 
 self.addEventListener("install", (event) => {
@@ -18,11 +18,13 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== "GET" || url.origin !== self.location.origin) return;
+  // Task, budget and authorization state must never be served from an offline cache.
+  if (url.pathname.startsWith("/studio-api/") || url.pathname.startsWith("/v1/")) return;
 
   event.respondWith(
     fetch(request)
       .then((response) => {
-        if (response.ok) {
+        if (response.ok && !response.headers.get("cache-control")?.includes("no-store")) {
           const copy = response.clone();
           void caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
         }
@@ -39,4 +41,3 @@ self.addEventListener("fetch", (event) => {
       }),
   );
 });
-

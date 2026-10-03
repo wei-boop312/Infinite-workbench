@@ -77,6 +77,16 @@ function createConfirmed(kernel: InMemoryRunKernel, runRequest: CreateRunBatchRe
 }
 
 describe("阶段 3 任务内核持久化与重启恢复", () => {
+  it("重启后待人工确认的预估不会被错误标记为已完成", () => {
+    const store = new MemoryRunKernelStateStore();
+    const draft = createKernel(store).createBatch(principal, request());
+    const restored = createKernel(store);
+    expect(restored.getBatch(principal, draft.batch.id)).toMatchObject({ batch: { status: "awaiting_confirmation" }, jobs: [] });
+    expect(restored.getBudget(principal, "project-a").reservedMinor).toBe(0);
+    expect(restored.confirmBatch(principal, draft.batch.id, {
+      expectedEstimatedCostMinor: draft.batch.estimatedCostMinor, expectedCurrency: "CNY",
+    }).jobs).toHaveLength(3);
+  });
   it("重启后保留排队任务、预算、幂等索引，并可继续完成任务", () => {
     const store = new MemoryRunKernelStateStore();
     const runRequest = request();

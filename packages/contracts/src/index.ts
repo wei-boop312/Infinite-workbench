@@ -337,6 +337,19 @@ export const RunBatchAggregateSchema = z.object({
   audit: z.array(RunAuditEventSchema),
 }).strict();
 
+export const RunBatchListSchema = z.array(RunBatchAggregateSchema);
+
+export const RegisterRunContextRequestSchema = z.object({
+  projectId: IdSchema,
+  assets: z.array(AssetSchema).max(10_000),
+  constraints: z.array(ConstraintSnapshotSchema).max(10_000),
+}).strict();
+
+export const LocalRunCatalogSchema = z.object({
+  schemaVersion: z.literal(1),
+  projects: z.array(RegisterRunContextRequestSchema),
+}).strict();
+
 export const RunJobLeaseSchema = z.object({
   jobId: IdSchema,
   batchId: IdSchema,
@@ -419,6 +432,7 @@ export type ResolveBillingUnknownRequest = z.infer<typeof ResolveBillingUnknownR
 export type RunAuditEvent = z.infer<typeof RunAuditEventSchema>;
 export type ProjectBudgetSnapshot = z.infer<typeof ProjectBudgetSnapshotSchema>;
 export type RunBatchAggregate = z.infer<typeof RunBatchAggregateSchema>;
+export type RegisterRunContextRequest = z.infer<typeof RegisterRunContextRequestSchema>;
 export type RunJobLease = z.infer<typeof RunJobLeaseSchema>;
 export type RunJobClaimResult = z.infer<typeof RunJobClaimResultSchema>;
 export type RunKernelBudgetState = z.infer<typeof RunKernelBudgetStateSchema>;

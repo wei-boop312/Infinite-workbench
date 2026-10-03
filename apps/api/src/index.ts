@@ -260,6 +260,27 @@ export function createApiServer(options: ApiServerOptions = {}) {
       return;
     }
 
+    const projectBatchesMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/run-batches$/);
+    if (projectBatchesMatch && request.method === "GET") {
+      const kernel = options.runKernel;
+      if (!kernel) {
+        sendJson(response, 503, { error: "run_kernel_not_configured" });
+        return;
+      }
+      const principal = kernel.authenticate(request);
+      if (!principal) {
+        sendJson(response, 401, { error: "run_authentication_required" });
+        return;
+      }
+      try {
+        sendJson(response, 200, kernel.listBatches(principal, decodeURIComponent(projectBatchesMatch[1])));
+      } catch (error) {
+        if (error instanceof RunKernelError) sendJson(response, error.status, { error: error.code });
+        else sendJson(response, 400, { error: "invalid_run_batch_request" });
+      }
+      return;
+    }
+
     const projectBudgetMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/budget$/);
     if (projectBudgetMatch && request.method === "GET") {
       const kernel = options.runKernel;

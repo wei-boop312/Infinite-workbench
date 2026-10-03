@@ -4,6 +4,15 @@ import { createHistoryState, historyReducer } from "../apps/web/src/canvas/histo
 import { semanticEdges, semanticNodes, type CanvasSnapshot, type GroupNode } from "../apps/web/src/canvas/model";
 
 describe("画布历史与文档", () => {
+  it("模拟任务来源经过文档往返后保留且不伪造图片资产", () => {
+    const snapshot: CanvasSnapshot = { nodes: [{
+      id: "run-result-job-1", type: "studio", position: { x: 0, y: 0 },
+      data: { kind: "output", title: "模拟结果", subtitle: "未生成图片", accent: "#34d399", runJobId: "job-1", runBatchId: "batch-1", constraintSnapshotId: "constraint-1" },
+    }], edges: [] };
+    const restored = documentToSnapshot(snapshotToDocument("canvas-1", "project-1", 0, snapshot, { x: 0, y: 0, zoom: 1 }));
+    expect(restored.nodes[0].data).toMatchObject({ runJobId: "job-1", runBatchId: "batch-1", constraintSnapshotId: "constraint-1" });
+    expect(restored.nodes[0].data.assetId).toBeUndefined();
+  });
   it("一次拖动手势只产生一个撤销点", () => {
     const start: CanvasSnapshot = { nodes: semanticNodes, edges: semanticEdges };
     const middle: CanvasSnapshot = {
@@ -42,4 +51,3 @@ describe("画布历史与文档", () => {
     expect(restored.nodes[1]).toMatchObject({ parentId: "group-1", extent: "parent", position: { x: 40, y: 60 } });
   });
 });
-

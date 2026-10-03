@@ -11,6 +11,8 @@ export type StudioNodeData = {
   accent: string;
   assetId?: string;
   constraintSnapshotId?: string;
+  runJobId?: string;
+  runBatchId?: string;
   body?: string;
 };
 

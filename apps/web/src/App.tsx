@@ -1,6 +1,8 @@
 import {
   createContext,
   memo,
+  lazy,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -31,7 +33,7 @@ import {
   type NodeProps,
   type Viewport,
 } from "@xyflow/react";
-import type { Asset, CanvasDocument, ConstraintSnapshot } from "@canvas/contracts";
+import type { Asset, CanvasDocument, ConstraintSnapshot, RunBatchAggregate } from "@canvas/contracts";
 import { executeMockRun } from "@canvas/testing/browser";
 import { assetRepository, formatAssetBytes, type AssetUsage } from "./assets/assetRepository";
 import { documentToSnapshot, snapshotFingerprint, snapshotToDocument } from "./canvas/document";
@@ -89,6 +91,16 @@ const KIND_LABEL: Record<StudioKind, string> = {
 };
 
 const AssetPreviewContext = createContext<Record<string, string>>({});
+const RunPanel = lazy(() => import("./components/RunPanel"));
+
+function loadRunReferences(projectId: string): Record<string, number> {
+  try {
+    const value = JSON.parse(localStorage.getItem(`ai-commerce-canvas.run-references.${projectId}`) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] =>
+      typeof entry[1] === "number" && Number.isSafeInteger(entry[1]) && entry[1] > 0));
+  } catch { return {}; }
+}
 
 function nodeSize(node: CanvasNode): { width: number; height: number } {
   const width = node.measured?.width ?? Number.parseFloat(String(node.style?.width ?? (node.type === "group" ? 520 : 220)));
@@ -179,7 +191,7 @@ function CanvasKernel() {
   const [saveFailure, setSaveFailure] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
   const [loaded, setLoaded] = useState(false);
-  const [lastAction, setLastAction] = useState("阶段 2 资产与约束系统已加载");
+  const [lastAction, setLastAction] = useState("阶段 3 任务与模拟预算工作台已加载");
   const [online, setOnline] = useState(() => navigator.onLine);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetPreviewUrls, setAssetPreviewUrls] = useState<Record<string, string>>({});
@@ -187,6 +199,8 @@ function CanvasKernel() {
   const [restoringAssetIds, setRestoringAssetIds] = useState<Set<string>>(() => new Set());
   const [assetCatalogRevision, setAssetCatalogRevision] = useState(0);
   const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
+  const [runPanelOpen, setRunPanelOpen] = useState(false);
+  const [runReferences, setRunReferences] = useState<{ projectId: string; counts: Record<string, number> } | null>(null);
   const [assetImporting, setAssetImporting] = useState(false);
   const [assetError, setAssetError] = useState("");
   const [assetUsage, setAssetUsage] = useState<AssetUsage | null>(null);
@@ -446,6 +460,7 @@ function CanvasKernel() {
   }, [commit, edges, nodes, screenToFlowPosition]);
 
   const addConstraintNode = useCallback(() => {
+    setRunPanelOpen(false);
     const position = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
     const deselected = nodes.map((node) => ({ ...node, selected: false }));
     commit({ nodes: [...deselected, createConstraintNode(position)], edges }, "已添加人工约束节点；请选择它定义锁定项与可编辑区域");
@@ -460,6 +475,7 @@ function CanvasKernel() {
 
   const importAssetFiles = useCallback(async (files: File[]) => {
     if (!files.length) return;
+    setRunPanelOpen(false);
     setAssetImporting(true);
     setAssetError("");
     try {
@@ -945,8 +961,60 @@ function CanvasKernel() {
 
   const selectedText = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && node.data.kind === "text");
   const selectedConstraint = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && node.data.kind === "constraint");
-  const assetReferenceCounts = useMemo(() => {
+  const rememberRunReferences = useCallback((records: RunBatchAggregate[]) => {
     const counts: Record<string, number> = {};
+    for (const { batch } of records) {
+      if (batch.projectId !== projectId) continue;
+      for (const id of batch.inputAssetIds) counts[id] = (counts[id] ?? 0) + 1;
+    }
+    setRunReferences({ projectId, counts });
+    try { localStorage.setItem(`ai-commerce-canvas.run-references.${projectId}`, JSON.stringify(counts)); }
+    catch { setLastAction("任务引用已保护；浏览器无法保存引用摘要，请保留当前标签页并检查存储空间"); }
+  }, [projectId]);
+
+  const addRunResults = useCallback((record: RunBatchAggregate) => {
+    if (record.batch.projectId !== activeProjectIdRef.current) return;
+    const current = currentRef.current.snapshot;
+    const existingIds = new Set(current.nodes.map((node) => node.id));
+    const results = record.jobs.filter((job) => job.status === "succeeded" && !existingIds.has(`run-result-${job.id}`));
+    if (!results.length) { setLastAction("这些模拟结果已经在画布上，无需重复添加"); return; }
+    const toolId = `run-tool-${record.batch.id}`;
+    const anchor = screenToFlowPosition({ x: window.innerWidth / 3, y: window.innerHeight / 2 });
+    const rightmost = current.nodes.filter((node) => !node.parentId)
+      .reduce((right, node) => Math.max(right, node.position.x + nodeSize(node).width), anchor.x);
+    const center = { x: rightmost + 80, y: anchor.y };
+    const additions: CanvasNode[] = [];
+    if (!existingIds.has(toolId)) additions.push({
+      id: toolId, type: "studio", position: center,
+      data: { kind: "action", title: "产品精修批次", subtitle: "已冻结输入与人工约束 · 本地模拟", badge: "模拟任务", accent: "#a78bfa", runBatchId: record.batch.id, constraintSnapshotId: record.batch.constraintSnapshotId },
+      style: { width: 250, height: 170 },
+    });
+    const tool = current.nodes.find((node) => node.id === toolId);
+    const position = { ...(tool?.position ?? center) };
+    let parentId = tool?.parentId;
+    const visited = new Set<string>();
+    while (parentId && !visited.has(parentId)) {
+      visited.add(parentId);
+      const parent = current.nodes.find((node) => node.id === parentId);
+      if (!parent) break;
+      position.x += parent.position.x; position.y += parent.position.y; parentId = parent.parentId;
+    }
+    const relatedCount = current.nodes.filter((node) => node.type === "studio" && node.data.runBatchId === record.batch.id && node.data.kind === "output").length;
+    const lineages: CanvasEdge[] = results.map((job, index) => {
+      const target = `run-result-${job.id}`;
+      additions.push({
+        id: target, type: "studio", position: { x: position.x + 330, y: position.y + (relatedCount + index) * 200 }, selected: true,
+        data: { kind: "output", title: `模拟精修结果 ${job.outputIndex + 1}`, subtitle: "模拟结果记录 · 未生成图片", badge: `第 ${job.attempt} 次`, accent: "#34d399", runJobId: job.id, runBatchId: record.batch.id, constraintSnapshotId: record.batch.constraintSnapshotId },
+        style: { width: 240, height: 160 },
+      });
+      return { id: `run-lineage-${job.id}`, source: toolId, sourceHandle: "output", target, targetHandle: "input", type: "smoothstep", deletable: false, selectable: false, className: "edge-lineage", data: { kind: "lineage", runJobId: job.id } };
+    });
+    commit({ nodes: [...current.nodes.map((node) => ({ ...node, selected: false })), ...additions], edges: [...current.edges, ...lineages] }, `已放置 ${results.length} 个模拟结果记录；批次与约束来源已保留，未生成图片`);
+    window.setTimeout(() => void fitCanvasView({ nodes: [{ id: toolId }, ...results.map((job) => ({ id: `run-result-${job.id}` }))], padding: 0.3, duration: 200 }), 0);
+  }, [commit, fitCanvasView, screenToFlowPosition]);
+
+  const assetReferenceCounts = useMemo(() => {
+    const counts: Record<string, number> = { ...(runReferences?.projectId === projectId ? runReferences.counts : loadRunReferences(projectId)) };
     for (const node of nodes) {
       if (node.type !== "studio" || !node.data.assetId) continue;
       counts[node.data.assetId] = (counts[node.data.assetId] ?? 0) + 1;
@@ -963,7 +1031,7 @@ function CanvasKernel() {
     }
     for (const maskAssetId of pendingMaskAssetIds) counts[maskAssetId] = (counts[maskAssetId] ?? 0) + 1;
     return counts;
-  }, [assets, constraintSnapshots, nodes, pendingMaskAssetIds]);
+  }, [assets, constraintSnapshots, nodes, pendingMaskAssetIds, projectId, runReferences]);
   const activeConstraintSnapshot = selectedConstraint?.data.constraintSnapshotId
     ? constraintSnapshots.find((snapshot) => snapshot.id === selectedConstraint.data.constraintSnapshotId) ?? null
     : null;
@@ -1019,9 +1087,9 @@ function CanvasKernel() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <span className="eyebrow">PHASE 2 · ASSETS & CONSTRAINTS</span>
+          <span className="eyebrow">PHASE 3 · TASKS & BUDGET</span>
           <h1>AI 电商视觉工作台</h1>
-          <p>原始媒体、画布引用与人工约束分层保存；AI 与 MCP 仍保持关闭。</p>
+          <p>人工约束 → 成本预估 → 确认执行 → 结果回画布；当前仅本地模拟，真实 AI 与 MCP 未启用。</p>
         </div>
         <div className="status-cluster">
           <label className="project-switcher">
@@ -1080,7 +1148,7 @@ function CanvasKernel() {
           </span>
           <span className="tool-group">
             <button className="asset-action" disabled={assetImporting} onClick={() => assetInputRef.current?.click()}>{assetImporting ? "导入中…" : "导入资产"}</button>
-            <button className="asset-action" onClick={() => setAssetLibraryOpen((open) => !open)}>资产库 {assets.length}</button>
+            <button className="asset-action" onClick={() => { setRunPanelOpen(false); setAssetLibraryOpen((open) => !open); }}>资产库 {assets.length}</button>
             <button className="asset-action" onClick={() => addNode("image")}>＋ 图片占位</button>
             <button className="asset-action" onClick={() => addNode("text")}>＋ 文字</button>
             <button className="constraint-action" onClick={addConstraintNode}>＋ 约束</button>
@@ -1094,6 +1162,9 @@ function CanvasKernel() {
             <button onClick={() => switchScene("100")}>100 节点</button>
             <button onClick={() => switchScene("500")}>500 节点</button>
             <button className="mock-run" onClick={runMockExecutor}>运行假任务</button>
+          </span>
+          <span className="tool-group">
+            <button className="constraint-action" onClick={() => { setAssetLibraryOpen(false); setRunPanelOpen((open) => !open); }}>任务与预算</button>
           </span>
         </div>
         <p>{lastAction}</p>
@@ -1165,7 +1236,13 @@ function CanvasKernel() {
           onRestore={restoreAssetFromBackup}
         />
 
-        {selectedText && (
+        {runPanelOpen && <Suspense fallback={<aside className="inspector" role="status">正在加载任务面板…</aside>}>
+          <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots}
+            missingOriginalAssetIds={missingOriginalAssetIds} onClose={() => setRunPanelOpen(false)}
+            onBatches={rememberRunReferences} onAddResults={addRunResults} />
+        </Suspense>}
+
+        {selectedText && !runPanelOpen && (
           <aside className="inspector" onPointerDown={(event) => event.stopPropagation()}>
             <span>文字资产</span>
             <label>
@@ -1188,7 +1265,7 @@ function CanvasKernel() {
           </aside>
         )}
 
-        {selectedConstraint && (
+        {selectedConstraint && !runPanelOpen && (
           <ConstraintInspector
             key={`${selectedConstraint.id}:${selectedConstraint.data.constraintSnapshotId ?? "draft"}`}
             snapshot={activeConstraintSnapshot}
@@ -1199,7 +1276,7 @@ function CanvasKernel() {
           />
         )}
 
-        {!selectedText && !selectedConstraint && !assetLibraryOpen && (
+        {!selectedText && !selectedConstraint && !assetLibraryOpen && !runPanelOpen && (
           <aside className="legend">
             <strong>两类关系</strong>
             <span><i className="workflow-line" />工作流连线：用户可编辑</span>

@@ -7,4 +7,4 @@ test-results/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
-
+work/local-studio-state/
