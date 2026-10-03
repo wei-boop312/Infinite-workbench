@@ -37,3 +37,9 @@
 - `PUT /v1/storage/transfers/:token`：内存假网关的受签名上传入口。
 - `GET /v1/storage/transfers/:token`：内存假网关的受签名下载入口。
 - `GET /health`：公开报告签名网关是否显式启用；真实执行器状态仍保持关闭。
+
+## 阶段 4 生成资产的本机只读回读
+
+5B3A 另提供 `GET /v1/projects/:projectId/generated-assets/:assetId/content`，见 `generated-asset-readback.md`。它从服务端 SQLite 读取已经完整验证并与实际任务绑定的原始图片，不复用上述内存签名网关、不接外部存储或供应商 URL，不接受客户端租户/文件路径。每次认证和检查项目 asset:read，核验完整任务/原包/谱系/目录/正文证据；返回原字节、MIME、精确长度、SHA 和 private/no-store，不暴露内部生成记录或私有连接。
+
+默认 API 未配置此服务时关闭，日常本地桥接启用只读服务但仍无生成执行政策；本机模拟角色不等于生产会话认证。读取不写任务/预算/账本，不恢复过期租约，不重发、核账或自动释放未知预留。浏览器原文件缓存及画布回流尚未接入；Service Worker 继续跳过 /studio-api/ 与 /v1/，不能把授权请求存到共享缓存。

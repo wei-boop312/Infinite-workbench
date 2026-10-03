@@ -15,6 +15,8 @@ import { SqliteRunKernel } from "./sqliteRunKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 import { LocalVerifiedAssets } from "./verifiedAssets";
 import { LocalImageProviders } from "./imageProviders";
+import { LocalGeneratedAssetReads } from "./generatedAssetReads";
+import type { ObjectStorageAuthorizer } from "./objectStorageGateway";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -41,11 +43,12 @@ export function createLocalStudioMiddleware(directory: string) {
       && ((principal.actorId === actorId && permission !== "run:approve-billing-overage")
         || (principal.actorId === "local-reviewer" && ["run:read", "run:approve-billing-overage"].includes(permission))),
   };
-  const verifiedAssets = new LocalVerifiedAssets({ stateStore, authorizer: {
+  const assetAuthorizer: ObjectStorageAuthorizer = {
     authenticate: authorizer.authenticate,
     allows: (principal, projectId, permission) => principal.tenantId === tenantId && Boolean(project(projectId))
       && (principal.actorId === actorId || (principal.actorId === "local-reviewer" && permission === "asset:read")),
-  }, findAsset: (assetTenantId, projectId, assetId) => assetTenantId === tenantId
+  };
+  const verifiedAssets = new LocalVerifiedAssets({ stateStore, authorizer: assetAuthorizer, findAsset: (assetTenantId, projectId, assetId) => assetTenantId === tenantId
     ? project(projectId)?.assets.find((item) => item.id === assetId) ?? null : null });
   const validateInputs = (_tenantId: string, request: CreateRunBatchRequest) => {
     const context = project(request.projectId);
@@ -109,13 +112,13 @@ export function createLocalStudioMiddleware(directory: string) {
   const imageProviders = new LocalImageProviders({ tenantId, stateStore, runAuthorizer: authorizer, runKernel: kernel!,
     authorizer: { authenticate: authorizer.authenticate, allows: (principal, projectId, permission) => permission === "provider:read"
       && authorizer.allows(principal, projectId, "run:read") },
-    assetAuthorizer: { authenticate: authorizer.authenticate, allows: (principal, projectId, permission) => principal.tenantId === tenantId && Boolean(project(projectId))
-      && (principal.actorId === actorId || (principal.actorId === "local-reviewer" && permission === "asset:read")) },
+    assetAuthorizer,
     estimate: (_connection, _selection, at) => ({ mode: "local-fixture", evidenceRef: "local-zero-fee-preparation-v1",
       quote: { id: `fixture-quote-${randomUUID()}`, version: "local-fixture-price-v1", source: "server-price-table", currency: "CNY",
         estimatedCostMinor: 25, maxCostMinor: 25, expiresAt: new Date(Date.parse(at) + 5 * 60_000).toISOString() } }),
   }); // No automatic provider/model seeding or public management permissions.
-  const api = createApiServer({ runKernel: kernel!, verifiedAssets, imageProviders });
+  const generatedAssetReads = new LocalGeneratedAssetReads({ tenantId, stateStore, authorizer: assetAuthorizer });
+  const api = createApiServer({ runKernel: kernel!, verifiedAssets, imageProviders, generatedAssetReads });
 
   const registerContext = (incoming: RegisterRunContextRequest) => {
     for (const asset of incoming.assets) {

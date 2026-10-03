@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -22,6 +23,11 @@ import { ObjectStorageGatewayError, type SignedObjectGateway } from "./objectSto
 import { RunKernelError, type RunKernelPort } from "./runKernel";
 import type { VerifiedAssetPort } from "./verifiedAssets";
 import type { LocalImageProviders } from "./imageProviders";
+import type { GeneratedAssetReadPort } from "./generatedAssetReads";
+import { MAX_IMAGE_PROTOCOL_OUTPUT_BYTES } from "./imageProtocolResponse";
+import { imageMagicMime } from "./staticImageDecoder";
+
+let activeGeneratedTransfers = 0;
 
 const MAX_RUN_BODY_BYTES = 64 * 1024;
 const MAX_CANVAS_BODY_BYTES = 2 * 1024 * 1024;
@@ -32,12 +38,13 @@ export type ApiServerOptions = {
   runKernel?: RunKernelPort;
   verifiedAssets?: VerifiedAssetPort;
   imageProviders?: LocalImageProviders;
+  generatedAssetReads?: GeneratedAssetReadPort;
 };
 
-function sendJson(response: ServerResponse, status: number, body: unknown): void {
+function sendJson(response: ServerResponse, status: number, body: unknown, cacheControl = "no-store"): void {
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store",
+    "cache-control": cacheControl,
     "x-content-type-options": "nosniff",
   });
   response.end(JSON.stringify(body));
@@ -76,11 +83,50 @@ export function createApiServer(options: ApiServerOptions = {}) {
         objectStorageSigningEnabled: Boolean(options.objectStorageGateway),
         runKernelEnabled: Boolean(options.runKernel),
         assetVerificationEnabled: Boolean(options.verifiedAssets),
+        generatedAssetReadEnabled: Boolean(options.generatedAssetReads),
       });
       return;
     }
 
-    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1"), pathname = requestUrl.pathname;
+    const generatedContentMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/generated-assets\/([^/]+)\/content$/);
+    if (generatedContentMatch) {
+      const fail = (status: number, code: string) => sendJson(response, status, { error: code }, "private, no-store");
+      const reader = options.generatedAssetReads;
+      if (!reader) { fail(503, "generated_asset_reads_not_configured"); return; }
+      const principal = reader.authenticate(request);
+      if (!principal) { fail(401, "generated_asset_authentication_required"); return; }
+      if (request.method !== "GET") { response.setHeader("allow", "GET"); fail(405, "generated_asset_method_not_allowed"); return; }
+      if (requestUrl.search || request.headers["transfer-encoding"] || (request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0")) {
+        response.setHeader("connection", "close"); fail(400, "generated_asset_request_invalid"); return;
+      }
+      if (request.headers.range !== undefined) { fail(416, "generated_asset_range_not_supported"); return; }
+      if (activeGeneratedTransfers >= 2) { fail(429, "generated_asset_read_busy"); return; }
+      activeGeneratedTransfers++;
+      let released = false;
+      const release = () => { if (!released) { released = true; activeGeneratedTransfers--; } };
+      response.once("finish", release); response.once("close", release);
+      try {
+        const content = reader.read(principal, decodeURIComponent(generatedContentMatch[1]), decodeURIComponent(generatedContentMatch[2]));
+        if (!Buffer.isBuffer(content.body) || content.body.byteLength === 0 || content.body.byteLength > MAX_IMAGE_PROTOCOL_OUTPUT_BYTES
+          || !["image/png", "image/jpeg", "image/webp"].includes(content.mimeType) || !/^[a-f0-9]{64}$/.test(content.checksumSha256)) throw new Error("二进制读取合同无效");
+        const body = Buffer.from(content.body);
+        if (createHash("sha256").update(body).digest("hex") !== content.checksumSha256 || imageMagicMime(body) !== content.mimeType) throw new Error("二进制响应正文错配");
+        response.setTimeout(30_000, () => response.destroy());
+        response.writeHead(200, {
+          "content-type": content.mimeType, "content-length": String(body.byteLength), "x-content-sha256": content.checksumSha256,
+          "x-canvas-binary-version": "generated-image-v1", "cache-control": "private, no-store", "vary": "Authorization",
+          "x-content-type-options": "nosniff", "cross-origin-resource-policy": "same-origin", "referrer-policy": "no-referrer",
+          "content-security-policy": "default-src 'none'; sandbox", "accept-ranges": "none",
+        });
+        response.end(body);
+      } catch (error) {
+        release();
+        if (error instanceof RunKernelError) fail(error.status, error.code);
+        else fail(error instanceof URIError ? 400 : 503, error instanceof URIError ? "generated_asset_request_invalid" : "generated_asset_unavailable");
+      }
+      return;
+    }
     const providerMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-providers(?:\/([^/]+))?$/);
     const preparationMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-preparations(?:\/([^/]+))?$/);
     const imageConfirmationMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/image-preparations\/([^/]+)\/confirm$/);

@@ -331,7 +331,7 @@ export default function RunPanel(props: Props) {
           <div><strong>输出 {job.outputIndex + 1} · 第 {job.attempt} 次</strong><span>{RUN_STATUS_LABEL[job.status]}</span></div>
           <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(reservationMinor(batch, job))}`}</small>
           {job.billingEvidenceRef && <small>核账证据：{job.billingEvidenceRef}</small>}
-          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length > 0 && <small>已验证资产已绑定；二进制回读尚未开放，暂不能回到画布。</small>}
+          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length > 0 && <small>已验证资产已绑定；画布图片回流尚未开放，暂不能回到画布。</small>}
           {batch.batch.tool === "product-retouch" && ["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
           {job.status === "billing_unknown" && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")
             ? <small>超额申请待审批，原预留保持冻结。</small>

@@ -69,6 +69,24 @@ test("浏览器没有本地假传输或原始响应入口，伪尝试不预留�
   await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
 });
 
+test("生成资产只读入口不创建图片，缺少本地标记拒绝，预算与真实闸门不变", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse((response) => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const checks = await page.evaluate(async ({ projectId }) => {
+    const headers = { "x-canvas-local": "1" }, project = `/studio-api/v1/projects/${encodeURIComponent(projectId)}`;
+    const url = `${project}/generated-assets/not-a-generated-asset/content`, before = await (await fetch(`${project}/budget`, { headers })).json();
+    const replies = await Promise.all([fetch(url, { headers }), fetch(url), fetch(url, { method: "POST", headers }), fetch(url + "?tenantId=foreign", { headers })]);
+    const reads = await Promise.all(replies.map(async (response) => ({ status: response.status, cache: response.headers.get("cache-control"), body: await response.json() })));
+    return { before, after: await (await fetch(`${project}/budget`, { headers })).json(), reads, health: await (await fetch("/studio-api/health", { headers })).json() };
+  }, { projectId: batch.batch.projectId });
+  expect(checks.reads.map((read) => read.status)).toEqual([404, 403, 405, 400]);
+  expect(checks.reads[0]).toEqual({ status: 404, cache: "private, no-store", body: { error: "generated_asset_not_found" } });
+  expect(checks.reads[2].cache).toBe("private, no-store"); expect(checks.reads[3].cache).toBe("private, no-store");
+  expect(checks.after).toEqual(checks.before); expect(checks.after).toMatchObject({ reservedMinor: 0, spentMinor: 0 });
+  expect(checks.health).toMatchObject({ generatedAssetReadEnabled: true, realExecutorsEnabled: false });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
+});
+
 test("图片确认入口拒绝自报授权/任务/发送摘要，不预留预算", async ({ page }) => {
   const panel = await prepare(page);
   const created = page.waitForResponse((response) => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
@@ -168,7 +186,7 @@ for (const status of ["billing_unknown", "succeeded"] as const) test(`已绑定�
     await route.fulfill({ response, json: [fixture, ...await response.json()] });
   });
   const panel = await prepare(page), current = panel.getByRole("region", { name: "当前批次" });
-  await expect(current).toContainText("已验证资产已绑定；二进制回读尚未开放");
+  await expect(current).toContainText("已验证资产已绑定；画布图片回流尚未开放");
   await expect(current.getByRole("button", { name: "结果回到画布" })).toHaveCount(0);
   await expect(current.getByRole("button", { name: "人工重试输出 1" })).toHaveCount(0);
   await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);

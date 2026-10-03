@@ -137,6 +137,8 @@ export type RunKernelOptions = {
   stateStore?: RunKernelStateStore;
   // Shared stores reload before each command. Other processes' live jobs are not restart casualties.
   recoverRunningJobsOnRestore?: boolean;
+  // Internal snapshot validation only: no lease recovery, status rewrite or save.
+  restoreValidationOnly?: boolean;
   validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
@@ -232,6 +234,11 @@ export class InMemoryRunKernel implements RunKernelPort {
   private readonly idempotencyIndex = new Map<string, string>();
   private readonly projectLimits = new Map<string, number>();
   private readonly providerLimits = new Map<string, ProviderExecutionLimitConfig>();
+
+  static assertSnapshot(snapshot: RunKernelSnapshot): void {
+    new InMemoryRunKernel({ budgets: snapshot.budgets, authorizer: { authenticate: () => null, allows: () => false },
+      restoreValidationOnly: true, stateStore: { load: () => snapshot, save: () => { throw new Error("只读核验不能保存任务"); } } });
+  }
 
   constructor(private readonly options: RunKernelOptions) {
     this.clock = options.clock ?? Date.now;
@@ -1276,6 +1283,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     for (const [key, stored] of restoredBatches) this.batches.set(key, stored);
     for (const [key, batchId] of restoredIndex) this.idempotencyIndex.set(key, batchId);
     this.assertStateConsistent();
+    if (this.options.restoreValidationOnly) return;
 
     let recoveredRunningJobs = false;
     for (const stored of this.batches.values()) {
@@ -1317,6 +1325,7 @@ export class InMemoryRunKernel implements RunKernelPort {
   }
 
   private persist(): void {
+    if (this.options.restoreValidationOnly) throw new Error("只读核验不能保存任务");
     if (!this.options.stateStore) return;
     const snapshot: RunKernelSnapshot = {
       schemaVersion: 1,

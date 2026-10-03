@@ -2,6 +2,7 @@ import type { IncomingMessage } from "node:http";
 import { GeneratedImageRecordSchema, ImageFixtureResultSchema, type GeneratedImageRecord, type ImageFixtureResult } from "@canvas/contracts";
 import { imageSnapshotFingerprint } from "./imageProviderContract";
 import { assetMetadataFingerprint } from "./verifiedAssets";
+import { assertImageArtifactRecord } from "./imageArtifactIntegrity";
 import { InMemoryRunKernel, RunKernelError, type ProjectBudgetConfig, type RunKernelOptions, type RunKernelPort, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
@@ -90,15 +91,7 @@ export class SqliteRunKernel implements RunKernelPort {
           const artifact = stored.imageTaskArtifact;
           if (artifact) {
             const generated = this.options.stateStore.loadGeneratedImage(batch.tenantId, batch.projectId, stored.aggregate.jobs[0].id);
-            if (!generated || imageSnapshotFingerprint(generated) !== artifact.generatedRecordFingerprint || generated.image.asset.id !== artifact.assetId || generated.image.checksumSha256 !== artifact.checksumSha256) throw new Error("任务产物与生成记录不一致");
-            const execution = stored.imageExecution;
-            if (!execution || result?.kind !== "returned" || imageSnapshotFingerprint(generated.request) !== imageSnapshotFingerprint(execution.request)
-              || generated.requestFingerprint !== execution.requestFingerprint || generated.payloadChecksumSha256 !== execution.payloadChecksumSha256
-              || generated.confirmedAt !== execution.confirmedAt || generated.protocol !== execution.preparation.connection.protocol
-              || imageSnapshotFingerprint(generated.constraint) !== imageSnapshotFingerprint(execution.preparation.constraint)
-              || imageSnapshotFingerprint(generated.transformedInputs) !== imageSnapshotFingerprint(execution.transformedInputs)
-              || imageSnapshotFingerprint(generated.providerOutcome) !== imageSnapshotFingerprint(result.outcome)
-              || generated.image.verifiedAt !== artifact.committedAt) throw new Error("任务产物谱系与完整确认或原始响应不一致");
+            assertImageArtifactRecord(stored, generated);
             this.assertGeneratedArtifact(generated);
           }
         }
