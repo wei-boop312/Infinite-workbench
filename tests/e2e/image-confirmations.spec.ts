@@ -9,20 +9,29 @@ import { SqliteRunKernel } from "../../apps/api/src/sqliteRunKernel";
 import { createApiServer } from "../../apps/api/src/index";
 import { LocalVerifiedAssets } from "../../apps/api/src/verifiedAssets";
 import { fixtureConnection } from "../fixtures/image-preparation";
+import { createRequire } from "node:module";
+import { LocalGeneratedAssetReads } from "../../apps/api/src/generatedAssetReads";
+import { LocalImageTaskArtifacts } from "../../apps/api/src/imageTaskArtifacts";
+import { LocalFixtureImageExecutor } from "../../apps/api/src/imageFixtureExecutor";
+import { createImageTaskValidator } from "../../apps/api/src/imageTaskPolicy";
+import { createImageArtifactValidator } from "../../apps/api/src/imageArtifactPolicy";
 
 test.use({ serviceWorkers: "block" });
 const cleanups: Array<() => Promise<void>> = [];
 test.afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
 // Real localhost HTTP + isolated SQLite, not seeded into the daily 5173 bridge.
-// No transport/credentials/real executor is configured even in this fixture.
-async function fixture(page: Page, protocol: ImageProviderConnection["protocol"] = "openai") {
+// Confirmation tests have no transport. Result tests explicitly opt into ONE
+// trusted, zero-fee local response on this isolated store; never supplier HTTP.
+async function fixture(page: Page, protocol: ImageProviderConnection["protocol"] = "openai", boundOutput = false) {
   const directory = mkdtempSync(join(tmpdir(), "canvas-confirmation-browser-")), store = new SqliteRunKernelStateStore(join(directory, "state.sqlite"));
   let projectId = "", now = Date.now(), allowed = true, confirms = 0, historyReads = 0;
   let mode: "good" | "lost" | "mismatch" | "hold" = "good", release: (() => void) | undefined;
+  let lineageAllowed = true, lineageReads = 0, holdLineage = false, sends = 0;
   const principal = { tenantId: "local-studio", actorId: "fixture-designer" };
   const authorizer = { authenticate: (request: { headers: Record<string, unknown> }) => request.headers["x-canvas-local"] === "1" ? principal : null,
-    allows: (actor: typeof principal, project: string, permission: string) => actor.tenantId === principal.tenantId && project === projectId && (permission !== "run:confirm" || allowed) };
+    allows: (actor: typeof principal, project: string, permission: string) => actor.tenantId === principal.tenantId && project === projectId
+      && (permission !== "run:confirm" || allowed) && (permission !== "run:read" || lineageAllowed) };
   let kernel!: SqliteRunKernel, providers!: LocalImageProviders, config!: ImageProviderConnection;
   const server = createApiServer(); // Replaced once the browser's actual project is registered.
   let actualServer = server, origin = "";
@@ -35,9 +44,19 @@ async function fixture(page: Page, protocol: ImageProviderConnection["protocol"]
     const context = RegisterRunContextRequestSchema.parse(route.request().postDataJSON());
     if (!projectId) projectId = context.projectId;
     if (context.projectId === projectId) {
-      store.transaction(() => store.saveCatalog({ schemaVersion: 1, projects: [context] }));
+      store.transaction(() => {
+        const previous = boundOutput ? store.loadCatalog()?.projects[0] : undefined;
+        const merge = <T extends { id: string }>(before: T[], after: T[]) => {
+          const items = new Map(before.map(item => [item.id, item]));
+          for (const item of after) { const old = items.get(item.id); if (old && JSON.stringify(old) !== JSON.stringify(item)) throw new Error("immutable fixture catalog conflict"); items.set(item.id, item); }
+          return [...items.values()];
+        };
+        store.saveCatalog({ schemaVersion: 1, projects: [{ ...context, assets: merge(previous?.assets ?? [], context.assets), constraints: merge(previous?.constraints ?? [], context.constraints) }] });
+      });
       if (!origin) {
-        kernel = new SqliteRunKernel({ stateStore: store, authorizer, budgets: [{ tenantId: principal.tenantId, projectId, currency: "CNY", limitMinor: 10000 }], clock: () => now });
+        kernel = new SqliteRunKernel({ stateStore: store, authorizer, budgets: [{ tenantId: principal.tenantId, projectId, currency: "CNY", limitMinor: 10000 }], clock: () => now,
+          ...(boundOutput ? { validateImageTask: createImageTaskValidator({ tenantId: principal.tenantId, stateStore: store, providerAuthorizer: authorizer, assetAuthorizer: authorizer }),
+            validateImageArtifact: createImageArtifactValidator({ tenantId: principal.tenantId, stateStore: store, providerAuthorizer: authorizer, assetAuthorizer: authorizer }) } : {}) });
         providers = new LocalImageProviders({ tenantId: principal.tenantId, stateStore: store, authorizer, assetAuthorizer: authorizer, runAuthorizer: authorizer, runKernel: kernel,
           estimate: (_connection, _selection, at) => ({ mode: "local-fixture", evidenceRef: "explicit-zero-fee-fixture", quote: { id: "fixture-quote", version: "fake-price-v1", source: "server-price-table",
             currency: "CNY", estimatedCostMinor: 25, maxCostMinor: 30, expiresAt: new Date(Date.parse(at) + 60_000).toISOString() } }), clock: () => now });
@@ -49,29 +68,48 @@ async function fixture(page: Page, protocol: ImageProviderConnection["protocol"]
         providers.registerRevision(principal, config, 0);
         const verifiedAssets = new LocalVerifiedAssets({ stateStore: store, authorizer,
           findAsset: (tenantId, project, id) => tenantId === principal.tenantId && project === projectId ? store.loadCatalog()?.projects[0].assets.find(asset => asset.id === id) ?? null : null });
-        actualServer = createApiServer({ imageProviders: providers, runKernel: kernel, verifiedAssets });
+        const reads = new LocalGeneratedAssetReads({ tenantId: principal.tenantId, stateStore: store, authorizer, runAuthorizer: authorizer });
+        actualServer = createApiServer({ imageProviders: providers, runKernel: kernel, verifiedAssets, generatedAssetReads: reads, generatedAssetLineages: reads });
         await new Promise<void>(resolve => actualServer.listen(0, "127.0.0.1", resolve)); const address = actualServer.address(); if (!address || typeof address === "string") throw new Error();
         origin = `http://127.0.0.1:${address.port}`;
       }
     }
     await route.continue();
   });
-  await page.route(/\/studio-api\/v1\/projects\/[^/]+\/(?:image-providers|image-preparations|budget|run-batches|assets)(?:\/[^?]*)?$/, async route => {
+  await page.route(/\/studio-api\/v1\/projects\/[^/]+\/(?:image-providers|image-preparations|budget|run-batches|assets|generated-assets)(?:\/[^?]*)?$/, async route => {
     const path = new URL(route.request().url()).pathname.replace(/^\/studio-api/, "");
     if (!origin || !path.includes(`/projects/${projectId}/`)) { await route.continue(); return; }
     const isConfirmation = /\/confirm$/.test(path) && route.request().method() === "POST";
     if (isConfirmation) confirms++; if (/\/confirmation$/.test(path)) historyReads++;
+    const isLineage = /\/lineage$/.test(path); if (isLineage) lineageReads++;
     const response = await route.fetch({ url: origin + path, maxRedirects: 0 });
     if (isConfirmation && mode === "hold") await new Promise<void>(resolve => { release = resolve; });
+    if (isLineage && holdLineage) await new Promise<void>(resolve => { release = resolve; });
     try {
       if (isConfirmation && mode === "lost") await route.abort("failed");
       else if (isConfirmation && mode === "mismatch" && response.ok()) { const body = await response.json(); body.aggregate.batch.currency = "USD"; await route.fulfill({ json: body, headers: { "cache-control": "no-store" } }); }
       else await route.fulfill({ response });
     } catch { /* Panel cancellation can discard the HTTP response, not the committed transaction. */ }
   });
-  return { get projectId() { return projectId; }, get confirms() { return confirms; }, get historyReads() { return historyReads; },
+  return { get projectId() { return projectId; }, get confirms() { return confirms; }, get historyReads() { return historyReads; }, get lineageReads() { return lineageReads; }, get sends() { return sends; },
     snapshot: () => store.load(), budget: () => kernel.getBudget(principal, projectId), setMode: (value: typeof mode) => { mode = value; },
     release: () => { mode = "good"; release?.(); }, revoke: () => { allowed = false; }, expire: () => { now += 61_000; },
+    revokeLineage: () => { lineageAllowed = false; }, holdLineage: () => { holdLineage = true; }, releaseLineage: () => { holdLineage = false; release?.(); },
+    executeFixture: async () => {
+      if (!boundOutput) throw new Error("fixture transport is not configured");
+      const batch = store.load()!.batches[0].aggregate, job = batch.jobs[0];
+      const lease = kernel.claimImageBatch(principal, batch.batch.id, { workerId: "explicit-result-fixture", maxJobs: 1 }).leases[0];
+      const sharp = createRequire(new URL("../../apps/api/package.json", import.meta.url))("sharp");
+      const image = sharp({ create: { width: 1024, height: 1024, channels: 3, background: "#3070b0" } });
+      const original: Buffer = await (protocol === "google" ? image.jpeg() : image.png()).toBuffer();
+      const packet = protocol === "google" ? { candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/jpeg", data: original.toString("base64") } }] } }] }
+        : { created: 1, data: [{ b64_json: original.toString("base64") }] };
+      await new LocalFixtureImageExecutor({ stateStore: store, runKernel: kernel, clock: () => now,
+        transport: { mode: "local-fixture", realExecutionEnabled: false, send: async () => { sends++; return { status: 200, contentType: "application/json", body: Buffer.from(JSON.stringify(packet)) }; } },
+        artifacts: new LocalImageTaskArtifacts({ tenantId: principal.tenantId, stateStore: store, runKernel: kernel, authorizer, clock: () => now }) })
+        .execute(principal, job.id, { workerId: lease.workerId, leaseId: lease.leaseId });
+      return store.loadGeneratedImage(principal.tenantId, projectId, job.id)!;
+    },
     drift: () => { config = { ...config, revision: config.revision + 1, enabled: false }; providers.registerRevision(principal, config, config.revision - 1); },
     mutateConstraint: () => store.transaction(() => { const catalog = store.loadCatalog()!; catalog.projects[0].constraints[0].brandRules.tone = "不应成为原人工确认"; store.saveCatalog(catalog); }) };
 }
@@ -169,4 +207,48 @@ test("390像素人工摘要不横溢；损坏/跨项目确认指针失败关闭�
   await expect(section.getByRole("region", { name: "图片人工冻结确认" })).toHaveCount(0); expect(f.confirms).toBe(0); expect(f.budget().reservedMinor).toBe(0);
   await section.getByRole("button", { name: "开始新准备动作（保留服务端历史）" }).click();
   expect(await page.evaluate(projectId => localStorage.getItem(`ai-commerce-canvas.image-confirmation.${projectId}`), f.projectId)).toBeNull(); expect(f.snapshot()?.batches).toHaveLength(0);
+});
+
+async function prepareBoundResult(page: Page, protocol: ImageProviderConnection["protocol"] = "openai", edit = false) {
+  const f = await fixture(page, protocol, true), { review, button } = await prepare(page, protocol, edit);
+  await review.getByLabel("已核对完整冻结摘要与假报价上限").check(); await button.click();
+  await expect(review.getByRole("article", { name: "本地图片确认结果" })).toBeVisible();
+  const record = await f.executeFixture();
+  await page.getByRole("button", { name: "关闭任务面板" }).click(); await page.getByRole("button", { name: "任务与预算", exact: true }).click();
+  await expect(page.getByRole("button", { name: "只读核验输出 1 谱系" })).toBeEnabled();
+  return { f, record };
+}
+for (const protocol of ["openai", "openai-compatible", "google"] as const) test(`${protocol} 实际本地原响应→资产绑定→只读结果谱系；费用仍unknown`, async ({ page }) => {
+  const { f, record } = await prepareBoundResult(page, protocol), before = f.snapshot();
+  expect(f.lineageReads).toBe(0); await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click();
+  const result = page.getByRole("article", { name: "已核验实际图片结果" }); await expect(result).toContainText(record.image.asset.id);
+  await expect(result).toContainText("固定人工构图，不抽卡、不换模型"); await expect(result).toContainText("保持人工冻结的品牌语气");
+  await expect(result).toContainText("费用未知 · 预留 30"); await expect(result).toContainText("非真实供应商生成");
+  expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1); expect(f.confirms).toBe(1); expect(f.lineageReads).toBe(1);
+  await expect(page.getByRole("button", { name: /执行排队|结果回到画布|重试失败/ })).toHaveCount(0);
+  if (protocol === "openai") { await result.scrollIntoViewIfNeeded(); await page.screenshot({ path: "test-results/generated-result-lineage.png" }); }
+});
+test("编辑结果显示原输入SHA及输出关系；390像素无横溢", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); const { record } = await prepareBoundResult(page, "openai", true);
+  await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click(); const result = page.getByRole("article", { name: "已核验实际图片结果" });
+  await expect(result).toContainText(record.request.inputs[0].assetId); await expect(result).toContainText(record.request.inputs[0].checksumSha256);
+  expect(record.image.asset.sourceAssetId).toBe(record.request.inputs[0].assetId);
+  expect(await page.getByRole("complementary", { name: "任务与预算" }).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+test("缓存后谱系撤权不留旧授权视图，不删除良好缓存或修改费用", async ({ page }) => {
+  const { f, record } = await prepareBoundResult(page); await page.getByRole("button", { name: "缓存输出 1 原图" }).click();
+  await expect(page.getByRole("complementary", { name: "任务与预算" })).toContainText("原文件已缓存到项目资产库"); await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click();
+  await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toBeVisible(); const before = f.snapshot(); f.revokeLineage();
+  await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click(); await expect(page.getByRole("region", { name: "实际图片结果谱系" }).getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toHaveCount(0);
+  expect(await page.evaluate(async id => { const { assetRepository } = await import("/src/assets/assetRepository.ts"); return !!await assetRepository.getBlob(id, "original"); }, record.image.asset.id)).toBe(true);
+  expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1);
+});
+test("关闭面板取消迟到谱系响应，重开须重新只读核验而非沿用视图", async ({ page }) => {
+  const { f } = await prepareBoundResult(page); const before = f.snapshot(); f.holdLineage(); await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click();
+  await expect.poll(() => f.lineageReads).toBe(1); await page.getByRole("button", { name: "关闭任务面板" }).click(); f.releaseLineage();
+  await page.getByRole("button", { name: "任务与预算", exact: true }).click(); await expect(page.getByRole("button", { name: "只读核验输出 1 谱系" })).toBeEnabled();
+  await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toHaveCount(0); expect(f.lineageReads).toBe(1);
+  await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click(); await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toBeVisible();
+  expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1); expect(f.lineageReads).toBe(2);
 });

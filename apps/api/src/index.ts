@@ -6,6 +6,7 @@ import {
   ClaimRunJobsRequestSchema,
   CreateImagePreparationSchema,
   ConfirmImagePreparationSchema,
+  GeneratedAssetLineageSchema,
   ConfirmRunBatchRequestSchema,
   CreateRunBatchRequestSchema,
   ExecuteRunJobRequestSchema,
@@ -23,7 +24,7 @@ import { ObjectStorageGatewayError, type SignedObjectGateway } from "./objectSto
 import { RunKernelError, type RunKernelPort } from "./runKernel";
 import type { VerifiedAssetPort } from "./verifiedAssets";
 import type { LocalImageProviders } from "./imageProviders";
-import type { GeneratedAssetReadPort } from "./generatedAssetReads";
+import type { GeneratedAssetReadPort, GeneratedAssetLineagePort } from "./generatedAssetReads";
 import { MAX_IMAGE_PROTOCOL_OUTPUT_BYTES } from "./imageProtocolResponse";
 import { imageMagicMime } from "./staticImageDecoder";
 
@@ -39,6 +40,7 @@ export type ApiServerOptions = {
   verifiedAssets?: VerifiedAssetPort;
   imageProviders?: LocalImageProviders;
   generatedAssetReads?: GeneratedAssetReadPort;
+  generatedAssetLineages?: GeneratedAssetLineagePort;
 };
 
 function sendJson(response: ServerResponse, status: number, body: unknown, cacheControl = "no-store"): void {
@@ -84,11 +86,39 @@ export function createApiServer(options: ApiServerOptions = {}) {
         runKernelEnabled: Boolean(options.runKernel),
         assetVerificationEnabled: Boolean(options.verifiedAssets),
         generatedAssetReadEnabled: Boolean(options.generatedAssetReads),
+        generatedAssetLineageEnabled: Boolean(options.generatedAssetLineages),
       });
       return;
     }
 
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1"), pathname = requestUrl.pathname;
+    const generatedLineageMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/generated-assets\/([^/]+)\/lineage$/);
+    if (generatedLineageMatch) {
+      const fail = (status: number, code: string) => sendJson(response, status, { error: code }, "private, no-store");
+      const reader = options.generatedAssetLineages;
+      if (!reader) { fail(503, "generated_asset_lineage_not_configured"); return; }
+      const principal = reader.authenticate(request);
+      if (!principal) { fail(401, "generated_asset_authentication_required"); return; }
+      if (request.method !== "GET") { response.setHeader("allow", "GET"); fail(405, "generated_asset_method_not_allowed"); return; }
+      if (requestUrl.search || request.headers["transfer-encoding"] || (request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0")) {
+        response.setHeader("connection", "close"); fail(400, "generated_asset_request_invalid"); return;
+      }
+      if (request.headers.range !== undefined) { fail(416, "generated_asset_range_not_supported"); return; }
+      try {
+        const projectId = decodeURIComponent(generatedLineageMatch[1]), assetId = decodeURIComponent(generatedLineageMatch[2]);
+        const lineage = GeneratedAssetLineageSchema.parse(reader.lineage(principal, projectId, assetId));
+        if (lineage.projectId !== projectId || lineage.tenantId !== principal.tenantId || lineage.image.asset.id !== assetId
+          || Buffer.byteLength(JSON.stringify(lineage)) > 512 * 1024) throw new Error("生成谱系响应错配或超限");
+        response.setHeader("vary", "Authorization");
+        response.setHeader("cross-origin-resource-policy", "same-origin");
+        response.setHeader("referrer-policy", "no-referrer");
+        sendJson(response, 200, lineage, "private, no-store");
+      } catch (error) {
+        if (error instanceof RunKernelError) fail(error.status, error.code);
+        else fail(error instanceof URIError ? 400 : 503, error instanceof URIError ? "generated_asset_request_invalid" : "generated_asset_unavailable");
+      }
+      return;
+    }
     const generatedContentMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/generated-assets\/([^/]+)\/content$/);
     if (generatedContentMatch) {
       const fail = (status: number, code: string) => sendJson(response, status, { error: code }, "private, no-store");

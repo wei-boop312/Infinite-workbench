@@ -6,6 +6,7 @@ import type {
 import { money, parseMoney, RUN_STATUS_LABEL, StudioRunClient } from "../runs/runClient";
 import { assetRepository } from "../assets/assetRepository";
 import ImagePreparationPanel from "./ImagePreparationPanel";
+import GeneratedImageResult from "./GeneratedImageResult";
 import "./RunPanel.css";
 
 type Props = {
@@ -345,6 +346,7 @@ export default function RunPanel(props: Props) {
           <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(reservationMinor(batch, job))}`}</small>
           {job.billingEvidenceRef && <small>核账证据：{job.billingEvidenceRef}</small>}
           {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length > 0 && <small>已验证资产已绑定；画布图片回流尚未开放，暂不能回到画布。</small>}
+          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length === 1 && <GeneratedImageResult key={`${job.id}:${job.outputAssetIds[0]}`} batch={batch} job={job} />}
           {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length === 1 && <button disabled={busy} onClick={() => void run(async (client) => {
             const cached = await client.cacheImage(projectId, job.outputAssetIds[0]);
             if (!alive.current) return;

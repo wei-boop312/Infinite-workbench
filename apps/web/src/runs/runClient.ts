@@ -4,6 +4,7 @@ import {
   RunBatchListSchema,
   VerifiedImageSchema,
   CreateImagePreparationSchema, ImageProviderListSchema, ImagePreparationPublicSchema, ConfirmImagePreparationSchema, ImageConfirmationPublicSchema, ImageConfirmationHistorySchema,
+  GeneratedAssetLineageSchema, type RunJob,
   type ImagePreparationPublic, type ImageConfirmationPublic,
   type CreateImagePreparation,
   type CreateRunBatchRequest,
@@ -83,6 +84,9 @@ const ERROR_LABELS: Record<string, string> = {
   image_confirmation_permission_denied: "当前身份没有人工确认权限；不会创建任务或预留。",
   image_confirmation_not_configured: "当前服务未配置本地确认事务，保持未确认。",
   image_confirmation_snapshot_mismatch: "冻结摘要或币种/估价/上限不匹配，未确认，请只读核对原记录。",
+  generated_asset_lineage_not_configured: "任务结果谱系读取未配置；不会用本地资产或模拟编号代替。",
+  generated_asset_not_found: "结果不存在或没有完整读取权限，未使用旧缓存冒充当前授权。",
+  generated_asset_unavailable: "结果证据无法完整核验；未重新生成或改变费用。",
 };
 
 export function money(minor: number): string { return `¥${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`; }
@@ -244,6 +248,27 @@ export class StudioRunClient {
   async cacheImage(projectId: string, assetId: string) {
     const { cacheGeneratedAsset } = await import("../assets/generatedAssetCache");
     return cacheGeneratedAsset(projectId, assetId, { signal: this.signal });
+  }
+  async generatedLineage(batch: RunBatchAggregate, job: RunJob) {
+    if (batch.batch.tool === "product-retouch" || job.batchId !== batch.batch.id || job.outputAssetIds.length !== 1
+      || !batch.jobs.some(item => item.id === job.id && JSON.stringify(item.outputAssetIds) === JSON.stringify(job.outputAssetIds))) throw new Error("没有实际原生图片输出，不能读取结果谱系。");
+    const view = await this.request(`/v1/projects/${encodeURIComponent(batch.batch.projectId)}/generated-assets/${encodeURIComponent(job.outputAssetIds[0])}/lineage`,
+      GeneratedAssetLineageSchema, undefined, undefined, 512 * 1024);
+    if (view.tenantId !== "local-studio" || view.tenantId !== batch.batch.tenantId || view.projectId !== batch.batch.projectId
+      || view.batchId !== batch.batch.id || view.jobId !== job.id || view.image.asset.id !== job.outputAssetIds[0]
+      || view.requestTemplate.constraintSnapshotId !== batch.batch.constraintSnapshotId || view.requestTemplate.adapterId !== batch.batch.adapterId
+      || view.requestTemplate.operation !== (batch.batch.tool === "image-generate" ? "generate" : "edit")
+      || view.confirmedBy !== batch.batch.confirmedBy || view.confirmedAt !== batch.batch.confirmedAt || view.billing.currency !== batch.batch.currency
+      || JSON.stringify([...view.requestTemplate.inputs.map(input => input.assetId), ...(view.requestTemplate.operation === "edit" && view.requestTemplate.mask ? [view.requestTemplate.mask.assetId] : [])]) !== JSON.stringify(job.inputAssetIds)) {
+      throw new Error("结果谱系与当前项目实际任务或输出编号不一致，未使用缓存替代。");
+    }
+    const { assertGeneratedReceipt } = await import("../assets/generatedAssetPolicy");
+    assertGeneratedReceipt(view.image, view.projectId, view.image.asset.id);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(view.constraint))));
+    if (Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("") !== view.requestTemplate.constraintChecksumSha256 || this.signal.aborted) {
+      throw new Error("结果中的原冻结约束摘要不一致或读取已取消，未继续。");
+    }
+    return view;
   }
   create(request: CreateRunBatchRequest) { return this.request("/v1/run-batches", RunBatchAggregateSchema, request); }
   action(batch: RunBatchAggregate, action: "confirm" | "cancel" | "dispatch" | "reconcile") {

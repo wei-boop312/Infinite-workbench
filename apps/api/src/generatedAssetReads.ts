@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { GeneratedAssetLineageSchema, type GeneratedAssetLineage, type GeneratedImageRecord, type RunKernelSnapshot } from "@canvas/contracts";
 import type { ObjectStorageAuthorizer, StoragePrincipal } from "./objectStorageGateway";
 import { assertImageArtifactRecord } from "./imageArtifactIntegrity";
 import { parseStoredImageResponse } from "./imageArtifactPolicy";
@@ -6,7 +7,7 @@ import { imageSnapshotFingerprint } from "./imageProviderContract";
 import { MAX_IMAGE_PROTOCOL_OUTPUT_BYTES } from "./imageProtocolResponse";
 import { assetMetadataFingerprint } from "./verifiedAssets";
 import { imageMagicMime, MAX_STATIC_IMAGE_PIXELS, MAX_STATIC_IMAGE_EDGE } from "./staticImageDecoder";
-import { InMemoryRunKernel, RunKernelError } from "./runKernel";
+import { InMemoryRunKernel, RunKernelError, type RunAuthorizer } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
 export type GeneratedAssetContent = { body: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp"; checksumSha256: string };
@@ -14,20 +15,49 @@ export interface GeneratedAssetReadPort {
   authenticate(request: IncomingMessage): StoragePrincipal | null;
   read(principal: StoragePrincipal, projectId: string, assetId: string): GeneratedAssetContent;
 }
+export interface GeneratedAssetLineagePort {
+  authenticate(request: IncomingMessage): StoragePrincipal | null;
+  lineage(principal: StoragePrincipal, projectId: string, assetId: string): GeneratedAssetLineage;
+}
 function validId(id: string) { return id.length > 0 && id.length <= 160 && id.trim() === id && !/[\x00-\x1f\x7f]/.test(id); }
 function notFound(): never { throw new RunKernelError(404, "generated_asset_not_found", "生成资产不可用"); }
 
 // Only immutable, task-bound generated images. This reader has NO send, write,
-// quote, accounting or execution-authority port, and exposes no private receipt.
-export class LocalGeneratedAssetReads implements GeneratedAssetReadPort {
-  constructor(private readonly options: { tenantId: string; stateStore: SqliteRunKernelStateStore; authorizer: ObjectStorageAuthorizer }) {
+// quote, accounting or execution-authority port. Only explicitly projected
+// public provenance is available under additional run:read authorization.
+export class LocalGeneratedAssetReads implements GeneratedAssetReadPort, GeneratedAssetLineagePort {
+  constructor(private readonly options: { tenantId: string; stateStore: SqliteRunKernelStateStore; authorizer: ObjectStorageAuthorizer; runAuthorizer?: RunAuthorizer }) {
     if (!validId(options.tenantId)) throw new Error("生成资产读取租户配置无效");
   }
   authenticate(request: IncomingMessage) { return this.options.authorizer.authenticate(request); }
   read(principal: StoragePrincipal, projectId: string, assetId: string): GeneratedAssetContent {
+    return this.verified(principal, projectId, assetId, false, (_stored, _record, image) => image);
+  }
+  lineage(principal: StoragePrincipal, projectId: string, assetId: string): GeneratedAssetLineage {
+    if (!this.options.runAuthorizer) throw new RunKernelError(503, "generated_asset_lineage_not_configured", "生成谱系读取未配置");
+    return this.verified(principal, projectId, assetId, true, (stored, record) => {
+      const execution = stored.imageExecution!, job = stored.aggregate.jobs.find(item => item.id === stored.imageTaskArtifact!.jobId)!;
+      return GeneratedAssetLineageSchema.parse({
+        schemaVersion: 1, mode: "local-fixture", realExecutionEnabled: false, tenantId: principal.tenantId, projectId,
+        batchId: stored.aggregate.batch.id, jobId: job.id, jobStatus: job.status, protocol: record.protocol,
+        connectionName: execution.preparation.connection.name, requestTemplate: execution.preparation.requestTemplate,
+        constraint: record.constraint, pricing: execution.preparation.pricing,
+        preparationId: execution.preparation.id, preparationFingerprint: execution.preparation.snapshotFingerprint,
+        executionFingerprint: stored.requestFingerprint, requestFingerprint: execution.requestFingerprint,
+        payloadChecksumSha256: record.payloadChecksumSha256, generatedRecordFingerprint: stored.imageTaskArtifact!.generatedRecordFingerprint,
+        transformedInputs: record.transformedInputs, confirmedBy: execution.confirmedBy, confirmedAt: execution.confirmedAt,
+        image: record.image, billing: { state: job.billingResolutionId ? "settled" : "unknown", currency: stored.aggregate.batch.currency,
+          reservedMinor: stored.jobReservations.find(([id]) => id === job.id)?.[1] ?? 0, batchMaxCostMinor: stored.aggregate.batch.maxCostMinor,
+          ...(job.actualCostMinor === undefined ? {} : { actualMinor: job.actualCostMinor }) },
+      });
+    });
+  }
+  private verified<T>(principal: StoragePrincipal, projectId: string, assetId: string, includeLineage: boolean,
+    view: (stored: RunKernelSnapshot["batches"][number], record: GeneratedImageRecord, content: GeneratedAssetContent) => T): T {
     const actor = { ...principal };
     const allowed = () => actor.tenantId === this.options.tenantId && validId(projectId) && validId(assetId)
-      && this.options.authorizer.allows(actor, projectId, "asset:read") === true;
+      && this.options.authorizer.allows(actor, projectId, "asset:read") === true
+      && (!includeLineage || this.options.runAuthorizer?.allows(actor, projectId, "run:read") === true);
     // Before touching the private snapshot, catalog, raw packet or image bytes.
     if (!allowed()) notFound();
     try {
@@ -59,8 +89,9 @@ export class LocalGeneratedAssetReads implements GeneratedAssetReadPort {
           || Math.max(image.receipt.asset.width, image.receipt.asset.height) > MAX_STATIC_IMAGE_EDGE
           || !["image/png", "image/jpeg", "image/webp"].includes(image.receipt.asset.mimeType)
           || imageMagicMime(image.body) !== image.receipt.asset.mimeType) throw new Error("生成资产正文或实际候选错配");
+        const result = view(stored, record, { body: image.body, mimeType: candidate.mimeType, checksumSha256: image.receipt.checksumSha256 });
         if (!allowed()) notFound();
-        return { body: image.body, mimeType: candidate.mimeType, checksumSha256: image.receipt.checksumSha256 };
+        return result;
       });
     } catch (error) {
       if (error instanceof RunKernelError && error.code === "generated_asset_not_found") throw error;

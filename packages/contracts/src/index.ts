@@ -600,6 +600,45 @@ export const RunBatchAggregateSchema = z.object({
 
 export const RunBatchListSchema = z.array(RunBatchAggregateSchema);
 
+// Read-only, server-derived provenance for an actual task-bound image. Neither
+// this view nor its fingerprints are accepted as client execution authority.
+export const GeneratedAssetLineageSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.literal("local-fixture"), realExecutionEnabled: z.literal(false),
+  tenantId: IdSchema, projectId: IdSchema, batchId: IdSchema, jobId: IdSchema,
+  jobStatus: z.enum(["billing_unknown", "succeeded"]), protocol: ImageProtocolSchema, connectionName: z.string().min(1).max(120),
+  requestTemplate: ImageRequestTemplateSchema, constraint: ConstraintSnapshotSchema, pricing: LocalImageQuoteSchema,
+  preparationId: IdSchema, preparationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/), requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/), generatedRecordFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  transformedInputs: z.array(ImageInputTransformSchema).max(21), confirmedBy: IdSchema, confirmedAt: IsoDateSchema,
+  image: VerifiedImageSchema,
+  billing: z.object({ state: z.enum(["unknown", "settled"]), currency: z.string().regex(/^[A-Z]{3}$/),
+    reservedMinor: z.number().int().nonnegative(), batchMaxCostMinor: z.number().int().nonnegative(), actualMinor: z.number().int().nonnegative().optional(),
+  }).strict(),
+}).strict().superRefine((view, context) => {
+  const request = view.requestTemplate, image = view.image, cost = view.billing;
+  const refs = [...request.inputs, ...(request.operation === "edit" && request.mask ? [request.mask] : [])];
+  if (request.tenantId !== view.tenantId || image.tenantId !== view.tenantId || request.projectId !== view.projectId
+    || image.asset.projectId !== view.projectId || view.constraint.projectId !== view.projectId || request.constraintSnapshotId !== view.constraint.id
+    || request.protection !== "none" || view.constraint.lockedPaths.includes("product.pixels") || image.asset.purpose !== "generated"
+    || image.asset.mimeType !== `image/${request.parameters.outputFormat}` || image.asset.mimeType !== `image/${view.constraint.outputSpec.format}`
+    || image.asset.width !== view.constraint.outputSpec.width || image.asset.height !== view.constraint.outputSpec.height
+    || (request.parameters.size !== "auto" && (request.parameters.size.width !== image.asset.width || request.parameters.size.height !== image.asset.height))
+    || image.asset.sourceAssetId !== request.inputs[0]?.assetId || JSON.stringify(request.quote) !== JSON.stringify(view.pricing.quote)
+    || cost.currency !== request.quote.currency || cost.batchMaxCostMinor < request.quote.maxCostMinor
+    || Date.parse(view.confirmedAt) >= Date.parse(request.quote.expiresAt) || Date.parse(view.confirmedAt) > Date.parse(image.verifiedAt)
+    || refs.length !== view.transformedInputs.length || refs.some((ref, index) => {
+      const converted = view.transformedInputs[index];
+      return converted?.assetId !== ref.assetId || converted.originalChecksumSha256 !== ref.checksumSha256
+        || (index < request.inputs.length ? converted.transform !== "exif-srgb-png-v1" : converted.transform === "exif-srgb-png-v1");
+    })
+    || (cost.state === "unknown" ? view.jobStatus !== "billing_unknown" || cost.actualMinor !== undefined || cost.reservedMinor !== request.quote.maxCostMinor
+      : view.jobStatus !== "succeeded" || cost.actualMinor === undefined || cost.reservedMinor !== 0 || cost.actualMinor > cost.batchMaxCostMinor)) {
+    context.addIssue({ code: "custom", message: "生成资产的实际任务、冻结谱系或费用关系不一致" });
+  }
+});
+export type GeneratedAssetLineage = z.infer<typeof GeneratedAssetLineageSchema>;
+
 export const ImageConfirmationPublicSchema = z.object({
   mode: z.literal("local-fixture"), realExecutionEnabled: z.literal(false), executionAuthorized: z.literal(false),
   executionState: z.literal("confirmed-not-dispatchable"), protocolPreparation: z.literal("prepared"),

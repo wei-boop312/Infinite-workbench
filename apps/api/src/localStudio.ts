@@ -117,8 +117,8 @@ export function createLocalStudioMiddleware(directory: string) {
       quote: { id: `fixture-quote-${randomUUID()}`, version: "local-fixture-price-v1", source: "server-price-table", currency: "CNY",
         estimatedCostMinor: 25, maxCostMinor: 25, expiresAt: new Date(Date.parse(at) + 5 * 60_000).toISOString() } }),
   }); // No automatic provider/model seeding or public management permissions.
-  const generatedAssetReads = new LocalGeneratedAssetReads({ tenantId, stateStore, authorizer: assetAuthorizer });
-  const api = createApiServer({ runKernel: kernel!, verifiedAssets, imageProviders, generatedAssetReads });
+  const generatedAssetReads = new LocalGeneratedAssetReads({ tenantId, stateStore, authorizer: assetAuthorizer, runAuthorizer: authorizer });
+  const api = createApiServer({ runKernel: kernel!, verifiedAssets, imageProviders, generatedAssetReads, generatedAssetLineages: generatedAssetReads });
 
   const registerContext = (incoming: RegisterRunContextRequest) => {
     for (const asset of incoming.assets) {

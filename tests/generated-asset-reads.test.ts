@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { request as httpRequest, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { LocalGeneratedAssetReads, type GeneratedAssetReadPort } from "../apps/api/src/generatedAssetReads";
+import { LocalGeneratedAssetReads, type GeneratedAssetReadPort, type GeneratedAssetLineagePort } from "../apps/api/src/generatedAssetReads";
 import { LocalImageTaskArtifacts } from "../apps/api/src/imageTaskArtifacts";
 import { LocalFixtureImageExecutor } from "../apps/api/src/imageFixtureExecutor";
 import { LocalGeneratedImages } from "../apps/api/src/generatedImages";
@@ -42,6 +42,13 @@ async function listen(port?: GeneratedAssetReadPort, configure?: (server: Server
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const address = server.address();
   if (!address || typeof address === "string") throw new Error("server-missing"); return `http://127.0.0.1:${address.port}`;
 }
+async function listenLineage(port?: GeneratedAssetLineagePort) {
+  const server = createApiServer({ generatedAssetLineages: port }); servers.push(server);
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const address = server.address();
+  if (!address || typeof address === "string") throw new Error("server-missing"); return `http://127.0.0.1:${address.port}`;
+}
+const lineageReader = (f: ReturnType<typeof setup>, allows = (_actor: unknown, projectId: string, permission: string) => projectId === "project-a" && permission === "run:read") =>
+  new LocalGeneratedAssetReads({ tenantId: principal.tenantId, stateStore: f.store, authorizer: f.assetAuthorizer, runAuthorizer: { authenticate: f.assetAuthorizer.authenticate, allows } });
 const path = (assetId: string, project = "project-a") => `/v1/projects/${encodeURIComponent(project)}/generated-assets/${encodeURIComponent(assetId)}/content`;
 const headers = { authorization: "Bearer writer" };
 const unchanged = (f: ReturnType<typeof setup>, before: unknown) => { expect(f.store.load()).toEqual(before); expect(f.store.load()!.budgets[0].reservedMinor).toBe(30); };
@@ -127,6 +134,7 @@ describe("有权限的已生成资产二进制回读", () => {
         if (kind === "artifact") delete stored.imageTaskArtifact; if (kind === "output") stored.aggregate.jobs[0].outputAssetIds = ["foreign"];
         if (kind === "audit") stored.aggregate.audit = stored.aggregate.audit.filter((event) => event.eventType !== "image-artifact-verified"); f.store.save(state); });
       const before = f.store.load(); expect(() => reader(f).read(principal, "project-a", run.assetId)).toThrow(expect.objectContaining({ status: 503 })); unchanged(f, before); expect(run.send).toHaveBeenCalledTimes(1);
+      expect(() => lineageReader(f).lineage(principal, "project-a", run.assetId)).toThrow(expect.objectContaining({ status: 503 })); unchanged(f, before);
     } finally { db.close(); }
   });
   it("部分重哈希生成谱系也不能改变已确认请求后下载", async () => {
@@ -199,5 +207,65 @@ describe("有权限的已生成资产二进制回读", () => {
     const full = await fetch(base + path("transfer-fixture")); expect(full.status).toBe(429); expect(await full.json()).toEqual({ error: "generated_asset_read_busy" });
     a.destroy(); b.destroy(); await new Promise((resolve) => setTimeout(resolve, 50)); hold = false;
     const available = await fetch(base + path("transfer-fixture")); expect(available.status).toBe(200); expect(Buffer.from(await available.arrayBuffer())).toEqual(png);
+  });
+});
+
+describe("实际绑定任务结果的只读公开谱系", () => {
+  it("输出完整冻结关系和unknown上限，不暴露私有连接或再次发送", async () => {
+    const f = setup(), run = await generated(f), before = f.store.load(), save = vi.spyOn(f.store, "save");
+    const view = lineageReader(f).lineage(principal, "project-a", run.assetId), stored = before!.batches[0];
+    expect(view).toMatchObject({ schemaVersion: 1, mode: "local-fixture", realExecutionEnabled: false, tenantId: principal.tenantId, projectId: "project-a",
+      batchId: run.batch.batch.id, jobId: run.batch.jobs[0].id, jobStatus: "billing_unknown", requestTemplate: { parameters: { prompt: "private-human-prompt" } },
+      preparationId: stored.imageExecution!.preparation.id, executionFingerprint: stored.requestFingerprint, generatedRecordFingerprint: stored.imageTaskArtifact!.generatedRecordFingerprint,
+      constraint: stored.imageExecution!.preparation.constraint, image: run.record!.image, billing: { state: "unknown", currency: "CNY", reservedMinor: 30, batchMaxCostMinor: 30 } });
+    for (const secret of ["opaque-never-resolved", "never-called.invalid", "credentialRef", "baseUrl", "b64_json", "leaseOwnerId", "idempotencyKey"]) expect(JSON.stringify(view)).not.toContain(secret);
+    view.constraint.brandRules.style = "caller-mutation"; expect(lineageReader(f).lineage(principal, "project-a", run.assetId).constraint.brandRules.style).toBe("人工冻结构图");
+    expect(save).not.toHaveBeenCalled(); unchanged(f, before); expect(run.send).toHaveBeenCalledTimes(1);
+  });
+  it("编辑输入及转换按原SHA/顺序保留，使用冻结约束而非客户端现值", async () => {
+    const f = setup(); f.source(); f.register();
+    const batch = await f.confirm("lineage-edit", { operation: "edit", inputAssetIds: ["source"] }), lease = f.kernel.claimImageBatch(principal, batch.batch.id, { workerId: "edit-reader", maxJobs: 1 }).leases[0];
+    const send = vi.fn(async () => ({ status: 200, contentType: "application/json", body: Buffer.from(JSON.stringify({ created: 1, data: [{ b64_json: png.toString("base64") }] })) }));
+    await new LocalFixtureImageExecutor({ stateStore: f.store, runKernel: f.kernel, transport: { mode: "local-fixture", realExecutionEnabled: false, send },
+      artifacts: new LocalImageTaskArtifacts({ tenantId: principal.tenantId, stateStore: f.store, runKernel: f.kernel, authorizer: f.assetAuthorizer, clock: f.clock }), clock: f.clock })
+      .execute(principal, batch.jobs[0].id, { workerId: lease.workerId, leaseId: lease.leaseId });
+    const record = f.store.loadGeneratedImage(principal.tenantId, "project-a", batch.jobs[0].id)!, before = f.store.load();
+    const view = lineageReader(f).lineage(principal, "project-a", record.image.asset.id);
+    expect(view.requestTemplate.inputs).toEqual(record.request.inputs); expect(view.transformedInputs).toEqual(record.transformedInputs); expect(view.image.asset.sourceAssetId).toBe("source"); unchanged(f, before);
+  });
+  it.each(["missing", "denied", "promise", "foreign", "revoked"])("%s 不能读取冻结指令；在私有访问前/最终严格核权", async reason => {
+    const f = setup(), run = await generated(f), before = f.store.load(), load = vi.spyOn(f.store, "load");
+    const allows = reason === "promise" ? (() => Promise.resolve(true)) as never : reason === "revoked" ? vi.fn().mockReturnValueOnce(true).mockReturnValue(false) : () => reason !== "denied";
+    const view = reason === "missing" ? reader(f) : lineageReader(f, allows);
+    expect(() => view.lineage(reason === "foreign" ? { ...principal, tenantId: "foreign" } : principal, "project-a", run.assetId))
+      .toThrow(expect.objectContaining({ status: reason === "missing" ? 503 : 404 }));
+    if (reason !== "revoked") expect(load).not.toHaveBeenCalled(); unchanged(f, before);
+    // Asset-only binary readers still do not acquire run:read or reveal prompts.
+    if (reason !== "foreign") expect(reader(f).read(principal, "project-a", run.assetId).body).toEqual(png);
+  });
+  it("人工结费/报价过期/目录停用仍可只读核验，账本和无关过期租约不恢复", async () => {
+    const f = setup(), run = await generated(f), other = await f.confirm("lineage-unrelated"); f.kernel.claimImageBatch(principal, other.batch.id, { workerId: "unrelated", maxJobs: 1 });
+    f.kernel.resolveBillingUnknown(principal, run.batch.jobs[0].id, { resolutionId: "lineage-accounted", resolution: "charged", actualCostMinor: 27,
+      expectedReservedMinor: 30, expectedCurrency: "CNY", evidenceRef: "local-fixture-accounting" });
+    f.advance(61000); f.register(connection({ revision: 2, enabled: false })); const before = f.store.load(), save = vi.spyOn(f.store, "save");
+    expect(lineageReader(f).lineage(principal, "project-a", run.assetId)).toMatchObject({ jobStatus: "succeeded", requestTemplate: { connectionRevision: 1 },
+      billing: { state: "settled", reservedMinor: 0, actualMinor: 27, currency: "CNY" } });
+    expect(f.store.load()).toEqual(before); expect(save).not.toHaveBeenCalled(); expect(before!.batches[1].aggregate.jobs[0].status).toBe("leased");
+  });
+  it("HTTP默认关闭，认证和无查询/正文/Range边界保持，坏注入端口失败关闭", async () => {
+    const f = setup(), run = await generated(f), view = lineageReader(f), base = await listenLineage(view), uri = base + path(run.assetId).replace(/content$/, "lineage"), before = f.store.load();
+    const response = await fetch(uri, { headers }); expect(response.status).toBe(200); expect(await response.json()).toEqual(view.lineage(principal, "project-a", run.assetId));
+    expect(response.headers.get("cache-control")).toBe("private, no-store"); expect(response.headers.get("vary")).toBe("Authorization"); expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    for (const [url, init, status] of [[uri, {}, 401], [uri, { headers, method: "POST" }, 405], [uri, { headers, method: "HEAD" }, 405],
+      [uri + "?jobId=caller-proof", { headers }, 400], [uri, { headers: { ...headers, range: "bytes=0-4" } }, 416], [uri.replace(run.assetId, "unknown"), { headers }, 404]] as const) {
+      const bad = await fetch(url, init); expect(bad.status).toBe(status); expect(bad.headers.get("cache-control")).toBe("private, no-store"); expect(await bad.text()).not.toContain("private-human-prompt");
+    }
+    const disabled = await listenLineage(); expect((await fetch(disabled + path(run.assetId).replace(/content$/, "lineage"))).status).toBe(503);
+    for (const fake of [{ ...view.lineage(principal, "project-a", run.assetId), jobId: "foreign", image: { ...run.record!.image, asset: { ...run.record!.image.asset, id: "foreign" } } },
+      { ...view.lineage(principal, "project-a", run.assetId), credentialRef: "must-not-leak" }]) {
+      const badPort = await listenLineage({ authenticate: () => principal, lineage: () => fake as never }); const denied = await fetch(badPort + path(run.assetId).replace(/content$/, "lineage"));
+      expect(denied.status).toBe(503); expect(await denied.text()).not.toContain("must-not-leak");
+    }
+    unchanged(f, before);
   });
 });
