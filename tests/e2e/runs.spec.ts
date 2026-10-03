@@ -127,6 +127,87 @@ test("创建响应丢失后重试复用原批次，取消不会保留预算", as
   await expect(panel.locator(".run-budget")).toContainText("预留¥0.00");
 });
 
+test("图片核验响应丢失后安全重放同一证明，预估不占用预算", async ({ page }) => {
+  const panel = await prepare(page);
+  const before = await panel.getByLabel("选择任务批次").locator("option").count();
+  const beforeBudget = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
+  let verificationUrl = ""; let receipt: { id: string; checksumSha256: string } | null = null;
+  await page.route("**/studio-api/v1/projects/*/assets/*/verification", async (route) => {
+    verificationUrl = route.request().url();
+    expect(route.request().method()).toBe("POST");
+    const response = await route.fetch(); expect(response.status()).toBe(200); receipt = await response.json();
+    await route.abort("failed");
+  }, { times: 1 });
+  await panel.getByRole("button", { name: "查看批次预估" }).click();
+  await expect(panel.getByRole("alert")).toContainText("可安全重试");
+  await expect(panel.getByLabel("选择任务批次").locator("option")).toHaveCount(before);
+  const saved = await (await page.request.get(verificationUrl, { headers: { "x-canvas-local": "1" } })).json();
+  expect(saved).toEqual(receipt);
+  expect(saved.asset).toMatchObject({ width: 1, height: 1, byteSize: png.length });
+  await panel.getByRole("button", { name: "查看批次预估" }).click();
+  await expect(panel.getByLabel("选择任务批次").locator("option")).toHaveCount(before + 1);
+  expect(await (await page.request.get(verificationUrl, { headers: { "x-canvas-local": "1" } })).json()).toEqual(saved);
+  const budget = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
+  expect(budget).toEqual(beforeBudget);
+  await page.screenshot({ path: resolve("test-results/verified-image-replay-desktop.png") });
+});
+
+test("预估后浏览器原文件丢失，不用缩略图或已存证明绕过确认", async ({ page }) => {
+  const panel = await prepare(page);
+  const responsePromise = page.waitForResponse((response) => response.url().endsWith("/verification") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click();
+  const receipt = await (await responsePromise).json();
+  await expect(panel.getByRole("button", { name: "确认模拟成本并排队" })).toBeEnabled();
+  const batchId = await panel.getByLabel("选择任务批次").inputValue();
+  const before = await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json();
+  await page.evaluate(async (assetId: string) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("ai-commerce-canvas-assets", 2); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    const transaction = database.transaction("blobs", "readwrite"); transaction.objectStore("blobs").delete(`${assetId}:original`);
+    await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
+    database.close();
+  }, receipt.asset.id);
+  await panel.getByRole("button", { name: "确认模拟成本并排队" }).click();
+  await expect(panel.getByRole("alert")).toContainText("不会仅用缩略图代替原图");
+  const blocked = await (await page.request.get(`/studio-api/v1/run-batches/${batchId}`, { headers: { "x-canvas-local": "1" } })).json();
+  expect(blocked.jobs).toEqual([]); expect(blocked.batch.status).toBe("awaiting_confirmation");
+  expect(await (await page.request.get("/studio-api/v1/projects/project-main-image/budget", { headers: { "x-canvas-local": "1" } })).json()).toEqual(before);
+});
+
+test("绘制蒙版后原图先验证，蒙版绑定真实底图摘要再确认执行", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("导入本地资产").setInputFiles({ name: "masked-product.png", mimeType: "image/png", buffer: png });
+  await page.getByRole("button", { name: "关闭资产库" }).click();
+  await page.getByRole("button", { name: "＋ 约束" }).click();
+  const inspector = page.getByRole("complementary", { name: "人工约束" });
+  await inspector.getByRole("button", { name: "绘制蒙版" }).click();
+  const editor = page.getByRole("dialog", { name: "蒙版编辑器" });
+  const box = await editor.getByLabel("蒙版绘制画布").boundingBox();
+  if (!box) throw new Error("蒙版画布未显示");
+  await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.5); await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.5, { steps: 4 }); await page.mouse.up();
+  await editor.getByRole("button", { name: "保存蒙版版本" }).click(); await expect(editor).toBeHidden();
+  await inspector.getByRole("button", { name: "保存为新约束快照" }).click();
+  await page.getByRole("button", { name: "任务与预算", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "任务与预算" });
+  await expect(panel.getByRole("button", { name: "查看批次预估" })).toBeEnabled();
+  const receipts: Array<{ checksumSha256: string; sourceChecksumSha256?: string; asset: { id: string; purpose: string; sourceAssetId?: string } }> = [];
+  await page.route("**/studio-api/v1/projects/*/assets/*/verification", async (route) => {
+    const response = await route.fetch(); expect(response.status()).toBe(200); receipts.push(await response.json()); await route.fulfill({ response });
+  });
+  await panel.getByRole("button", { name: "查看批次预估" }).click();
+  await expect(panel.getByRole("button", { name: "确认模拟成本并排队" })).toBeEnabled();
+  expect(receipts).toHaveLength(2); expect(receipts[0].asset.purpose).toBe("source"); expect(receipts[1].asset.purpose).toBe("mask");
+  expect(receipts[1].asset.sourceAssetId).toBe(receipts[0].asset.id); expect(receipts[1].sourceChecksumSha256).toBe(receipts[0].checksumSha256);
+  await panel.getByRole("button", { name: "确认模拟成本并排队" }).click();
+  await panel.getByRole("button", { name: "执行排队任务" }).click();
+  await expect(panel.getByRole("region", { name: "当前批次" }).getByRole("status")).toHaveText("输出进度：2 / 2 成功");
+  expect(receipts).toHaveLength(6);
+  expect(receipts[2]).toEqual(receipts[0]); expect(receipts[4]).toEqual(receipts[0]);
+  expect(receipts[3]).toEqual(receipts[1]); expect(receipts[5]).toEqual(receipts[1]);
+});
+
 test("超额申请刷新恢复，审批响应丢失后重放不重复结算", async ({ page }) => {
   const { panel, decision } = await prepareOverage(page);
   const batchId = await panel.getByLabel("选择任务批次").inputValue();

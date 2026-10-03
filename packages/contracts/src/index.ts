@@ -97,6 +97,32 @@ export const AssetSchema = z.object({
 
 export const ObjectStoragePermissionSchema = z.enum(["asset:read", "asset:write"]);
 
+// A server-issued receipt, never accepted as proof from a client request.
+export const VerifiedImageSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: IdSchema,
+  tenantId: IdSchema,
+  asset: AssetSchema.extend({
+    kind: z.literal("image"),
+    mimeType: z.enum(["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"]),
+    byteSize: z.number().int().positive(),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    contentFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  }),
+  registeredMetadataSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  checksumSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  decoder: z.literal("sharp-full-decode-v1"),
+  verifiedBy: IdSchema,
+  verifiedAt: IsoDateSchema,
+}).strict().superRefine((receipt, context) => {
+  if (receipt.asset.contentFingerprint !== `sha256:${receipt.checksumSha256}`) context.addIssue({ code: "custom", message: "图片摘要不一致", path: ["asset", "contentFingerprint"] });
+  if (receipt.asset.purpose === "mask" && (!receipt.sourceChecksumSha256 || !receipt.asset.sourceAssetId || receipt.asset.mimeType !== "image/png")) {
+    context.addIssue({ code: "custom", message: "蒙版缺少已验证底图", path: ["sourceChecksumSha256"] });
+  }
+});
+
 const UploadObjectGrantRequestSchema = z.object({
   action: z.literal("upload"),
   projectId: IdSchema,
@@ -474,6 +500,7 @@ export const MockRunResultSchema = z.object({
 
 export type CanvasDocument = z.infer<typeof CanvasDocumentSchema>;
 export type Asset = z.infer<typeof AssetSchema>;
+export type VerifiedImage = z.infer<typeof VerifiedImageSchema>;
 export type ObjectStoragePermission = z.infer<typeof ObjectStoragePermissionSchema>;
 export type ObjectStorageGrantRequest = z.infer<typeof ObjectStorageGrantRequestSchema>;
 export type ObjectStorageGrant = z.infer<typeof ObjectStorageGrantSchema>;

@@ -454,6 +454,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       return { aggregate: this.copy(aggregate), leases: [] };
     }
 
+    this.validateBatchInputs(aggregate.batch);
+
     const projectKey = scopedProjectKey(aggregate.batch.tenantId, aggregate.batch.projectId);
     const active = this.activeJobs();
     const projectLimit = this.projectLimits.get(projectKey) ?? this.maxConcurrentJobs;
@@ -544,6 +546,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (recoveredExpired) this.persist();
       throw new RunKernelError(409, "run_job_lease_mismatch", "租约编号或执行器身份不匹配");
     }
+
+    this.validateBatchInputs(stored.aggregate.batch);
 
     const startedAt = new Date(this.clock()).toISOString();
     const running: RunJob = {

@@ -4,6 +4,7 @@ import type {
   ResolveBillingUnknownRequest, RunBatchAggregate, RunJob, BillingOverage,
 } from "@canvas/contracts";
 import { money, parseMoney, RUN_STATUS_LABEL, StudioRunClient } from "../runs/runClient";
+import { assetRepository } from "../assets/assetRepository";
 import "./RunPanel.css";
 
 type Props = {
@@ -157,6 +158,7 @@ export default function RunPanel(props: Props) {
     if (!assetId || !constraintId) throw new Error("请先导入商品图片，并保存一个人工约束快照。");
     if (!Number.isInteger(outputs) || outputs < 1 || outputs > 10) throw new Error("输出数量必须在 1–10 之间。");
     await client.register(contextRef.current);
+    await verifyInputs(client, [assetId], constraintId);
     const fields = {
       projectId, constraintSnapshotId: constraintId, tool: "product-retouch" as const,
       inputAssetIds: [assetId], expectedOutputs: outputs, maxCostMinor: parseMoney(ceiling),
@@ -172,6 +174,26 @@ export default function RunPanel(props: Props) {
     sessionStorage.removeItem(pendingKey);
     return created;
   });
+  const verifyInputs = async (client: StudioRunClient, inputIds: string[], snapshotId: string) => {
+    const snapshot = contextRef.current.constraints.find((item) => item.id === snapshotId);
+    if (!snapshot) throw new Error("原约束快照丢失，不能继续执行。");
+    const maskIds = snapshot.editableRegions.flatMap((region) => region.maskAssetId ? [region.maskAssetId] : []);
+    const ids = [...new Set([...inputIds, ...maskIds])];
+    for (const id of ids) {
+      const asset = contextRef.current.assets.find((item) => item.id === id && item.projectId === projectId);
+      if (!asset || asset.kind !== "image") throw new Error("任务原图或蒙版已丢失，不能继续执行。");
+      const blob = await assetRepository.getBlob(id, "original");
+      if (!blob) throw new Error("原文件已丢失，请先从备份恢复；不会仅用缩略图代替原图。");
+      if (alive.current) setMessage(`正在本机核验 ${asset.originalName}…`);
+      await client.verifyImage(projectId, id, blob, asset.mimeType);
+    }
+    if (alive.current) setMessage(`已通过本机图片校验（${ids.length} 个原文件 · 无外网上传）`);
+  };
+  const batchAction = (client: StudioRunClient, current: RunBatchAggregate, action: "confirm" | "dispatch") => (async () => {
+    await client.register(contextRef.current);
+    await verifyInputs(client, current.batch.inputAssetIds, current.batch.constraintSnapshotId);
+    return client.action(current, action);
+  })();
   const openDecision = (kind: "retry" | "billing", job: RunJob) => {
     if (!batch) return;
     setDecision({ kind, job, batch });
@@ -190,6 +212,8 @@ export default function RunPanel(props: Props) {
   const submitDecision = () => run(async (client) => {
     if (!decision) return;
     if (decision.kind === "retry") {
+      await client.register(contextRef.current);
+      await verifyInputs(client, decision.batch.batch.inputAssetIds, decision.batch.batch.constraintSnapshotId);
       const result = await client.retry(decision.job.id, decision.job.estimatedCostMinor, decision.batch.batch.currency);
       if (alive.current) setDecision(null);
       return result;
@@ -244,7 +268,7 @@ export default function RunPanel(props: Props) {
     <aside className="run-panel" aria-label="任务与预算" onPointerDown={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
       <header><div><span>本地模拟 · 真实费用 ¥0</span><strong>任务与预算</strong></div>
         <button aria-label="关闭任务面板" onClick={props.onClose}>×</button></header>
-      <p className="run-hint">先确定商品与约束，再查看预估并人工确认。这里的金额只演练预算，结果是模拟记录。</p>
+      <p className="run-hint">先确定商品与约束，再查看预估并人工确认。所需原图和蒙版会在本机服务校验并保留镜像，无外网上传；金额只演练预算，结果是模拟记录。</p>
       {budget && <dl className="run-budget">
         <div><dt>可用模拟预算</dt><dd>{money(budget.availableMinor)}</dd></div>
         <div><dt>预留</dt><dd>{money(budget.reservedMinor)}</dd></div>
@@ -289,8 +313,8 @@ export default function RunPanel(props: Props) {
           </p> : null;
         })()}
         <div className="run-actions">
-          {batch.batch.status === "awaiting_confirmation" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => client.action(batch, "confirm"))}>确认模拟成本并排队</button>}
-          {batch.jobs.some((job) => job.status === "queued") && batch.batch.status !== "billing_unknown" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => client.action(batch, "dispatch"))}>执行排队任务</button>}
+          {batch.batch.status === "awaiting_confirmation" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "confirm"))}>确认模拟成本并排队</button>}
+          {batch.jobs.some((job) => job.status === "queued") && batch.batch.status !== "billing_unknown" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "dispatch"))}>执行排队任务</button>}
           {batch.jobs.some((job) => job.status === "running") && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "reconcile"))}>检查运行状态</button>}
           {["awaiting_confirmation", "queued"].includes(batch.batch.status) && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "cancel"))}>取消批次</button>}
           {batch.jobs.some((job) => job.status === "succeeded") && <button disabled={busy} onClick={() => { props.onAddResults(batch); setMessage("已把模拟结果记录添加到画布，未生成图片文件。"); }}>结果回到画布</button>}

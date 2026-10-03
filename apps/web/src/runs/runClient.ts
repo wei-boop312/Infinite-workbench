@@ -2,6 +2,7 @@ import {
   ProjectBudgetSnapshotSchema,
   RunBatchAggregateSchema,
   RunBatchListSchema,
+  VerifiedImageSchema,
   type CreateRunBatchRequest,
   type RegisterRunContextRequest,
   type ResolveBillingUnknownRequest,
@@ -11,6 +12,24 @@ import {
 } from "@canvas/contracts";
 
 const ERROR_LABELS: Record<string, string> = {
+  run_asset_not_verified: "原图或蒙版尚未通过本机服务校验，请重新提交所需原文件。",
+  asset_verification_not_configured: "当前服务尚未启用图片验证，请正常重启更新后的本地工作台。",
+  verified_asset_not_found: "图片未登记或不属于当前项目。",
+  verified_asset_permission_denied: "当前身份没有图片写入权限。",
+  verified_asset_headers_invalid: "图片上传类型或摘要无效。",
+  verified_asset_size_mismatch: "图片真实大小与登记信息不一致。",
+  verified_asset_checksum_mismatch: "图片内容摘要与原资产不一致，请恢复原文件或创建新版本。",
+  verified_asset_mime_mismatch: "图片真实格式与文件类型不一致。",
+  verified_asset_decode_failed: "图片无法完整解码，可能已损坏或被截断，请使用完整原文件。",
+  verified_asset_dimensions_mismatch: "图片真实尺寸与登记信息不一致。",
+  verified_asset_dimensions_exceeded: "本机任务暂支持不超过 1600 万像素、单边 8192 像素的图片。",
+  verified_asset_animated: "动态图暂不能参与图片任务，请先导出静态帧。",
+  verified_asset_too_large: "图片原文件超过本机校验限制（30 MB）。",
+  verified_asset_project_quota: "本项目的本机图片镜像空间已满，未创建任务或扣费。",
+  verified_asset_busy: "本机正在校验其他图片，请稍后重试。",
+  verified_mask_source_invalid: "蒙版需要有透明通道的 PNG，且尺寸与已验证底图一致。",
+  verified_asset_metadata_changed: "资产登记信息已变化，请创建新版本。",
+  verified_asset_version_conflict: "同一资产编号不能替换为另一份内容，请创建新版本。",
   run_state_busy: "任务数据库正在处理另一个操作，请保留原动作编号后重试。",
   run_state_unavailable: "任务数据库不可用，未重置任何预算，请保留原动作编号并检查服务。",
   project_budget_exceeded: "项目模拟预算不足，请先处理仍占用预算的任务。",
@@ -67,13 +86,14 @@ export const RUN_STATUS_LABEL: Record<string, string> = {
 export class StudioRunClient {
   constructor(private readonly signal: AbortSignal) {}
 
-  private async request<T>(path: string, schema: { parse(value: unknown): T }, body?: unknown): Promise<T> {
+  private async request<T>(path: string, schema: { parse(value: unknown): T }, body?: unknown, upload?: { blob: Blob; mimeType: string; checksum: string }): Promise<T> {
     let response: Response;
     try {
       response = await fetch(`/studio-api${path}`, {
-        method: body === undefined ? "GET" : "POST",
-        headers: { "x-canvas-local": "1", ...(body === undefined ? {} : { "content-type": "application/json" }) },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        method: body === undefined && !upload ? "GET" : "POST",
+        headers: { "x-canvas-local": "1", ...(upload ? { "content-type": upload.mimeType, "x-content-sha256": upload.checksum }
+          : body === undefined ? {} : { "content-type": "application/json" }) },
+        body: upload ? upload.blob : body === undefined ? undefined : JSON.stringify(body),
         signal: this.signal,
       });
     } catch (error) {
@@ -87,11 +107,22 @@ export class StudioRunClient {
       const code = payload && typeof payload === "object" && "error" in payload ? String(payload.error) : "";
       throw new Error(ERROR_LABELS[code] ?? `任务操作失败（${code || response.status}），请刷新记录。`);
     }
-    return schema.parse(payload);
+    try { return schema.parse(payload); }
+    catch { throw new Error("任务服务没有返回符合合同的有效数据，未继续执行；请刷新记录。"); }
   }
 
   async register(context: RegisterRunContextRequest): Promise<void> {
     await this.request("/context", { parse: (value) => value }, context);
+  }
+  async verifyImage(projectId: string, assetId: string, blob: Blob, mimeType: string) {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+    const checksum = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const receipt = await this.request(`/v1/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/verification`, VerifiedImageSchema,
+      undefined, { blob, mimeType, checksum });
+    if (receipt.asset.projectId !== projectId || receipt.asset.id !== assetId || receipt.checksumSha256 !== checksum) {
+      throw new Error("图片校验结果与本次原文件不一致，未继续执行。");
+    }
+    return receipt;
   }
   list(projectId: string) {
     return this.request(`/v1/projects/${encodeURIComponent(projectId)}/run-batches`, RunBatchListSchema);

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { LocalRunCatalogSchema, RunKernelSnapshotSchema, type RunKernelSnapshot } from "@canvas/contracts";
+import { LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
@@ -38,7 +38,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
       this.transaction(() => {
         const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version);
-        if (version !== 0 && version !== 1) throw new Error("不支持此数据库版本，禁止覆盖");
+        if (version !== 0 && version !== 1 && version !== 2) throw new Error("不支持此数据库版本，禁止覆盖");
         this.database.exec(`CREATE TABLE IF NOT EXISTS kernel_state (
           kind TEXT PRIMARY KEY CHECK (kind IN ('runs', 'catalog')),
           revision INTEGER NOT NULL CHECK (revision > 0),
@@ -47,7 +47,16 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
         ) STRICT;
         CREATE TABLE IF NOT EXISTS state_presence (kind TEXT PRIMARY KEY) STRICT;
         CREATE TABLE IF NOT EXISTS kernel_configuration (id INTEGER PRIMARY KEY CHECK (id = 1), sha256 TEXT NOT NULL) STRICT;
-        PRAGMA user_version = 1`);
+        CREATE TABLE IF NOT EXISTS verified_images (
+          tenant_id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL,
+          record TEXT NOT NULL,
+          record_sha256 TEXT NOT NULL,
+          body BLOB NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, asset_id)
+        ) STRICT;
+        PRAGMA user_version = 2`);
       });
     } catch (error) {
       this.database.close();
@@ -101,6 +110,38 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   }
 
   saveCatalog(catalog: LocalCatalog): void { this.write("catalog", LocalRunCatalogSchema.parse(catalog)); }
+
+  loadVerifiedImage(tenantId: string, projectId: string, assetId: string): VerifiedImage | null {
+    try {
+      const row = this.database.prepare("SELECT record, record_sha256, body FROM verified_images WHERE tenant_id = ? AND project_id = ? AND asset_id = ?")
+        .get(tenantId, projectId, assetId);
+      if (!row) return null;
+      if (typeof row.record !== "string" || createHash("sha256").update(row.record).digest("hex") !== row.record_sha256 || !(row.body instanceof Uint8Array)) {
+        throw new Error("已验证图片记录损坏");
+      }
+      const record = VerifiedImageSchema.parse(JSON.parse(row.record));
+      if (record.tenantId !== tenantId || record.asset.projectId !== projectId || record.asset.id !== assetId
+        || record.asset.kind !== "image" || row.body.byteLength !== record.asset.byteSize
+        || createHash("sha256").update(row.body).digest("hex") !== record.checksumSha256
+        || record.asset.contentFingerprint !== `sha256:${record.checksumSha256}`) throw new Error("已验证图片归属或内容损坏");
+      return record;
+    } catch (error) { throw databaseError(error); }
+  }
+
+  saveVerifiedImage(incoming: VerifiedImage, body: Buffer): void {
+    if (this.depth === 0) throw new Error("必须在事务中保存图片验证结果");
+    const record = VerifiedImageSchema.parse(incoming);
+    if (body.byteLength !== record.asset.byteSize || createHash("sha256").update(body).digest("hex") !== record.checksumSha256) throw new Error("图片提交内容不一致");
+    const payload = JSON.stringify(record);
+    // Immutable asset versions. An existing identifier can only be replayed, never overwritten.
+    this.database.prepare("INSERT INTO verified_images(tenant_id, project_id, asset_id, record, record_sha256, body) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(record.tenantId, record.asset.projectId, record.asset.id, payload, createHash("sha256").update(payload).digest("hex"), body);
+  }
+
+  verifiedImageBytes(tenantId: string, projectId: string): number {
+    return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM verified_images WHERE tenant_id = ? AND project_id = ?")
+      .get(tenantId, projectId)?.bytes ?? 0);
+  }
 
   assertConfiguration(configuration: unknown): void {
     if (this.depth === 0) throw new Error("必须在事务中核对执行配置");

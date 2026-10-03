@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { money, parseMoney, StudioRunClient } from "../apps/web/src/runs/runClient";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -31,5 +32,27 @@ describe("画布任务客户端", () => {
     await expect(client.budget("project-a")).rejects.toThrow(/可安全重试/);
     fetchMock.mockResolvedValueOnce(new Response("<html></html>", { status: 200 }));
     await expect(client.list("project-a")).rejects.toThrow(/有效数据/);
+  });
+  it("只把原文件发到同源核验入口，计算实际 SHA-256，不接受自报成功", async () => {
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" });
+    const sum = createHash("sha256").update(new Uint8Array([1, 2, 3])).digest("hex");
+    const receipt = { schemaVersion: 1, id: "verification-1", tenantId: "local-studio", checksumSha256: sum, registeredMetadataSha256: "0".repeat(64),
+      decoder: "sharp-full-decode-v1", verifiedBy: "local-designer", verifiedAt: "2026-10-03T00:00:00Z",
+      asset: { id: "asset-1", projectId: "project-a", kind: "image", mimeType: "image/png", byteSize: 3, width: 1, height: 1,
+        storageKey: "local-verified:server", contentFingerprint: `sha256:${sum}`, originalName: "source.png", createdAt: "2026-10-03T00:00:00Z" } };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(receipt), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new StudioRunClient(new AbortController().signal);
+    expect(await client.verifyImage("project-a", "asset-1", blob, "image/png")).toEqual(receipt);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/studio-api/v1/projects/project-a/assets/asset-1/verification");
+    expect(options.method).toBe("POST"); expect(options.body).toBe(blob);
+    expect(options.headers).toEqual({ "x-canvas-local": "1", "content-type": "image/png", "x-content-sha256": sum });
+    fetchMock.mockResolvedValueOnce(new Response('{"verified":true}', { status: 200 }));
+    await expect(client.verifyImage("project-a", "asset-1", blob, "image/png")).rejects.toThrow(/有效数据/);
+    fetchMock.mockResolvedValueOnce(new Response('{"error":"verified_asset_decode_failed"}', { status: 422 }));
+    await expect(client.verifyImage("project-a", "asset-1", blob, "image/png")).rejects.toThrow(/完整解码/);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ...receipt, asset: { ...receipt.asset, projectId: "another-project" } }), { status: 200 }));
+    await expect(client.verifyImage("project-a", "asset-1", blob, "image/png")).rejects.toThrow(/不一致/);
   });
 });

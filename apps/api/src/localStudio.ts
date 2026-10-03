@@ -13,6 +13,7 @@ import { InMemoryRunKernel, RunKernelError, type RunAuthorizer } from "./runKern
 import { FileRunKernelStateStore } from "./runKernelStore";
 import { SqliteRunKernel } from "./sqliteRunKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
+import { LocalVerifiedAssets } from "./verifiedAssets";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -39,6 +40,12 @@ export function createLocalStudioMiddleware(directory: string) {
       && ((principal.actorId === actorId && permission !== "run:approve-billing-overage")
         || (principal.actorId === "local-reviewer" && ["run:read", "run:approve-billing-overage"].includes(permission))),
   };
+  const verifiedAssets = new LocalVerifiedAssets({ stateStore, authorizer: {
+    authenticate: authorizer.authenticate,
+    allows: (principal, projectId, permission) => principal.tenantId === tenantId && Boolean(project(projectId))
+      && (principal.actorId === actorId || (principal.actorId === "local-reviewer" && permission === "asset:read")),
+  }, findAsset: (assetTenantId, projectId, assetId) => assetTenantId === tenantId
+    ? project(projectId)?.assets.find((item) => item.id === assetId) ?? null : null });
   const validateInputs = (_tenantId: string, request: CreateRunBatchRequest) => {
     const context = project(request.projectId);
     const constraint = context?.constraints.find((item) => item.id === request.constraintSnapshotId);
@@ -51,6 +58,7 @@ export function createLocalStudioMiddleware(directory: string) {
       if (!asset || asset.kind !== "image" || asset.purpose === "mask") {
         throw new RunKernelError(422, "run_input_asset_invalid", "输入必须是当前项目的商品图片");
       }
+      verifiedAssets.requireImage(_tenantId, request.projectId, id);
     }
     for (const region of constraint.editableRegions) {
       if (!region.maskAssetId) continue;
@@ -58,6 +66,7 @@ export function createLocalStudioMiddleware(directory: string) {
       if (!mask || mask.purpose !== "mask" || !mask.sourceAssetId || !request.inputAssetIds.includes(mask.sourceAssetId)) {
         throw new RunKernelError(422, "run_mask_source_mismatch", "蒙版必须来自所选商品图片");
       }
+      verifiedAssets.requireImage(_tenantId, request.projectId, mask.id);
     }
   };
   const kernelOptions = {
@@ -96,7 +105,7 @@ export function createLocalStudioMiddleware(directory: string) {
   const registerBudget = (projectId: string) => kernel.registerLocalProject({
     tenantId, projectId, currency: "CNY", limitMinor: 10_000,
   });
-  const api = createApiServer({ runKernel: kernel! });
+  const api = createApiServer({ runKernel: kernel!, verifiedAssets });
 
   const registerContext = (incoming: RegisterRunContextRequest) => {
     for (const asset of incoming.assets) {

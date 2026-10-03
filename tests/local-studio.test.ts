@@ -1,4 +1,5 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,7 @@ import { FileRunKernelStateStore } from "../apps/api/src/runKernelStore";
 const directories: string[] = [];
 const servers: Server[] = [];
 const studios: Array<ReturnType<typeof createLocalStudioMiddleware>> = [];
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
   for (const studio of studios.splice(0)) studio.close();
@@ -29,7 +31,7 @@ async function listen(path: string) {
   return `http://127.0.0.1:${address.port}`;
 }
 function context(projectId = "project-a"): RegisterRunContextRequest {
-  return { projectId, assets: [{ id: `asset-${projectId}`, projectId, kind: "image", purpose: "source", originalName: "product.png", storageKey: "indexeddb://original", mimeType: "image/png", byteSize: 70, createdAt: "2026-10-03T00:00:00Z" }],
+  return { projectId, assets: [{ id: `asset-${projectId}`, projectId, kind: "image", purpose: "source", originalName: "product.png", storageKey: "indexeddb://original", mimeType: "image/png", byteSize: png.length, createdAt: "2026-10-03T00:00:00Z" }],
     constraints: [{ id: `constraint-${projectId}`, projectId, lockedPaths: ["product.pixels"], editableRegions: [{ id: "background", description: "仅背景" }], brandRules: {}, outputSpec: { width: 1200, height: 1200, format: "png" }, createdAt: "2026-10-03T00:00:00Z" }] };
 }
 function request(projectId = "project-a") {
@@ -37,6 +39,13 @@ function request(projectId = "project-a") {
 }
 function call(url: string, path: string, body?: unknown) {
   return fetch(`${url}/studio-api${path}`, { method: body === undefined ? "GET" : "POST", headers: { "x-canvas-local": "1", ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body) });
+}
+async function verify(url: string, projectId = "project-a") {
+  const response = await fetch(`${url}/studio-api/v1/projects/${projectId}/assets/asset-${projectId}/verification`, {
+    method: "POST", headers: { "x-canvas-local": "1", "content-type": "image/png", "x-content-sha256": createHash("sha256").update(png).digest("hex") }, body: png,
+  });
+  expect(response.status).toBe(200);
+  return response.json();
 }
 function rawStatus(url: string, headers: Record<string, string>) {
   return new Promise<number>((resolve, reject) => {
@@ -69,6 +78,7 @@ describe("本地画布任务桥接", () => {
     expect(await foreign.json()).toEqual({ error: "run_input_asset_invalid" });
     const missing = await call(url, "/v1/run-batches", { ...request(), constraintSnapshotId: "foreign-constraint" });
     expect(await missing.json()).toEqual({ error: "run_constraint_not_found" });
+    await verify(url);
     const mask = { ...original.assets[0], id: "mask-1", purpose: "mask", sourceAssetId: "asset-other" };
     const masked = { ...original.constraints[0], id: "masked-constraint", editableRegions: [{ id: "background", description: "仅背景", maskAssetId: mask.id }] };
     expect((await call(url, "/context", { projectId: original.projectId, assets: [mask], constraints: [masked] })).status).toBe(200);
@@ -82,8 +92,10 @@ describe("本地画布任务桥接", () => {
     const path = directory();
     const first = await listen(path);
     for (const id of ["project-a", "imported-copy"]) expect((await call(first, "/context", context(id))).status).toBe(200);
+    const receipt = await verify(first);
     const draft = await (await call(first, "/v1/run-batches", request())).json() as RunBatchAggregate;
     const second = await listen(path);
+    expect(await verify(second)).toEqual(receipt);
     const list = await (await call(second, "/v1/projects/project-a/run-batches")).json() as RunBatchAggregate[];
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ batch: { id: draft.batch.id, status: "awaiting_confirmation" }, jobs: [] });
@@ -132,6 +144,8 @@ describe("本地画布任务桥接", () => {
     const first = await listen(path);
     expect((await (await call(first, "/v1/run-batches", request())).json() as RunBatchAggregate).batch.id).toBe(draft.batch.id);
     expect(await (await call(first, "/v1/projects/project-a/budget")).json()).toMatchObject({ reservedMinor: 50, spentMinor: 0 });
+    expect(await (await call(first, `/v1/run-batches/${draft.batch.id}/dispatch`, {})).json()).toEqual({ error: "run_asset_not_verified" });
+    await verify(first);
     await call(first, `/v1/run-batches/${draft.batch.id}/dispatch`, {});
     const second = await listen(path);
     expect(await (await call(second, "/v1/projects/project-a/budget")).json()).toMatchObject({ reservedMinor: 0, spentMinor: 40 });
@@ -171,6 +185,7 @@ describe("本地画布任务桥接", () => {
   it("共享状态的两个服务及时看见新增项目和输入，不覆盖对方目录或预算", async () => {
     const path = directory(); const first = await listen(path); const second = await listen(path);
     await Promise.all([call(first, "/context", context()), call(second, "/context", context("project-b"))]);
+    await verify(second); await verify(first, "project-b");
     expect((await call(second, "/v1/run-batches", request())).status).toBe(201);
     expect((await call(first, "/v1/run-batches", request("project-b"))).status).toBe(201);
     const a = context(); const b = context();
@@ -182,5 +197,17 @@ describe("本地画布任务桥接", () => {
       expect(store.loadCatalog()?.projects.find((item) => item.projectId === "project-a")?.assets).toHaveLength(3);
       expect(store.load()?.budgets).toHaveLength(2);
     } finally { store.close(); }
+  });
+
+  it("只有登记信息不能创建任务，原文件验证失败不产生预算或任务", async () => {
+    const url = await listen(directory());
+    await call(url, "/context", context());
+    const response = await call(url, "/v1/run-batches", request());
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "run_asset_not_verified" });
+    expect(await (await call(url, "/v1/projects/project-a/run-batches")).json()).toEqual([]);
+    expect(await (await call(url, "/v1/projects/project-a/budget")).json()).toMatchObject({ reservedMinor: 0, spentMinor: 0 });
+    await verify(url);
+    expect((await call(url, "/v1/run-batches", request())).status).toBe(201);
   });
 });

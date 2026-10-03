@@ -6,7 +6,7 @@
 
 本地工作台从单进程原子 JSON 改为 `SqliteRunKernel` / `SqliteRunKernelStateStore`。它们使用 Node.js 内建 `node:sqlite`，实测 Node 24.19.0 / SQLite 3.53.3；根项目声明相应 Node 版本要求。
 
-生产路线的 PostgreSQL 不变。SQLite 仅是无需额外安装的本机事务适配器，不是生产 PostgreSQL 已上线，也不是把整个画布搬到数据库：画布及媒体仍在浏览器本地，数据库只保存模拟任务、预算、目录和证据。
+生产路线的 PostgreSQL 不变。SQLite 仅是无需额外安装的本机事务适配器，不是生产 PostgreSQL 已上线，也不是把整个画布搬到数据库：画布及原始媒体仍在浏览器本地；第九里程碑增加所需已验证图片的本机 BLOB 镜像，模拟任务、预算、目录和证据仍独立保存，媒体不写入画布或任务聚合 JSON。
 
 ## 一次操作的原子边界
 
@@ -50,9 +50,9 @@
 
 - 数据采用合同聚合 JSON 行，不是规范化财务表；未提供 PostgreSQL 行锁、跨机器 Worker、生产队列或可扩展索引。
 - 同步全局写锁和完整聚合校验适合小规模本机模拟，不是高吞吐生产服务。
-- 目录仍来源于浏览器元数据登记，未验证真实图片字节、对象存储内容或供应商产物。
+- 目录仍来源于浏览器元数据登记；第九里程碑已校验并保留真实静态图片原文件（见 `verified-image-ingestion.md`），但生产资产身份授权、对象存储和供应商产物尚未接入。
 - 尚无真实多成员鉴权、付费调用、在线数据库备份和密钥服务。
 
-下一步是权威资产校验；这些边界解除前不能将本机演示宣称为生产可用。
+第九里程碑原子升级数据库为 v2，增加不可变图片原文件与收据。以上生产边界解除前不能将本机演示宣称为生产可用。
 
 官方依据：[SQLite 事务](https://www.sqlite.org/lang_transaction.html)、[WAL 边界](https://www.sqlite.org/wal.html)、[Node.js SQLite API](https://nodejs.org/api/sqlite.html)。

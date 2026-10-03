@@ -18,6 +18,7 @@ import { migrateCanvasDocument } from "@canvas/canvas-schema";
 import { executeMockRun } from "@canvas/testing";
 import { ObjectStorageGatewayError, type SignedObjectGateway } from "./objectStorageGateway";
 import { RunKernelError, type RunKernelPort } from "./runKernel";
+import type { VerifiedAssetPort } from "./verifiedAssets";
 
 const MAX_RUN_BODY_BYTES = 64 * 1024;
 const MAX_CANVAS_BODY_BYTES = 2 * 1024 * 1024;
@@ -26,6 +27,7 @@ const MAX_STORAGE_GRANT_BODY_BYTES = 16 * 1024;
 export type ApiServerOptions = {
   objectStorageGateway?: SignedObjectGateway;
   runKernel?: RunKernelPort;
+  verifiedAssets?: VerifiedAssetPort;
 };
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -67,11 +69,31 @@ export function createApiServer(options: ApiServerOptions = {}) {
         realExecutorsEnabled: false,
         objectStorageSigningEnabled: Boolean(options.objectStorageGateway),
         runKernelEnabled: Boolean(options.runKernel),
+        assetVerificationEnabled: Boolean(options.verifiedAssets),
       });
       return;
     }
 
     const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    const verificationMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/assets\/([^/]+)\/verification$/);
+    if (verificationMatch && ["GET", "POST"].includes(request.method ?? "")) {
+      const assets = options.verifiedAssets;
+      if (!assets) { sendJson(response, 503, { error: "asset_verification_not_configured" }); return; }
+      const principal = assets.authenticate(request);
+      if (!principal) { sendJson(response, 401, { error: "asset_authentication_required" }); return; }
+      try {
+        const projectId = decodeURIComponent(verificationMatch[1]);
+        const assetId = decodeURIComponent(verificationMatch[2]);
+        const receipt = request.method === "POST"
+          ? await assets.verify(principal, projectId, assetId, request)
+          : assets.get(principal, projectId, assetId);
+        sendJson(response, 200, receipt);
+      } catch (error) {
+        if (error instanceof RunKernelError) sendJson(response, error.status, { error: error.code });
+        else sendJson(response, 503, { error: "run_state_unavailable" });
+      }
+      return;
+    }
     if (pathname === "/v1/run-batches" && request.method === "POST") {
       const kernel = options.runKernel;
       if (!kernel) {
