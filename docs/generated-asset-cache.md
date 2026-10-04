@@ -1,5 +1,7 @@
 # 阶段 4 里程碑 5B3B：浏览器生成原文件缓存
 
+生产增量见[production-generated-asset-cache.md](production-generated-asset-cache.md)：IndexedDB当前v4仅追加独立productionGeneratedCaches并保留本页旧local资产/BLOB/generatedCaches。本页5B3B是local历史合同，不能改标生产或将unknown估价补0/上限。
+
 日期：2026-10-04（上海）。状态：**本地受控下载/原图与代理缓存已验收；供应商选择、参数报价确认、任务结果画布回流及里程碑 5 整体尚未完成**。浏览器缓存不是生成权限、入库收据或计费结论。
 
 ## 两个既有读取端点

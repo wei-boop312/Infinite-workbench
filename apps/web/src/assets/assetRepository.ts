@@ -1,11 +1,13 @@
-import type { Asset, VerifiedImage } from "@canvas/contracts";
+import type { Asset, VerifiedImage, ProductionGeneratedAssetLineage } from "@canvas/contracts";
 import { assertGeneratedReceipt, blobSha256 } from "./generatedAssetPolicy";
+import type { ProductionCacheRecord } from "./productionGeneratedAssetPolicy";
 
 const DATABASE_NAME = "ai-commerce-canvas-assets";
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const ASSET_STORE = "assets";
 const BLOB_STORE = "blobs";
 const GENERATED_CACHE_STORE = "generatedCaches";
+const PRODUCTION_CACHE_STORE = "productionGeneratedCaches";
 let generatedReads = 0;
 type GeneratedCacheRecord = { assetId: string; projectId: string; tenantId: string; metadata: string; checksum: string };
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
@@ -101,6 +103,7 @@ function openDatabase(signal?: AbortSignal): Promise<IDBDatabase> {
         blobs.createIndex("assetId", "assetId", { unique: false });
       }
       if (!database.objectStoreNames.contains(GENERATED_CACHE_STORE)) database.createObjectStore(GENERATED_CACHE_STORE, { keyPath: "assetId" });
+      if (!database.objectStoreNames.contains(PRODUCTION_CACHE_STORE)) database.createObjectStore(PRODUCTION_CACHE_STORE, { keyPath: "assetId" });
     };
     request.onsuccess = () => { signal?.removeEventListener("abort", abort); if (signal?.aborted) request.result.close(); else resolve(request.result); };
     request.onerror = () => { signal?.removeEventListener("abort", abort); reject(request.error ?? new Error("无法打开浏览器资产库")); };
@@ -298,6 +301,90 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
     }
   }
 
+  // Independent production marker, never synthesized by ordinary restore or
+  // legacy cacheGenerated. Original metadata remains exactly the server receipt.
+  async cacheProductionGenerated(input: ProductionGeneratedAssetLineage, original: Blob, abortSignal: AbortSignal,
+    reauthorize: () => Promise<ProductionGeneratedAssetLineage>): Promise<Asset> {
+    const frozen = structuredClone(input); abortSignal.throwIfAborted();
+    const { assertProductionLineage, productionCacheIdentity, ProductionReadLifetime, productionMarkerMatches } = await import("./productionGeneratedAssetPolicy");
+    const life = new ProductionReadLifetime(abortSignal, "production-local-validation");
+    try {
+      const view = await life.wait(assertProductionLineage(frozen, { generatedReadUiEnabled: true, tenantId: frozen.tenantId, mode: frozen.mode }, frozen.projectId, frozen.image.asset.id));
+      const asset = view.image.asset;
+      if (original.size !== asset.byteSize || original.type !== asset.mimeType || await life.wait(blobSha256(original)) !== view.image.checksumSha256) throw new Error("生产原图缓存字节错配。");
+      const { width, height, proxy } = await life.wait(inspectImage(original));
+      if (width !== asset.width || height !== asset.height) throw new Error("生产原图缓存实际尺寸错配。");
+      // Fresh permission/full-chain server read after native decoding, before IDB.
+      const latest = await life.wait(reauthorize());
+      await life.wait(assertProductionLineage(latest, { generatedReadUiEnabled: true, tenantId: view.tenantId, mode: view.mode }, view.projectId, asset.id));
+      if (productionCacheIdentity(latest) !== productionCacheIdentity(view)) throw new Error("生产原图完整冻结关系漂移。");
+      const marker: ProductionCacheRecord = { version: 1, assetId: asset.id, tenantId: view.tenantId, projectId: view.projectId, mode: view.mode, identity: productionCacheIdentity(view), lineage: view };
+      if (new TextEncoder().encode(JSON.stringify(marker)).length > 512 * 1024) throw new Error("生产原图缓存谱系过大。");
+      const database = await life.wait(openDatabase(life.signal), db => db.close());
+      try {
+        life.check();
+        const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE, PRODUCTION_CACHE_STORE], "readwrite"), done = transactionComplete(transaction);
+        void done.catch(() => undefined);
+        const abort = () => { try { transaction.abort(); } catch { /* A committed authorized local copy is retained. */ } };
+        life.signal.addEventListener("abort", abort, { once: true });
+        try {
+          const assets = transaction.objectStore(ASSET_STORE), markers = transaction.objectStore(PRODUCTION_CACHE_STORE), blobs = transaction.objectStore(BLOB_STORE);
+          const [existing, previous, local, oldOriginal, oldProxy] = await life.wait(Promise.all([
+            requestResult(assets.get(asset.id) as IDBRequest<Asset | undefined>), requestResult(markers.get(asset.id) as IDBRequest<ProductionCacheRecord | undefined>),
+            requestResult(transaction.objectStore(GENERATED_CACHE_STORE).get(asset.id)), requestResult(blobs.get(`${asset.id}:original`)), requestResult(blobs.get(`${asset.id}:proxy`)),
+          ]));
+          life.check();
+          if (local || (!!existing !== !!previous) || (!existing && (oldOriginal || oldProxy))
+            || (existing && (JSON.stringify(existing) !== JSON.stringify(asset) || !productionMarkerMatches(previous, view)))) throw new Error("生产原图缓存编号、范围或独立标记冲突。");
+          if (!existing) assets.add(asset);
+          blobs.put({ key: `${asset.id}:original`, assetId: asset.id, role: "original", blob: original } satisfies BlobRecord);
+          blobs.put({ key: `${asset.id}:proxy`, assetId: asset.id, role: "proxy", blob: proxy } satisfies BlobRecord);
+          if (!previous) markers.add(marker);
+          life.check(); await life.wait(done); return structuredClone(asset);
+        } catch (e) { abort(); await done.catch(() => undefined); throw e; }
+        finally { life.signal.removeEventListener("abort", abort); }
+      } finally { database.close(); }
+    } finally { life.close(); }
+  }
+
+  async readProductionGenerated(input: ProductionGeneratedAssetLineage, abortSignal: AbortSignal): Promise<Asset> {
+    const frozen = structuredClone(input); abortSignal.throwIfAborted();
+    const { assertProductionLineage, ProductionReadLifetime, productionMarkerMatches } = await import("./productionGeneratedAssetPolicy");
+    const life = new ProductionReadLifetime(abortSignal, "production-local-validation");
+    try {
+      const view = await life.wait(assertProductionLineage(frozen, { generatedReadUiEnabled: true, tenantId: frozen.tenantId, mode: frozen.mode }, frozen.projectId, frozen.image.asset.id));
+      const expected = view.image.asset, database = await life.wait(openDatabase(life.signal), db => db.close());
+      let asset: Asset | undefined, marker: ProductionCacheRecord | undefined, original: BlobRecord | undefined, proxy: BlobRecord | undefined, local: unknown;
+      try {
+        life.check();
+        const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE, PRODUCTION_CACHE_STORE], "readonly"), done = transactionComplete(transaction);
+        void done.catch(() => undefined);
+        const abort = () => { try { transaction.abort(); } catch { /* Read snapshot already completed. */ } };
+        life.signal.addEventListener("abort", abort, { once: true });
+        try {
+          [asset, marker, original, proxy, local] = await life.wait(Promise.all([
+            requestResult(transaction.objectStore(ASSET_STORE).get(expected.id) as IDBRequest<Asset | undefined>),
+            requestResult(transaction.objectStore(PRODUCTION_CACHE_STORE).get(expected.id) as IDBRequest<ProductionCacheRecord | undefined>),
+            requestResult(transaction.objectStore(BLOB_STORE).get(`${expected.id}:original`) as IDBRequest<BlobRecord | undefined>),
+            requestResult(transaction.objectStore(BLOB_STORE).get(`${expected.id}:proxy`) as IDBRequest<BlobRecord | undefined>),
+            requestResult(transaction.objectStore(GENERATED_CACHE_STORE).get(expected.id)),
+          ]));
+          await life.wait(done);
+        } catch (e) { abort(); await done.catch(() => undefined); throw e; }
+        finally { life.signal.removeEventListener("abort", abort); }
+      } finally { database.close(); }
+      if (local || !asset || !productionMarkerMatches(marker, view) || JSON.stringify(asset) !== JSON.stringify(expected)
+        || !original || original.key !== `${expected.id}:original` || original.assetId !== expected.id || original.role !== "original"
+        || !(original.blob instanceof Blob) || original.blob.size !== expected.byteSize || original.blob.type !== expected.mimeType
+        || !proxy || proxy.key !== `${expected.id}:proxy` || proxy.assetId !== expected.id || proxy.role !== "proxy" || !(proxy.blob instanceof Blob) || !proxy.blob.size) throw new Error("生产原图缓存不完整或独立标记错配；普通恢复和副本不能替代。");
+      if (await life.wait(blobSha256(original.blob)) !== view.image.checksumSha256) throw new Error("生产原图缓存实际 SHA 错配。");
+      const bitmap = await life.wait(createImageBitmap(original.blob), late => late.close());
+      try { if (bitmap.width !== expected.width || bitmap.height !== expected.height) throw new Error("生产原图缓存实际尺寸错配。"); }
+      finally { bitmap.close(); }
+      life.check(); return structuredClone(asset);
+    } finally { life.close(); }
+  }
+
   async cacheGenerated(input: VerifiedImage, original: Blob, signal: AbortSignal): Promise<Asset> {
     const { VerifiedImageSchema } = await import("@canvas/contracts");
     const receipt = VerifiedImageSchema.parse(structuredClone(input)), asset = receipt.asset;
@@ -409,9 +496,10 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
       const lookup = database.transaction(ASSET_STORE, "readonly");
       const asset = await requestResult(lookup.objectStore(ASSET_STORE).get(assetId) as IDBRequest<Asset | undefined>);
       if (!asset || asset.projectId !== projectId) return false;
-      const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE], "readwrite");
+      const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE, PRODUCTION_CACHE_STORE], "readwrite");
       transaction.objectStore(ASSET_STORE).delete(assetId);
       transaction.objectStore(GENERATED_CACHE_STORE).delete(assetId);
+      transaction.objectStore(PRODUCTION_CACHE_STORE).delete(assetId);
       transaction.objectStore(BLOB_STORE).delete(`${assetId}:original`);
       transaction.objectStore(BLOB_STORE).delete(`${assetId}:proxy`);
       await transactionComplete(transaction);

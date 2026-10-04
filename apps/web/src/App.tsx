@@ -35,7 +35,7 @@ import {
   type NodeProps,
   type Viewport,
 } from "@xyflow/react";
-import type { Asset, CanvasDocument, ConstraintSnapshot, GeneratedAssetLineage, RunBatchAggregate, ProductionImageUiScope } from "@canvas/contracts";
+import type { Asset, CanvasDocument, ConstraintSnapshot, GeneratedAssetLineage, RunBatchAggregate, ProductionImageUiScope, ProductionGeneratedReadScope } from "@canvas/contracts";
 import { executeMockRun } from "@canvas/testing/browser";
 import { assetRepository, formatAssetBytes, type AssetUsage } from "./assets/assetRepository";
 import { documentToSnapshot, snapshotFingerprint, snapshotToDocument } from "./canvas/document";
@@ -177,7 +177,8 @@ const uploadManager = new ResumableUploadManager(mockObjectStorage);
 
 type SaveState = "loading" | "dirty" | "saving" | "saved" | "conflict" | "error";
 
-function CanvasKernel({ productionImagePreparation }: { productionImagePreparation?: ProductionImageUiScope }) {
+type ProductionAppProps = { productionImagePreparation?: ProductionImageUiScope; productionGeneratedRead?: ProductionGeneratedReadScope };
+function CanvasKernel({ productionImagePreparation, productionGeneratedRead }: ProductionAppProps) {
   const [history, dispatch] = useReducer(historyReducer, initialSnapshot, createHistoryState);
   const [viewport, setViewport] = useState<Viewport>(initialViewport);
   const [importedProjects, setImportedProjects] = useState<ImportedProject[]>(loadImportedProjects);
@@ -1272,7 +1273,7 @@ function CanvasKernel({ productionImagePreparation }: { productionImagePreparati
         />
 
         {runPanelOpen && <Suspense fallback={<aside className="inspector" role="status">正在加载任务面板…</aside>}>
-          <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots} productionImagePreparation={productionImagePreparation}
+          <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots} productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead}
             missingOriginalAssetIds={missingOriginalAssetIds} onClose={() => setRunPanelOpen(false)}
             onBatches={rememberRunReferences} onAddResults={addRunResults} onAddGenerated={addGeneratedResult} onCachedAsset={(asset) => {
               if (asset.projectId === activeProjectIdRef.current) setAssetCatalogRevision((revision) => revision + 1);
@@ -1386,8 +1387,8 @@ function CanvasKernel({ productionImagePreparation }: { productionImagePreparati
   );
 }
 
-export default function App({ productionImagePreparation }: { productionImagePreparation?: ProductionImageUiScope } = {}) {
+export default function App({ productionImagePreparation, productionGeneratedRead }: ProductionAppProps = {}) {
   // Only trusted host code supplies this optional config. No query, environment,
   // window-global or localStorage switch; the daily main entry omits it.
-  return <ReactFlowProvider><CanvasKernel productionImagePreparation={productionImagePreparation} /></ReactFlowProvider>;
+  return <ReactFlowProvider><CanvasKernel productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead} /></ReactFlowProvider>;
 }

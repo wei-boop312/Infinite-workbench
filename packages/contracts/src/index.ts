@@ -803,6 +803,8 @@ export type ProductionImageConfirmationHistory = z.infer<typeof ProductionImageC
 // Trusted host UI configuration, never a server authorization or browser preference.
 export const ProductionImageUiScopeSchema = z.object({ preparationUiEnabled: z.literal(true), tenantId: IdSchema, mode: ProductionPublicMode }).strict();
 export type ProductionImageUiScope = z.infer<typeof ProductionImageUiScopeSchema>;
+export const ProductionGeneratedReadScopeSchema = z.object({ generatedReadUiEnabled: z.literal(true), tenantId: IdSchema, mode: ProductionPublicMode }).strict();
+export type ProductionGeneratedReadScope = z.infer<typeof ProductionGeneratedReadScopeSchema>;
 export const ProductionImageRecoverySchema = z.object({
   schemaVersion: z.literal(1), tenantId: IdSchema, projectId: IdSchema, mode: ProductionPublicMode,
   actionId: IdSchema, stage: z.enum(["preparing", "prepared", "confirm-submitted"]),

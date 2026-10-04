@@ -310,7 +310,7 @@ test("未缓存时拒绝；良好缓存也不能用上次谱系授权绕过撤�
 for (const damage of ["marker", "original", "metadata", "checksum", "foreign-project", "ordinary-restored"] as const) test(`实际任务仍绑定但${damage}缓存损坏拒绝回画布，不改费用或删除文件`, async ({ page }) => {
   const { f, record } = await prepareBoundResult(page); await cacheBoundResult(page); const count = await page.locator(".react-flow__node").count(), before = f.snapshot();
   await page.evaluate(async ({ id, damage }) => {
-    const database = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("ai-commerce-canvas-assets", 3); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("ai-commerce-canvas-assets"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
     try {
       const transaction = database.transaction(["assets", "blobs", "generatedCaches"], "readwrite"), done = new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
       const assets = transaction.objectStore("assets"), blobs = transaction.objectStore("blobs"), markers = transaction.objectStore("generatedCaches");
