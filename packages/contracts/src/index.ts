@@ -4,6 +4,7 @@ import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, Prod
 
 export * from "./imageProviders.ts";
 export * from "./productionImagePricing.ts";
+export * from "./productionImageBilling.ts";
 
 export const CURRENT_CANVAS_SCHEMA_VERSION = 2 as const;
 

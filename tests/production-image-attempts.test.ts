@@ -28,12 +28,20 @@ describe("6D5 实际尝试绑定凭证和原生网络，只有零费用独立本
   describe.each((["openai", "openai-compatible", "google"] as const).flatMap(protocol => [true, false].flatMap(manual => [true, false].map(edit => [protocol, manual, edit] as const))))(
     "%s manual=%s edit=%s", (protocol, manual, edit) => {
     let t: Awaited<ReturnType<typeof live>>;
+    let reservedBefore: number;
     // Preparation/confirmation are fixture setup, separate from the bounded
     // live execution; both keep the unchanged default test/hook deadlines.
-    beforeEach(async () => { t = await live({ protocol, manual, edit, network: true }); });
+    beforeEach(async () => {
+      t = await live({ protocol, manual, edit, network: true });
+      reservedBefore = t.f.kernel.getBudget(principal, "project-a").reservedMinor;
+    });
     it("不伪填估价并保存当次原包", async () => {
-      const n = t.network!, budget = t.f.kernel.getBudget(principal, "project-a");
-      n.hooks.write = () => { expect(t.saved().productionImageAttempt?.state).toBe("attempted"); expect(t.saved().productionImageResult).toBeUndefined(); };
+      const n = t.network!;
+      n.hooks.write = () => {
+        const beforeWrite = t.saved();
+        expect(beforeWrite.productionImageAttempt?.state).toBe("attempted");
+        expect(beforeWrite.productionImageResult).toBeUndefined();
+      };
       const result = await t.execute(), saved = t.saved(), capture = n.captures[0], headers = capture.headers as Record<string, string>;
       expect(result.aggregate.batch.status).toBe("billing_unknown"); expect(saved.productionImageResult?.kind).toBe("returned");
       expect(saved.productionImageAttempt?.transport).toBe("contract-fixture"); expect(saved.aggregate.jobs[0].estimatedCostMinor).toBe(manual ? null : 25);
@@ -45,10 +53,18 @@ describe("6D5 实际尝试绑定凭证和原生网络，只有零费用独立本
       expect(headers["content-length"]).toBe(String(capture.sentBody!.length)); expect(sha(capture.sentBody!)).toBe(saved.productionImageAttempt?.payloadChecksumSha256);
       expect(capture.rejectUnauthorized).toBe(true); expect(capture.servername).toBe(new URL(t.config.baseUrl).hostname);
       expect(JSON.stringify(result)).not.toContain(n.secret.toString()); expect(JSON.stringify(result)).not.toContain(t.config.credentialRef);
-      expect(t.f.kernel.getBudget(principal, "project-a").reservedMinor).toBe(budget.reservedMinor);
-      const reads = vi.mocked(n.options.credentials.rootKeys.withRootKey).mock.calls.length;
-      expect((await t.execute()).started).toBe(false); expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1);
-      expect(n.options.credentials.rootKeys.withRootKey).toHaveBeenCalledTimes(reads);
+    });
+    describe("已提交当次历史", () => {
+      // A separate live setup and assertion phase retain the same default
+      // deadlines, without putting a second complete recovery in the send test.
+      beforeEach(async () => { await t.execute(); });
+      it("保留未知预留且重复只读不再次消费凭证或发送", async () => {
+        const n = t.network!, reads = vi.mocked(n.options.credentials.rootKeys.withRootKey).mock.calls.length;
+        expect(t.f.kernel.getBudget(principal, "project-a").reservedMinor).toBe(reservedBefore);
+        expect((await t.execute()).started).toBe(false);
+        expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1);
+        expect(n.options.credentials.rootKeys.withRootKey).toHaveBeenCalledTimes(reads);
+      });
     });
   });
   it("生产原生、合同网络和旧假端口不可互相改标，默认关闭在私有读取前", async () => {

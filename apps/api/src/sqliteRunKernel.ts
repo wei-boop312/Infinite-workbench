@@ -1,5 +1,5 @@
 import type { IncomingMessage } from "node:http";
-import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ProductionImageResultSchema, type GeneratedImageRecord, type ImageFixtureResult, type ProductionImageResult } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ProductionImageResultSchema, type RunKernelSnapshot, type GeneratedImageRecord, type ImageFixtureResult, type ProductionImageResult } from "@canvas/contracts";
 import { imageSnapshotFingerprint } from "./imageProviderContract";
 import { assetMetadataFingerprint } from "./verifiedAssets";
 import { assertImageArtifactRecord } from "./imageArtifactIntegrity";
@@ -15,6 +15,25 @@ type Options = Omit<RunKernelOptions, "stateStore" | "recoverRunningJobsOnRestor
 export class SqliteRunKernel implements RunKernelPort {
   constructor(private readonly options: Options) { this.run(() => undefined); }
   usesStateStore(store: SqliteRunKernelStateStore): boolean { return this.options.stateStore === store; }
+
+  // Pure validation of a snapshot already loaded by an independently scoped
+  // internal service. No SQL reads, writes, lease recovery or task permission.
+  validateProductionBillingSnapshot(snapshot: RunKernelSnapshot): void {
+    new InMemoryRunKernel({ ...this.options, budgets: snapshot.budgets, recoverRunningJobsOnRestore: false, restoreValidationOnly: true,
+      stateStore: { load: () => structuredClone(snapshot), save: () => { throw new Error("只读核账快照不得保存"); } } });
+    for (const stored of snapshot.batches) for (const lease of stored.productionImageLeases ?? []) {
+      if (Date.parse(lease.expiresAt) - Date.parse(lease.leasedAt) !== (this.options.leaseDurationMs ?? 30_000)) throw new Error("原租约期限与实际内核配置不一致");
+    }
+    for (const stored of snapshot.batches.filter(b => b.productionImageExecution)) {
+      const job = stored.aggregate.jobs[0];
+      if (job.failureCode === "production-job-timeout-after-intent"
+        && Date.parse(job.finishedAt!) < Date.parse(job.startedAt!) + (this.options.jobTimeoutMs ?? 30_000)) throw new Error("原任务超时早于实际内核期限");
+    }
+    for (const configured of this.options.budgets) {
+      const actual = snapshot.budgets.find(b => b.tenantId === configured.tenantId && b.projectId === configured.projectId);
+      if (!actual || actual.currency !== configured.currency || actual.limitMinor !== configured.limitMinor) throw new Error("实际项目预算配置不一致");
+    }
+  }
 
   authenticate(request: IncomingMessage): RunPrincipal | null { return this.options.authorizer.authenticate(request); }
   registerLocalProject(budget: ProjectBudgetConfig): void { this.run((kernel) => kernel.registerLocalProject(budget)); }
