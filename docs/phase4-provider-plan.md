@@ -1,5 +1,9 @@
 # 阶段 4 多供应商图片 API 接入计划
 
+## 当前停止：周剩余0%，6D6整体未完成
+
+2026-10-04 21:13（上海）周已用100%/剩余0%，立即停止新增开发，原automation已PAUSED，须用户明确重新授权，不能因下周重置自行恢复。6D6A完整生产图片校验草稿已本地验证，见[production-image-output-validation.md](production-image-output-validation.md)，完整1362项单元/集成、102项Chrome、6构建通过。它只返回decoded-uncommitted，不是当前实际任务/权限/产物提交许可；生产产物BLOB/收据/谱系/目录/实际任务同库事务尚未完成。重新授权后继续同一6D6B及后续费用/UI/原专项，真实供应商和阶段4仍未完成，真实执行关闭。下方ACTIVE/旧下一步仅历史。
+
 ## 最新交接：6D5已本地验收（覆盖下方旧时点描述）
 
 6D5默认关闭的实际凭证guard/固定地址HTTPS接线已本地验收，入口docs/production-image-native-execution.md；完整pnpm check：1328项单元/集成（46文件）、101项Chrome、6构建通过，新增42项接线回归、1项独立SQLite结算竞争回归及1Chrome。20:50（上海）周已用97%/剩余3%，高于0%停止线，原自动续做ACTIVE。真实供应商、生产公网网络/保险库验收、权威产物/真实费用/生产确认UI及阶段4整体未完成，日常真实执行关闭。

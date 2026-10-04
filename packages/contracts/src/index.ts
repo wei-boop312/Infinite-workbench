@@ -837,6 +837,30 @@ export const ProductionImageInterruptedSchema = z.object({
 });
 export const ProductionImageResultSchema = z.discriminatedUnion("kind", [ProductionImageRawResponseSchema, ProductionImageInterruptedSchema]);
 export type ProductionImageResult = z.infer<typeof ProductionImageResultSchema>;
+const ProductionOutputMoney = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+// Decoded but UNCOMMITTED. This shape has no asset/receipt or actual task,
+// current permission, budget, send or commit authority. Unknown is not zero.
+export const ProductionImageOutputDraftSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]),
+  validation: z.literal("decoded-uncommitted"), artifactCommitted: z.literal(false),
+  executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false), protectionApplied: z.literal("none"),
+  jobId: ProductionEvidenceJob, batchId: ProductionImageBatchIdSchema,
+  executionFingerprint: ProductionEvidenceHash, leaseFingerprint: ProductionEvidenceHash, intentFingerprint: ProductionEvidenceHash, attemptFingerprint: ProductionEvidenceHash,
+  responseFingerprint: ProductionEvidenceHash, requestFingerprint: ProductionEvidenceHash, payloadChecksumSha256: ProductionEvidenceHash, transformedInputsFingerprint: ProductionEvidenceHash,
+  constraintChecksumSha256: ProductionEvidenceHash, decoder: z.literal("sharp-full-decode-v1"),
+  image: z.object({ mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+    byteSize: z.number().int().positive().max(20 * 1024 * 1024), checksumSha256: ProductionEvidenceHash,
+    width: z.number().int().positive().max(8192), height: z.number().int().positive().max(8192),
+    hasAlpha: z.boolean(), hasTransparency: z.boolean(),
+  }).strict().refine(i => i.width * i.height <= 16_000_000),
+  money: z.object({ currency: z.string().regex(/^[A-Z]{3}$/), maxCostMinor: ProductionOutputMoney,
+    estimate: z.discriminatedUnion("state", [z.object({ state: z.literal("known"), estimatedCostMinor: ProductionOutputMoney }).strict(),
+      z.object({ state: z.literal("unknown") }).strict()]), billing: z.literal("unknown"),
+  }).strict().refine(m => m.estimate.state === "unknown" || m.estimate.estimatedCostMinor <= m.maxCostMinor),
+  validatedAt: IsoDateSchema,
+}).strict();
+export type ProductionImageOutputDraft = z.infer<typeof ProductionImageOutputDraftSchema>;
 
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,

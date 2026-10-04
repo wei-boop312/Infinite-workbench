@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
+import { ProductionImageOutputDraftSchema, validateProductionImageOutput } from "../apps/api/src/productionImageOutputValidation";
+import * as decoderApi from "../apps/api/src/staticImageDecoder";
 import { ProductionImageAttemptSchema, ProductionImageRawResponseSchema, type ConfirmedProductionImageExecution, type ImageProviderConnection } from "../packages/contracts/src/index";
 import { ImageProductionPreparationHarness, type ImagePriceContext } from "../apps/api/src/productionImagePreparations";
 import { createProductionImageLeaseFixturePolicy, type ProductionImageLeasePolicy } from "../apps/api/src/productionImageLeasePolicy";
@@ -14,6 +17,7 @@ import { imageSnapshotFingerprint as fp } from "../apps/api/src/imageProviderCon
 import { imageTaskMetadataBytes } from "../apps/api/src/imageTaskMetadata";
 import { SqliteRunKernelStateStore } from "../apps/api/src/sqliteRunKernelStore";
 import { at, connection, png, principal, setupImageTask, sha } from "./helpers/image-task-fixture";
+const sharp = createRequire(new URL("../apps/api/package.json", import.meta.url))("sharp");
 
 const owned: ReturnType<typeof setupImageTask>[] = [], opened: SqliteRunKernelStateStore[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const s of opened.splice(0).reverse()) s.close(); for (const f of owned.splice(0).reverse()) f.cleanup(); });
@@ -22,7 +26,7 @@ const withDb = <T>(path: string, action: (db: DatabaseSync) => T): T => { const 
 // Only self-owned contract-fixture pricing/material. Actual accepted confirmation,
 // lease and not-connected intent are built by their real SQLite services. The
 // attempt below is a pure fixture, NOT a committed actual task/send authorization.
-async function evidence(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; cap?: number } = {}) {
+async function evidence(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; cap?: number; background?: "transparent" | "opaque" } = {}) {
   let service: ImageProductionPreparationHarness, leasePolicy: ProductionImageLeasePolicy, reconstruction: ImageProductionReconstructionHarness;
   const authorizer = { authenticate: () => principal, allows: (p: typeof principal, project: string) => p.tenantId === principal.tenantId && p.actorId === principal.actorId && project === "project-a" };
   const gate: ProductionImageLeasePolicy = { usesStateStore: s => leasePolicy.usesStateStore(s), authorizeScope: (p, project) => leasePolicy.authorizeScope(p, project),
@@ -33,6 +37,7 @@ async function evidence(options: { protocol?: ImageProviderConnection["protocol"
       validateStart: (p, e, l, i) => reconstruction?.validateStart(p, e, l, i) ?? false } } }); owned.push(f);
   const model = connection().models[0], protocol = options.protocol ?? "openai";
   const config = connection({ protocol,
+    ...(options.background ? { models: [{ ...model, backgrounds: ["auto", "transparent", "opaque"] }] } : {}),
     ...(protocol === "openai-compatible" ? { compatibility: { version: "owned-compat", editEncoding: "json-images", responseEncoding: "images-b64-json-v1",
       auth: { scheme: "header", headerName: "x-api-key" }, endpoints: { generate: "/images/generations", edit: "/images/edits" }, extraParameters: [] } } : {}),
     ...(protocol === "google" ? { baseUrl: "https://generativelanguage.googleapis.com", models: [{ ...model, maxInputImages: 14, outputFormats: ["jpeg"] }],
@@ -51,7 +56,7 @@ async function evidence(options: { protocol?: ImageProviderConnection["protocol"
     tenantId: principal.tenantId, runKernel: f.kernel, clock: f.clock });
   const prepared = service.createPreparation(principal, { projectId: "project-a", idempotencyKey: "owned-action", connectionId: config.id, connectionRevision: 1,
     model: model.model, capabilityVersion: model.version, constraintSnapshotId: "constraint-a", protection: "none", operation: options.edit ? "edit" : "generate",
-    inputAssetIds: options.edit ? ["source"] : [], parameters: { prompt: "原人工指令", n: 1, size: { width: 1024, height: 1024 }, quality: "auto", background: "auto", outputFormat: protocol === "google" ? "jpeg" : "png" } });
+    inputAssetIds: options.edit ? ["source"] : [], parameters: { prompt: "原人工指令", n: 1, size: { width: 1024, height: 1024 }, quality: "auto", background: options.background ?? "auto", outputFormat: protocol === "google" ? "jpeg" : "png" } });
   const preparation = f.store.loadProductionImagePreparation(principal.tenantId, "project-a", "production-contract-fixture", prepared.id)!;
   const batch = (await service.confirmPreparation(principal, "project-a", prepared.id, productionExpected(preparation))).aggregate;
   const l = f.kernel.claimProductionImageBatch(principal, "project-a", batch.batch.id, { workerId: "owned-worker", maxJobs: 1 }).leases[0];
@@ -160,6 +165,99 @@ describe("6D4A 独立生产响应纯解析，不是实际发送/产物许可", (
     const { e, lease, intent, attempt, parse, response, image, f } = await evidence(), record = parse().record, before = f.store.load();
     const restored = assertProductionImageRawResponse(record, e, lease, intent, attempt, response.body); expect(restored.candidate!.body).toEqual(image);
     restored.candidate!.body.fill(0); expect(image).toEqual(png); expect(f.store.load()).toEqual(before);
+  });
+});
+
+// 6D6A uses real confirmed/leased/started SQLite history, but its attempt is the
+// original PURE fixture above. Full decode does not make that fixture an actual
+// task response or grant an asset commit. 6D6B must obtain actual task evidence.
+const fullImage = (format: "png" | "jpeg" = "png", width = 1024, height = 1024, alpha = 1) =>
+  sharp({ create: { width, height, channels: 4, background: { r: 20, g: 40, b: 60, alpha } } })[format]().toBuffer();
+async function outputEvidence(options: Parameters<typeof evidence>[0] = {}) {
+  const t = await evidence(options), image = await fullImage(options.protocol === "google" ? "jpeg" : "png");
+  const packet = (bytes = image, contentType = options.protocol === "google" ? "image/jpeg" : "image/png") => ({ ...t.response, body: Buffer.from(JSON.stringify(options.protocol === "google"
+    ? { candidates: [{ finishReason: "STOP", content: { role: "model", parts: [{ inlineData: { mimeType: contentType, data: bytes.toString("base64") } }] } }] }
+    : { created: 1, data: [{ b64_json: bytes.toString("base64") }] })) });
+  const response = packet(), record = t.parse(response).record;
+  const validate = (r = record, body = response.body, time = at) => validateProductionImageOutput(t.e, t.lease, t.intent, t.attempt, r, body, time);
+  return { ...t, image, response, record, validate, packet };
+}
+describe("6D6A 完整生产图片校验，仅decoded-uncommitted而非资产授权", () => {
+  describe.each((["openai", "openai-compatible", "google"] as const).flatMap(protocol => [true, false].flatMap(manual => [true, false].map(edit => [protocol, manual, edit] as const))))(
+    "%s manual=%s edit=%s", (protocol, manual, edit) => {
+    let t: Awaited<ReturnType<typeof outputEvidence>>;
+    beforeEach(async () => { t = await outputEvidence({ protocol, manual, edit }); });
+    it("完整解码原字节并保留独立未知金额，不写任务/原包/资产/预算", async () => {
+      const before = t.f.store.load(), catalog = t.f.store.loadCatalog(), reads = t.pricePort.read.mock.calls.length, verifies = t.pricePort.verify.mock.calls.length;
+      const result = await t.validate();
+      expect(result.body).toEqual(t.image); expect(result.body).not.toBe(t.image);
+      expect(result.draft).toMatchObject({ mode: "production-contract-fixture", validation: "decoded-uncommitted", artifactCommitted: false,
+        executionAuthorized: false, realExecutionEnabled: false, protectionApplied: "none", image: { width: 1024, height: 1024, checksumSha256: sha(t.image) },
+        money: { maxCostMinor: 40, estimate: manual ? { state: "unknown" } : { state: "known", estimatedCostMinor: 25 }, billing: "unknown" } });
+      expect(result.draftFingerprint).toBe(fp(result.draft)); expect(result.draft.responseFingerprint).toBe(fp(t.record));
+      expect(result.draft.transformedInputsFingerprint).toBe(fp(t.e.protocol.transformedInputs));
+      expect(t.f.store.load()).toEqual(before); expect(t.f.store.loadCatalog()).toEqual(catalog);
+      expect(t.pricePort.read).toHaveBeenCalledTimes(reads); expect(t.pricePort.verify).toHaveBeenCalledTimes(verifies);
+      for (const secret of ["原人工指令", t.e.preparation.connection.baseUrl, t.e.preparation.connection.credentialRef, t.image.toString("base64"), t.e.protocol.request.idempotencyKey])
+        expect(JSON.stringify(result.draft)).not.toContain(secret);
+      expect(result.draft).not.toHaveProperty("assetId"); expect(result.draft).not.toHaveProperty("receipt");
+      result.body.fill(0); expect(t.image.some(byte => byte !== 0)).toBe(true);
+    });
+  });
+  it.each(["tiny", "magic-only", "truncated", "mime", "oversize-pixels", "wrong-size", "absent", "raw-sha", "outcome", "time"])("%s拒绝，不凭pending候选声明已入库", async variant => {
+    const t = await outputEvidence(), before = t.f.store.load(); let response = t.response;
+    if (variant === "tiny") response = t.packet(png);
+    if (variant === "magic-only") response = t.packet(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    if (variant === "truncated") response = t.packet(t.image.subarray(0, t.image.length - 30));
+    if (variant === "mime") response = t.packet(await fullImage("jpeg"));
+    if (variant === "oversize-pixels") response = t.packet(await fullImage("png", 4096, 4096));
+    if (variant === "wrong-size") response = t.packet(await fullImage("png", 1024, 512));
+    if (variant === "absent") response = { ...response, body: Buffer.from('{"data":[{"url":"https://not-fetched.invalid/"}]}') };
+    const record: any = t.parse(response).record;
+    if (variant === "raw-sha") record.bodyChecksumSha256 = "f".repeat(64);
+    if (variant === "outcome") record.outcome.providerRequestId = "forged";
+    await expect(t.validate(record, response.body, variant === "time" ? new Date(Date.parse(at) - 1).toISOString() : at)).rejects.toThrow();
+    expect(t.f.store.load()).toEqual(before); expect(response.body.some(byte => byte !== 0)).toBe(true);
+  });
+  it.each(["opaque", "transparent"] as const)("冻结%s背景按真实像素alpha检查，不靠通道声明", async background => {
+    const t = await outputEvidence({ background }), bad = t.packet(await fullImage("png", 1024, 1024, background === "opaque" ? 0.5 : 1));
+    await expect(t.validate(t.parse(bad).record, bad.body)).rejects.toThrow(/完整校验/);
+    const good = t.packet(await fullImage("png", 1024, 1024, background === "opaque" ? 1 : 0.5)), result = await t.validate(t.parse(good).record, good.body);
+    expect(result.draft.image.hasTransparency).toBe(background === "transparent"); result.body.fill(0);
+  });
+  it.each(["mode", "lease", "attempt", "intent", "confirmation", "interrupted"])("纯历史%s不能部分重算绕过", async variant => {
+    const t = await outputEvidence();
+    await expect(validateProductionImageOutput(variant === "confirmation" ? { ...t.e, batchId: "local-batch" } : t.e,
+      variant === "lease" ? { ...t.lease, actorId: "other" } : t.lease, variant === "intent" ? { ...t.intent, payloadByteSize: t.intent.payloadByteSize + 1 } : t.intent,
+      variant === "attempt" ? { ...t.attempt, actorId: "other" } : t.attempt,
+      variant === "mode" ? { ...t.record, mode: "production" } : variant === "interrupted" ? { ...t.record, kind: "interrupted" } : t.record, t.response.body, at)).rejects.toThrow();
+  });
+  it("迟到校验只保留原尝试关系，不查询当前价格或开启执行", async () => {
+    const t = await outputEvidence(); t.f.advance(120_000); t.pricePort.verify.mockReturnValue(false); const before = t.f.store.load(), verifies = t.pricePort.verify.mock.calls.length;
+    const result = await t.validate(t.record, t.response.body, new Date(t.f.clock()).toISOString()); expect(result.draft.money.billing).toBe("unknown");
+    expect(t.pricePort.verify).toHaveBeenCalledTimes(verifies); expect(t.f.store.load()).toEqual(before); result.body.fill(0);
+  });
+  it("首await前冻结原包和完整证据，调用者改动不改变原字节；失败清零自有候选", async () => {
+    const t = await outputEvidence(); let done!: (value: Awaited<ReturnType<typeof decoderApi.decodeStaticImage>>) => void;
+    const decode = vi.spyOn(decoderApi, "decodeStaticImage").mockImplementation(() => new Promise(resolve => { done = resolve; }));
+    const originalRecord = structuredClone(t.record), raw = Buffer.from(t.response.body), pending = t.validate(originalRecord, raw);
+    raw.fill(0); originalRecord.outcome.providerRequestId = "changed";
+    done({ width: 512, height: 1024, hasAlpha: false, hasTransparency: false }); await expect(pending).rejects.toThrow();
+    expect(decode.mock.calls[0][0].every(byte => byte === 0)).toBe(true); expect(t.response.body.some(byte => byte !== 0)).toBe(true);
+  });
+  it("两份异步校验占槽，不创建无限解码队列", async () => {
+    const t = await outputEvidence(); const pendingDecodes: ((value: Awaited<ReturnType<typeof decoderApi.decodeStaticImage>>) => void)[] = [];
+    vi.spyOn(decoderApi, "decodeStaticImage").mockImplementation(() => new Promise(resolve => pendingDecodes.push(resolve)));
+    const a = t.validate(), b = t.validate(); await expect(t.validate()).rejects.toMatchObject({ status: 429 });
+    for (const done of pendingDecodes) done({ width: 1024, height: 1024, hasAlpha: false, hasTransparency: false });
+    for (const result of await Promise.all([a, b])) result.body.fill(0);
+  });
+  it("严格草稿不可混入资产/费用/执行授权字段，manual未知不补0或上限", async () => {
+    const t = await outputEvidence(), result = await t.validate(), d = result.draft;
+    for (const changed of [{ ...d, artifactCommitted: true }, { ...d, executionAuthorized: true }, { ...d, assetId: "fake" }, { ...d, receipt: {} },
+      { ...d, image: { ...d.image, width: 4096, height: 4096 } }, { ...d, money: { ...d.money, billing: "known" } },
+      { ...d, money: { ...d.money, estimate: { state: "unknown", estimatedCostMinor: 0 } } }]) expect(ProductionImageOutputDraftSchema.safeParse(changed).success).toBe(false);
+    expect(d.money.estimate).toEqual({ state: "unknown" }); result.body.fill(0);
   });
 });
 
