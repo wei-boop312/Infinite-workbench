@@ -114,7 +114,8 @@ describe("6D5 实际尝试绑定凭证和原生网络，只有零费用独立本
   });
   it.each(["false", "promise", "rejected"])("网络同步政策 %s 不把凭证消费当作HTTPS许可", async variant => {
     const t = await live({ network: true }), n = t.network!;
-    vi.mocked(n.options.network.authorize).mockReturnValue(variant === "false" ? false : (variant === "promise" ? Promise.resolve(true) : Promise.reject(new Error("private-secret"))) as never);
+    // Create rejected promises only when invoked, never as unused mock values.
+    vi.mocked(n.options.network.authorize).mockImplementation(() => variant === "false" ? false : (variant === "promise" ? Promise.resolve(true) : Promise.reject(new Error("private-secret"))) as never);
     await t.execute(); expect(n.options.localDrivers!.createResolver).not.toHaveBeenCalled(); expect(n.captures).toHaveLength(0);
     expect(t.saved().productionImageResult?.kind).toBe("interrupted"); expect(t.saved().aggregate.jobs[0].failureCode).toBe("production-transport-error");
     expect(t.f.store.load()!.budgets[0].reservedMinor).toBe(40);

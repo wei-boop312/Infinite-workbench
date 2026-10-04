@@ -24,12 +24,21 @@ export function validateProductionImageAssetPolicy(store: SqliteRunKernelStateSt
   if (refs.reduce((total, ref) => total + ref.byteSize, 0) > 64 * 1024 * 1024) reject("production_image_inputs_too_large");
   return validateAssetPolicy(store, parsed, guard);
 }
-function validateAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest | ProductionImageExecutionRequest, guard?: () => void) {
+// This preparation-only entry point does not loosen any existing executor,
+// protocol, confirmation or artifact validator.
+export function validateLockedProductionImagePreparationAssetPolicy(store: SqliteRunKernelStateStore, request: ProductionImageExecutionRequest, guard: () => void) {
+  const parsed = ProductionImageExecutionRequestSchema.parse(request);
+  if (parsed.operation !== "edit" || parsed.protection !== "pixel-exact" || !parsed.mask) reject("image_locked_preparation_required");
+  if ([...parsed.inputs, parsed.mask].reduce((n, r) => n + r.byteSize, 0) > 64 * 1024 * 1024) reject("production_image_inputs_too_large");
+  return validateAssetPolicy(store, parsed, guard, true);
+}
+function validateAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest | ProductionImageExecutionRequest, guard?: () => void, lockedPreparationOnly = false) {
   const catalog = store.loadCatalog();
   const project = catalog?.projects.find((item) => item.projectId === request.projectId);
   const constraint = project?.constraints.find((item) => item.id === request.constraintSnapshotId);
   if (!catalog || !project || !constraint || constraintContentChecksum(constraint) !== request.constraintChecksumSha256) reject("image_output_constraint_changed");
-  if (constraint.lockedPaths.includes("product.pixels")) reject("image_pixel_protection_not_configured");
+  if (constraint.lockedPaths.includes("product.pixels") && !lockedPreparationOnly) reject("image_pixel_protection_not_configured");
+  if (lockedPreparationOnly && !constraint.lockedPaths.includes("product.pixels")) reject("image_locked_preparation_required");
   if (Math.max(constraint.outputSpec.width, constraint.outputSpec.height) > MAX_STATIC_IMAGE_EDGE
     || constraint.outputSpec.width * constraint.outputSpec.height > MAX_STATIC_IMAGE_PIXELS) reject("image_output_dimensions_exceeded");
   if (constraint.outputSpec.format !== request.parameters.outputFormat || (request.parameters.size !== "auto"

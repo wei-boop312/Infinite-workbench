@@ -1,5 +1,7 @@
 # 6D1 独立生产准备与价格依据合同
 
+原锁区专项新增独立严格v2准备见[locked-image-preparations.md](locked-image-preparations.md)：同库真实政策在可信价格前冻结，不升级下方原v1/none，也不新增确认/任务/执行/HTTP/UI许可。后续锁区确认/产物/回流未验收前仍关闭。
+
 最新增量6D8A公开字段白名单及显式默认关闭HTTP接线见 production-image-public-http.md；下方“没有HTTP”为6D1验收时点，日常bridge仍未接生产、人工UI与真实执行未开放。
 
 2026-10-04（上海）。本地合同与自有假价格端口验收；**不是已核验供应商价格、生产授权或真实接通**。实现入口 `productionImagePreparations.ts`，旧 `LocalImageProviders` 的准备、确认、任务与费用语义不变。

@@ -225,6 +225,60 @@ export const ProductionImagePreparationRecordSchema = z.discriminatedUnion("mode
 });
 export type ProductionImagePreparationRecord = z.infer<typeof ProductionImagePreparationRecordSchema>;
 
+// New immutable preparation identity. V1/none records cannot be upgraded by
+// attaching a draft; this policy is frozen BEFORE the trusted price is read.
+export const LockedImagePreparationPolicySchema = z.object({
+  schemaVersion: z.literal(1), policyVersion: z.literal("locked-image-input-policy-v1"),
+  normalizationVersion: z.literal("auto-orient-srgb-rgba8-v1"), maskPolicy: z.literal("white-alpha255-edit-otherwise-locked-v1"),
+  executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),
+  tenantId: IdSchema, projectId: IdSchema, constraintSnapshotId: IdSchema, constraintChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  source: VerifiedImageSchema, mask: VerifiedImageSchema, inputAssetIds: z.array(IdSchema).min(1).max(20),
+  outputSpec: ConstraintSnapshotSchema.shape.outputSpec.extend({ format: z.enum(["png", "jpeg", "webp"]) }).strict(),
+  sourcePixelsSha256: z.string().regex(/^[a-f0-9]{64}$/), maskPixelsSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  lockedPixels: z.number().int().positive(), editablePixels: z.number().int().positive(), verifiedAt: IsoDateSchema,
+}).strict().superRefine((p, ctx) => {
+  if (p.source.tenantId !== p.tenantId || p.mask.tenantId !== p.tenantId || p.source.asset.projectId !== p.projectId || p.mask.asset.projectId !== p.projectId
+    || p.source.asset.purpose !== "source" || p.mask.asset.purpose !== "mask" || p.source.asset.id === p.mask.asset.id
+    || p.mask.asset.sourceAssetId !== p.source.asset.id || p.mask.sourceChecksumSha256 !== p.source.checksumSha256 || p.mask.asset.mimeType !== "image/png"
+    || p.source.sourceChecksumSha256 !== undefined || p.inputAssetIds[0] !== p.source.asset.id || new Set(p.inputAssetIds).size !== p.inputAssetIds.length
+    || p.inputAssetIds.includes(p.mask.asset.id) || p.source.asset.width !== p.outputSpec.width || p.source.asset.height !== p.outputSpec.height
+    || p.mask.asset.width !== p.outputSpec.width || p.mask.asset.height !== p.outputSpec.height
+    || Math.max(p.outputSpec.width, p.outputSpec.height) > 8192 || p.outputSpec.width * p.outputSpec.height > 16_000_000
+    || p.lockedPixels + p.editablePixels !== p.outputSpec.width * p.outputSpec.height
+    || p.source.asset.byteSize > 30 * 1024 * 1024 || p.mask.asset.byteSize > 30 * 1024 * 1024) ctx.addIssue({ code: "custom", message: "Invalid locked input policy relationship" });
+});
+export type LockedImagePreparationPolicy = z.infer<typeof LockedImagePreparationPolicySchema>;
+const LockedPreparationBase = { ...ProductionPreparationBase, schemaVersion: z.literal(2), protectionPolicy: LockedImagePreparationPolicySchema };
+export const LockedProductionImagePreparationRecordSchema = z.discriminatedUnion("mode", [
+  z.object({ ...LockedPreparationBase, mode: z.literal("production"), pricing: ProductionImagePricingSchema }).strict(),
+  z.object({ ...LockedPreparationBase, mode: z.literal("production-contract-fixture"), pricing: FixtureProductionImagePricingSchema }).strict(),
+]).superRefine((p, ctx) => {
+  const d = p.requestDraft, s = p.selection, policy = p.protectionPolicy, price = p.pricing.scope;
+  if (d.operation !== "edit" || s.operation !== "edit" || d.protection !== "pixel-exact" || s.protection !== "pixel-exact" || !d.mask || !s.maskAssetId
+    || !p.constraint.lockedPaths.includes("product.pixels") || !p.constraint.editableRegions.length
+    || p.constraint.editableRegions.some(r => r.maskAssetId !== policy.mask.asset.id) || new Set(p.constraint.editableRegions.map(r => r.id)).size !== p.constraint.editableRegions.length
+    || p.tenantId !== d.tenantId || p.projectId !== d.projectId || p.projectId !== s.projectId || p.projectId !== p.constraint.projectId
+    || p.connection.tenantId !== p.tenantId || p.connection.projectId !== p.projectId || !p.connection.enabled
+    || p.connection.id !== d.connectionId || p.connection.id !== s.connectionId || p.connection.revision !== d.connectionRevision || p.connection.revision !== s.connectionRevision
+    || p.connection.adapterId !== d.adapterId || s.model !== d.model || s.capabilityVersion !== d.capabilityVersion
+    || !p.connection.models.some(m => m.model === d.model && m.version === d.capabilityVersion)
+    || d.constraintSnapshotId !== p.constraint.id || s.constraintSnapshotId !== p.constraint.id
+    || d.parameters.size === "auto" || JSON.stringify(d.parameters) !== JSON.stringify(s.parameters) || JSON.stringify(d.providerParameters) !== JSON.stringify(s.providerParameters)
+    || policy.tenantId !== p.tenantId || policy.projectId !== p.projectId || policy.constraintSnapshotId !== p.constraint.id || policy.constraintChecksumSha256 !== d.constraintChecksumSha256
+    || JSON.stringify(policy.outputSpec) !== JSON.stringify(p.constraint.outputSpec) || policy.outputSpec.format !== d.parameters.outputFormat
+    || d.parameters.size.width !== policy.outputSpec.width || d.parameters.size.height !== policy.outputSpec.height
+    || JSON.stringify(policy.inputAssetIds) !== JSON.stringify(s.operation === "edit" ? s.inputAssetIds : [])
+    || JSON.stringify(policy.inputAssetIds) !== JSON.stringify(d.operation === "edit" ? d.inputs.map(i => i.assetId) : [])
+    || (d.operation === "edit" && (d.inputs[0]?.checksumSha256 !== policy.source.checksumSha256 || d.mask?.assetId !== policy.mask.asset.id || d.mask?.checksumSha256 !== policy.mask.checksumSha256))
+    || (s.operation === "edit" && s.maskAssetId !== policy.mask.asset.id)
+    || price.tenantId !== p.tenantId || price.projectId !== p.projectId || price.actorId !== p.createdBy || price.connectionId !== p.connection.id
+    || price.connectionRevision !== p.connection.revision || price.model !== d.model || price.capabilityVersion !== d.capabilityVersion || price.operation !== "edit"
+    || price.selectionFingerprint !== p.selectionFingerprint || price.basisFingerprint !== p.basisFingerprint
+    || Date.parse(policy.verifiedAt) > Date.parse(p.pricing.evidence.checkedAt) || Date.parse(p.pricing.evidence.checkedAt) > Date.parse(p.createdAt)
+    || Date.parse(p.createdAt) >= Date.parse(p.pricing.quote.expiresAt)) ctx.addIssue({ code: "custom", message: "Locked preparation identity mismatch" });
+});
+export type LockedProductionImagePreparationRecord = z.infer<typeof LockedProductionImagePreparationRecordSchema>;
+
 export const ConfirmedProductionImageExecutionSchema = z.object({
   schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]), batchId: ProductionImageBatchIdSchema,
   executionState: z.literal("confirmed-not-dispatchable"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),

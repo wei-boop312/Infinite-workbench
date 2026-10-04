@@ -45,7 +45,19 @@ export function validateProductionImageProviderRequest(connectionInput: unknown,
   return validateRequestPolicy(connection, request, now);
 }
 
-function validateRequestPolicy<R extends ImageExecutionRequest | ProductionImageExecutionRequest>(connection: ImageProviderConnection, request: R, now: string): {
+// Static preparation-only capability check, never confirmation/protocol/send
+// authority. Existing execution entry points remain none-only.
+export function validateLockedProductionImagePreparationRequest(connectionInput: unknown, requestInput: unknown, now: string) {
+  const connection = ImageProviderConnectionSchema.parse(connectionInput), request = ProductionImageExecutionRequestSchema.parse(requestInput);
+  if (request.protection !== "pixel-exact" || request.operation !== "edit" || !request.mask || request.parameters.size === "auto") reject("image_locked_preparation_required");
+  // The current native Google protocol cannot carry our bound mask. A catalog
+  // declaration cannot manufacture that protocol support just to pass tests.
+  if (connection.protocol === "google") reject("image_locked_protocol_mask_unsupported");
+  if (Math.max(request.parameters.size.width, request.parameters.size.height) > 8192 || request.parameters.size.width * request.parameters.size.height > 16_000_000) reject("image_output_dimensions_exceeded");
+  return { ...validateRequestPolicy(connection, request, now, true), executionAuthorized: false as const, realExecutionEnabled: false as const };
+}
+
+function validateRequestPolicy<R extends ImageExecutionRequest | ProductionImageExecutionRequest>(connection: ImageProviderConnection, request: R, now: string, lockedPreparationOnly = false): {
   connection: ImageProviderConnection; request: R; fingerprint: string;
 } {
   if (connection.tenantId !== request.tenantId || connection.projectId !== request.projectId || connection.id !== request.connectionId) reject("image_connection_not_found");
@@ -56,7 +68,7 @@ function validateRequestPolicy<R extends ImageExecutionRequest | ProductionImage
   if (capability.version !== request.capabilityVersion) reject("image_capability_changed");
   if (!capability.operations.includes(request.operation)) reject("image_operation_unsupported");
   if (!Number.isFinite(Date.parse(now)) || Date.parse(request.quote.expiresAt) <= Date.parse(now)) reject("image_quote_expired");
-  if (request.protection === "pixel-exact") reject("image_pixel_protection_not_configured");
+  if (request.protection === "pixel-exact" && !lockedPreparationOnly) reject("image_pixel_protection_not_configured");
   for (const [name, value] of Object.entries(request.providerParameters ?? {})) {
     const rule = connection.protocol === "openai-compatible" ? connection.compatibility?.extraParameters.find((item) => item.name === name) : undefined;
     if (!rule || !rule.operations.includes(request.operation)) reject("image_extra_parameter_unsupported");

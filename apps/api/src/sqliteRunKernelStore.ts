@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ProductionImagePreparationRecordSchema, ProductionImageRawResponseSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ProductionImageRawResponse, type ProductionImagePreparationRecord, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
 import { ProductionImageArtifactSchema, type ProductionImageArtifact } from "@canvas/contracts";
+import { LockedProductionImagePreparationRecordSchema, type LockedProductionImagePreparationRecord } from "@canvas/contracts";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
@@ -189,7 +190,8 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   saveCatalog(catalog: LocalCatalog): void { this.write("catalog", LocalRunCatalogSchema.parse(catalog)); }
 
   loadVerifiedImage(tenantId: string, projectId: string, assetId: string): VerifiedImage | null {
-    return this.readVerifiedImage(tenantId, projectId, assetId)?.record ?? null;
+    const stored = this.readVerifiedImage(tenantId, projectId, assetId);
+    try { return stored?.record ?? null; } finally { stored?.body.fill(0); }
   }
 
   loadVerifiedImageBytes(tenantId: string, projectId: string, assetId: string): { receipt: VerifiedImage; body: Buffer } | null {
@@ -321,14 +323,20 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   loadProductionImagePreparationByAction(tenantId: string, projectId: string, mode: ProductionImagePreparationRecord["mode"], key: string): ProductionImagePreparationRecord | null {
     return this.readProductionImagePreparation(tenantId, projectId, mode, "action_key", key);
   }
-  private readProductionImagePreparation(tenantId: string, projectId: string, mode: ProductionImagePreparationRecord["mode"], field: "id" | "action_key", value: string): ProductionImagePreparationRecord | null {
+  loadLockedProductionImagePreparation(tenant: string, project: string, mode: ProductionImagePreparationRecord["mode"], id: string): LockedProductionImagePreparationRecord | null {
+    return this.readProductionImagePreparation(tenant, project, mode, "id", id, LockedProductionImagePreparationRecordSchema);
+  }
+  loadLockedProductionImagePreparationByAction(tenant: string, project: string, mode: ProductionImagePreparationRecord["mode"], key: string): LockedProductionImagePreparationRecord | null {
+    return this.readProductionImagePreparation(tenant, project, mode, "action_key", key, LockedProductionImagePreparationRecordSchema);
+  }
+  private readProductionImagePreparation<T extends ProductionImagePreparationRecord | LockedProductionImagePreparationRecord = ProductionImagePreparationRecord>(tenantId: string, projectId: string, mode: ProductionImagePreparationRecord["mode"], field: "id" | "action_key", value: string, schema: { parse(input: unknown): T } = ProductionImagePreparationRecordSchema as unknown as { parse(input: unknown): T }): T | null {
     try {
       const args = [tenantId, projectId, mode, value];
       const row = this.database.prepare(`SELECT id, action_key, substr(record, 1, 524289) AS record, length(CAST(record AS BLOB)) AS bytes, record_sha256 FROM production_image_preparations WHERE tenant_id = ? AND project_id = ? AND mode = ? AND ${field} = ?`).get(...args);
       const marker = this.database.prepare(`SELECT id, action_key FROM production_image_preparation_presence WHERE tenant_id = ? AND project_id = ? AND mode = ? AND ${field} = ?`).get(...args);
       if (!row && !marker) return null;
       if (!row || !marker || marker.id !== row.id || marker.action_key !== row.action_key || typeof row.bytes !== "number" || row.bytes > 512 * 1024) throw new Error("生产准备证据丢失或超限");
-      const r = ProductionImagePreparationRecordSchema.parse(this.readImageMetadata(row));
+      const r = schema.parse(this.readImageMetadata(row));
       if (r.tenantId !== tenantId || r.projectId !== projectId || r.mode !== mode || r.id !== row.id || r.selection.idempotencyKey !== row.action_key) throw new Error("生产准备归属不一致");
       return r;
     } catch (error) { throw databaseError(error); }
@@ -343,6 +351,17 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   }
   productionImagePreparationCount(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COUNT(*) AS count FROM production_image_preparation_presence WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.count ?? 0);
+  }
+  // V2 JSON, original v8 tables/uniqueness/capacity, not a v1 upgrade.
+  saveLockedProductionImagePreparation(input: LockedProductionImagePreparationRecord, afterWrite: () => void): void {
+    if (this.depth === 0) throw new Error("必须在事务中保存锁区准备");
+    const r = LockedProductionImagePreparationRecordSchema.parse(input), payload = this.imageMetadataPayload(r);
+    this.database.prepare("INSERT INTO production_image_preparations(tenant_id, project_id, mode, id, action_key, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(r.tenantId, r.projectId, r.mode, r.id, r.selection.idempotencyKey, payload, createHash("sha256").update(payload).digest("hex"));
+    afterWrite();
+    this.database.prepare("INSERT INTO production_image_preparation_presence(tenant_id, project_id, mode, id, action_key) VALUES (?, ?, ?, ?, ?)")
+      .run(r.tenantId, r.projectId, r.mode, r.id, r.selection.idempotencyKey);
+    afterWrite();
   }
   imageMetadataBytes(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM generated_images WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_responses WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
