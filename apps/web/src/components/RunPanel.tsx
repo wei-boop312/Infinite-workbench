@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
-  Asset, ConstraintSnapshot, CreateRunBatchRequest, ProjectBudgetSnapshot,
+  Asset, ConstraintSnapshot, CreateRunBatchRequest, ProjectBudgetSnapshot, GeneratedAssetLineage,
   ResolveBillingUnknownRequest, RunBatchAggregate, RunJob, BillingOverage,
 } from "@canvas/contracts";
 import { money, parseMoney, RUN_STATUS_LABEL, StudioRunClient } from "../runs/runClient";
@@ -18,6 +18,7 @@ type Props = {
   onBatches: (batches: RunBatchAggregate[]) => void;
   onAddResults: (batch: RunBatchAggregate) => void;
   onCachedAsset: (asset: Asset) => void;
+  onAddGenerated: (view: GeneratedAssetLineage, signal: AbortSignal) => Promise<void>;
 };
 type Decision = { kind: "retry" | "billing"; job: RunJob; batch: RunBatchAggregate }
   | { kind: "overage-review"; job: RunJob; batch: RunBatchAggregate; overage: BillingOverage };
@@ -345,13 +346,13 @@ export default function RunPanel(props: Props) {
           <div><strong>输出 {job.outputIndex + 1} · 第 {job.attempt} 次</strong><span>{RUN_STATUS_LABEL[job.status]}</span></div>
           <small>{job.actualCostMinor !== undefined ? `实际模拟成本 ${money(job.actualCostMinor)}` : `预留 ${money(reservationMinor(batch, job))}`}</small>
           {job.billingEvidenceRef && <small>核账证据：{job.billingEvidenceRef}</small>}
-          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length > 0 && <small>已验证资产已绑定；画布图片回流尚未开放，暂不能回到画布。</small>}
-          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length === 1 && <GeneratedImageResult key={`${job.id}:${job.outputAssetIds[0]}`} batch={batch} job={job} />}
+          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length > 0 && <small>已验证资产已绑定；仅完整缓存原图经当前谱系核验后可回画布。</small>}
+          {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length === 1 && <GeneratedImageResult key={`${job.id}:${job.outputAssetIds[0]}`} batch={batch} job={job} disabled={busy} onAddToCanvas={props.onAddGenerated} />}
           {batch.batch.tool !== "product-retouch" && job.outputAssetIds.length === 1 && <button disabled={busy} onClick={() => void run(async (client) => {
             const cached = await client.cacheImage(projectId, job.outputAssetIds[0]);
             if (!alive.current) return;
             callbacksRef.current.onCachedAsset(cached);
-            setMessage("生成图片原文件已缓存到项目资产库；未重新生成或改变费用，画布回流尚未开放。");
+            setMessage("生成图片原文件已缓存到项目资产库；未重新生成或改变费用，可从任务结果的独立入口核验回画布。");
           }, false)}>缓存输出 {job.outputIndex + 1} 原图</button>}
           {batch.batch.tool === "product-retouch" && ["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
           {job.status === "billing_unknown" && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")

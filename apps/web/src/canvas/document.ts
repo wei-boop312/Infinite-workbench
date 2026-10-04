@@ -1,4 +1,5 @@
 import type { CanvasDocument } from "@canvas/contracts";
+import { parseGeneratedCanvasHistory } from "@canvas/canvas-schema/light";
 import type { Viewport } from "@xyflow/react";
 import type { CanvasEdge, CanvasNode, CanvasSnapshot, StudioKind } from "./model";
 
@@ -117,6 +118,7 @@ export function documentToSnapshot(document: CanvasDocument): CanvasSnapshot {
         constraintSnapshotId: typeof node.data.constraintSnapshotId === "string" ? node.data.constraintSnapshotId : undefined,
         runJobId: typeof node.data.runJobId === "string" ? node.data.runJobId : undefined,
         runBatchId: typeof node.data.runBatchId === "string" ? node.data.runBatchId : undefined,
+        generatedHistory: node.data.generatedHistory === undefined ? undefined : parseGeneratedCanvasHistory(node.data.generatedHistory),
         body: typeof node.data.body === "string" ? node.data.body : undefined,
       },
       style: { width: node.size?.width ?? 220, height: node.size?.height ?? 160 },

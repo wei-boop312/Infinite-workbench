@@ -76,9 +76,9 @@ async function fixture(page: Page, protocol: ImageProviderConnection["protocol"]
     }
     await route.continue();
   });
-  await page.route(/\/studio-api\/v1\/projects\/[^/]+\/(?:image-providers|image-preparations|budget|run-batches|assets|generated-assets)(?:\/[^?]*)?$/, async route => {
+  await page.route(/\/studio-api\/v1\/(?:projects\/[^/]+\/(?:image-providers|image-preparations|budget|run-batches|assets|generated-assets)(?:\/[^?]*)?|run-jobs\/[^/]+\/resolve-billing)$/, async route => {
     const path = new URL(route.request().url()).pathname.replace(/^\/studio-api/, "");
-    if (!origin || !path.includes(`/projects/${projectId}/`)) { await route.continue(); return; }
+    if (!origin || (path.includes("/projects/") && !path.includes(`/projects/${projectId}/`))) { await route.continue(); return; }
     const isConfirmation = /\/confirm$/.test(path) && route.request().method() === "POST";
     if (isConfirmation) confirms++; if (/\/confirmation$/.test(path)) historyReads++;
     const isLineage = /\/lineage$/.test(path); if (isLineage) lineageReads++;
@@ -251,4 +251,104 @@ test("关闭面板取消迟到谱系响应，重开须重新只读核验而非�
   await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toHaveCount(0); expect(f.lineageReads).toBe(1);
   await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click(); await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toBeVisible();
   expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1); expect(f.lineageReads).toBe(2);
+});
+
+async function cacheBoundResult(page: Page) {
+  await page.getByRole("button", { name: "缓存输出 1 原图" }).click();
+  await expect(page.getByRole("complementary", { name: "任务与预算" })).toContainText("原文件已缓存到项目资产库");
+}
+async function savedCanvas(page: Page) {
+  return page.evaluate(() => JSON.parse(localStorage.getItem(`ai-commerce-canvas.document.${localStorage.getItem("ai-commerce-canvas.active-document")}`)!));
+}
+for (const protocol of ["openai", "openai-compatible", "google"] as const) test(`${protocol} 实际产物原图缓存→受控回画布→撤销重做刷新，不重新发送或释放预留`, async ({ page }) => {
+  const { f, record } = await prepareBoundResult(page, protocol, protocol === "openai"), before = f.snapshot();
+  await cacheBoundResult(page); const count = (await savedCanvas(page)).nodes.length;
+  const button = page.getByRole("button", { name: "核验缓存原图并回画布" }); await button.click();
+  await expect(page.getByRole("region", { name: "实际图片结果谱系" })).toContainText("已核验缓存原图并回到画布");
+  const nodeId = `image-result-${record.request.jobId}-output`, outputNode = page.locator(`.react-flow__node[data-id="${nodeId}"]`);
+  await expect(outputNode.locator("img")).toBeVisible(); await expect(outputNode).toContainText("费用未知");
+  const addedCount = record.request.operation === "edit" ? 4 : 3; await expect.poll(async () => (await savedCanvas(page)).nodes.length).toBe(count + addedCount);
+  await button.click(); await expect(button).toBeEnabled(); expect((await savedCanvas(page)).nodes.length).toBe(count + addedCount);
+  expect(f.lineageReads).toBe(2); expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1); expect(f.confirms).toBe(1); expect(f.budget().reservedMinor).toBe(30);
+  await page.getByRole("button", { name: "关闭任务面板" }).click(); await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect.poll(async () => (await savedCanvas(page)).nodes.length).toBe(count); await page.getByRole("button", { name: "重做", exact: true }).click(); await expect(outputNode.locator("img")).toBeVisible();
+  await expect.poll(async () => (await savedCanvas(page)).nodes.find((n: any) => n.id === nodeId)?.data.assetId).toBe(record.image.asset.id);
+  const document = await savedCanvas(page), data = document.nodes.find((n: any) => n.id === nodeId).data;
+  expect(data.generatedHistory).toMatchObject({ evidence: "local-fixture-history", model: record.request.model, confirmedBy: "fixture-designer", checksumSha256: record.image.checksumSha256,
+    billingState: "unknown", reservedMinor: 30, inputAssetIds: record.request.inputs.map(input => input.assetId) });
+  expect(JSON.stringify(document)).not.toMatch(/data:image|blob:|https:\/\/|credentialRef|idempotencyKey|leaseId/);
+  await page.reload(); await expect(outputNode.locator("img")).toBeVisible(); expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1);
+  if (protocol === "openai") {
+    await page.screenshot({ path: "test-results/generated-result-canvas.png" });
+    const downloadPromise = page.waitForEvent("download"); await page.getByRole("button", { name: "导出项目包" }).click(); const download = await downloadPromise;
+    await page.getByLabel("选择画布项目包").setInputFiles((await download.path())!);
+    await page.getByRole("alertdialog", { name: "确认导入项目包" }).getByRole("button", { name: "确认导入副本" }).click();
+    await expect(page.getByLabel("切换项目")).toHaveValue(/import-/); await expect(outputNode.locator("img")).toBeVisible(); await expect(outputNode).toContainText("导入历史副本");
+    await expect.poll(async () => (await savedCanvas(page)).nodes.find((n: any) => n.id === nodeId)?.data.generatedHistory?.evidence).toBe("imported-copy-history");
+    const copy = (await savedCanvas(page)).nodes.find((n: any) => n.id === nodeId).data; expect(copy.assetId).not.toBe(record.image.asset.id);
+    expect(copy.generatedHistory.originProjectId).toBe(f.projectId); expect(copy.generatedHistory.inputAssetIds).not.toEqual(data.generatedHistory.inputAssetIds);
+    const failure = await page.evaluate(async ({ image, assetId }) => {
+      const { assetRepository } = await import("/src/assets/assetRepository.ts"); const projectId = JSON.parse(localStorage.getItem(`ai-commerce-canvas.document.${localStorage.getItem("ai-commerce-canvas.active-document")}`)!).projectId;
+      const asset = (await assetRepository.list(projectId)).find(a => a.id === assetId)!;
+      try { await assetRepository.readGenerated({ ...image, asset }, new AbortController().signal); return "unexpected"; } catch (error) { return String(error); }
+    }, { image: record.image, assetId: copy.assetId }); expect(failure).toContain("导入副本"); expect(f.sends).toBe(1);
+  }
+});
+test("未缓存时拒绝；良好缓存也不能用上次谱系授权绕过撤权", async ({ page }) => {
+  const { f } = await prepareBoundResult(page), before = f.snapshot(), count = await page.locator(".react-flow__node").count();
+  await page.getByRole("button", { name: "核验缓存原图并回画布" }).click(); const region = page.getByRole("region", { name: "实际图片结果谱系" });
+  await expect(region.getByRole("alert")).toContainText("请先完整缓存"); await expect(page.locator(".react-flow__node")).toHaveCount(count);
+  await cacheBoundResult(page); await page.getByRole("button", { name: "只读核验输出 1 谱系" }).click(); await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toBeVisible();
+  f.revokeLineage(); await region.getByRole("button", { name: "核验缓存原图并回画布" }).click(); await expect(region.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toHaveCount(0); await expect(page.locator(".react-flow__node")).toHaveCount(count);
+  expect(f.lineageReads).toBe(3); expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1);
+});
+for (const damage of ["marker", "original", "metadata", "checksum", "foreign-project", "ordinary-restored"] as const) test(`实际任务仍绑定但${damage}缓存损坏拒绝回画布，不改费用或删除文件`, async ({ page }) => {
+  const { f, record } = await prepareBoundResult(page); await cacheBoundResult(page); const count = await page.locator(".react-flow__node").count(), before = f.snapshot();
+  await page.evaluate(async ({ id, damage }) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("ai-commerce-canvas-assets", 3); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+    try {
+      const transaction = database.transaction(["assets", "blobs", "generatedCaches"], "readwrite"), done = new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
+      const assets = transaction.objectStore("assets"), blobs = transaction.objectStore("blobs"), markers = transaction.objectStore("generatedCaches");
+      if (damage === "marker" || damage === "ordinary-restored") markers.delete(id);
+      if (damage === "original") blobs.delete(`${id}:original`);
+      if (damage === "metadata" || damage === "foreign-project") { const request = assets.get(id); request.onsuccess = () => assets.put({ ...request.result, ...(damage === "metadata" ? { originalName: "not-original.png" } : { projectId: "foreign" }) }); }
+      if (damage === "checksum") { const request = blobs.get(`${id}:original`); request.onsuccess = () => blobs.put({ ...request.result, blob: new Blob([new Uint8Array(request.result.blob.size)], { type: "image/png" }) }); }
+      await done;
+    } finally { database.close(); }
+  }, { id: record.image.asset.id, damage });
+  await page.getByRole("button", { name: "核验缓存原图并回画布" }).click(); await expect(page.getByRole("region", { name: "实际图片结果谱系" }).getByRole("alert")).toBeVisible();
+  await expect(page.locator(".react-flow__node")).toHaveCount(count); expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1); expect(f.lineageReads).toBe(1);
+});
+test("回画布迟到谱系响应在项目切换/关闭后丢弃，无伪节点或自动补读", async ({ page }) => {
+  const { f } = await prepareBoundResult(page); await cacheBoundResult(page); const before = f.snapshot();
+  f.holdLineage(); await page.getByRole("button", { name: "核验缓存原图并回画布" }).click(); await expect.poll(() => f.lineageReads).toBe(1);
+  await page.getByLabel("切换项目").selectOption("phase-1-campaign"); f.releaseLineage(); await expect(page.locator('.react-flow__node[data-id^="image-result-"]')).toHaveCount(0);
+  await page.getByLabel("切换项目").selectOption("phase-1-demo");
+  await expect(page.getByRole("button", { name: "核验缓存原图并回画布" })).toBeEnabled(); await expect(page.locator('.react-flow__node[data-id^="image-result-"]')).toHaveCount(0);
+  expect(f.lineageReads).toBe(1); expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1);
+});
+test("实际已核账产物回画布保留实费；后续重复回流不重复结算或改原响应", async ({ page }) => {
+  const { f, record } = await prepareBoundResult(page); await cacheBoundResult(page);
+  const raw = f.snapshot()?.batches[0].imageFixtureResult; expect(raw?.kind).toBe("returned");
+  await page.getByRole("button", { name: "核对输出 1 计费" }).click(); const decision = page.getByRole("alertdialog", { name: "确认计费核账" });
+  await decision.getByLabel("核账结论").selectOption("charged"); await decision.getByLabel("核实扣费金额").fill("0.27");
+  await decision.getByLabel("核账证据引用").fill("explicit-local-fixture-accounting-no-real-charge"); await decision.getByRole("button", { name: "提交核账结论" }).click(); await expect(decision).toBeHidden();
+  expect(f.budget()).toMatchObject({ reservedMinor: 0, spentMinor: 27 }); expect(f.snapshot()?.batches[0].imageFixtureResult).toEqual(raw);
+  const before = f.snapshot(); await page.getByRole("button", { name: "核验缓存原图并回画布" }).click();
+  await expect(page.getByRole("article", { name: "已核验实际图片结果" })).toContainText("已人工核账 · 实费 27 · 预留 0");
+  await expect.poll(async () => (await savedCanvas(page)).nodes.find((n: any) => n.data.assetId === record.image.asset.id)?.data.generatedHistory?.billingState).toBe("settled");
+  const history = (await savedCanvas(page)).nodes.find((n: any) => n.data.assetId === record.image.asset.id).data.generatedHistory;
+  expect(history).toMatchObject({ actualMinor: 27, reservedMinor: 0, maxCostMinor: 30, estimatedCostMinor: 25 });
+  await page.getByRole("button", { name: "核验缓存原图并回画布" }).click(); await expect(page.getByRole("button", { name: "核验缓存原图并回画布" })).toBeEnabled();
+  expect(f.snapshot()).toEqual(before); expect(f.sends).toBe(1); expect(f.confirms).toBe(1);
+});
+test("390像素结果历史可读且不横溢；原图预览不是Base64，历史不冒充当前授权", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); const { record } = await prepareBoundResult(page); await cacheBoundResult(page);
+  await page.getByRole("button", { name: "核验缓存原图并回画布" }).click(); await expect(page.getByRole("region", { name: "实际图片结果谱系" })).toContainText("已核验缓存原图并回到画布");
+  await page.getByRole("button", { name: "关闭任务面板" }).click();
+  const history = page.getByRole("complementary", { name: "生成结果历史" }); await expect(history).toContainText("不是实时账本或当前服务端授权"); await expect(history).toContainText(record.image.checksumSha256);
+  expect(await history.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/generated-result-history-mobile.png" });
 });

@@ -20,6 +20,8 @@ import {
   BackgroundVariant,
   Controls,
   Handle,
+  getNodesBounds,
+  getViewportForBounds,
   MiniMap,
   NodeResizer,
   Position,
@@ -33,7 +35,7 @@ import {
   type NodeProps,
   type Viewport,
 } from "@xyflow/react";
-import type { Asset, CanvasDocument, ConstraintSnapshot, RunBatchAggregate } from "@canvas/contracts";
+import type { Asset, CanvasDocument, ConstraintSnapshot, GeneratedAssetLineage, RunBatchAggregate } from "@canvas/contracts";
 import { executeMockRun } from "@canvas/testing/browser";
 import { assetRepository, formatAssetBytes, type AssetUsage } from "./assets/assetRepository";
 import { documentToSnapshot, snapshotFingerprint, snapshotToDocument } from "./canvas/document";
@@ -469,7 +471,7 @@ function CanvasKernel() {
   }, [commit, edges, nodes, screenToFlowPosition]);
 
   const addAssetToCanvas = useCallback((asset: Asset) => {
-    if (asset.purpose === "generated") { setLastAction("生成图片已缓存；任务结果画布回流尚未开放。"); return; }
+    if (asset.purpose === "generated") { setLastAction("生成图片只能从任务结果的独立入口核验回画布，普通添加不能代替任务谱系。"); return; }
     const current = currentRef.current.snapshot;
     const position = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
     const deselected = current.nodes.map((node) => ({ ...node, selected: false }));
@@ -1017,11 +1019,39 @@ function CanvasKernel() {
     window.setTimeout(() => void fitCanvasView({ nodes: [{ id: toolId }, ...results.map((job) => ({ id: `run-result-${job.id}` }))], padding: 0.3, duration: 200 }), 0);
   }, [commit, fitCanvasView, screenToFlowPosition]);
 
+  const addGeneratedResult = useCallback(async (input: GeneratedAssetLineage, signal: AbortSignal) => {
+    const view = structuredClone(input);
+    signal.throwIfAborted();
+    if (!loaded || view.projectId !== activeProjectIdRef.current) throw new Error("当前项目尚未加载或已切换；未添加结果。");
+    const projectAssets = await assetRepository.list(view.projectId);
+    const { buildGeneratedResultGraph } = await import("./canvas/generatedResult");
+    await assetRepository.readGenerated(view.image, signal);
+    signal.throwIfAborted();
+    if (view.projectId !== activeProjectIdRef.current) throw new Error("项目已切换；未添加结果。");
+    const current = currentRef.current.snapshot;
+    const anchor = screenToFlowPosition({ x: window.innerWidth / 3, y: window.innerHeight / 2 });
+    const right = current.nodes.filter(n => !n.parentId).reduce((value, n) => Math.max(value, n.position.x + nodeSize(n).width), anchor.x);
+    const next = buildGeneratedResultGraph(current, view, view.projectId, projectAssets, constraintRepository.list(view.projectId), { x: right + 80, y: anchor.y });
+    if (next === current) { setLastAction("该实际生成结果已在画布上，未重复添加或改写历史费用。"); return; }
+    currentRef.current = { ...currentRef.current, snapshot: next };
+    commit(next, "已验证缓存原图回画布；实际任务与人工约束谱系保留，未生成或改变费用");
+    setAssetCatalogRevision(value => value + 1);
+    // Compute bounds from the committed graph, not the internal lookup which can
+    // still be one render behind. This also handles unmeasured offscreen nodes.
+    const targets = next.nodes.filter(n => n.id.startsWith(`image-result-${view.jobId}-`));
+    const bounds = getNodesBounds(targets), pane = document.querySelector(".react-flow")?.getBoundingClientRect();
+    if (pane && pane.width > 0 && pane.height > 0 && bounds.width > 0 && bounds.height > 0) {
+      const focused = getViewportForBounds(bounds, pane.width, pane.height, 0.18, 2, 0.2);
+      if ([focused.x, focused.y, focused.zoom].every(Number.isFinite)) void setFlowViewport(focused, { duration: 200 });
+    }
+  }, [commit, loaded, screenToFlowPosition, setFlowViewport]);
+
   const assetReferenceCounts = useMemo(() => {
     const counts: Record<string, number> = { ...(runReferences?.projectId === projectId ? runReferences.counts : loadRunReferences(projectId)) };
     for (const node of nodes) {
-      if (node.type !== "studio" || !node.data.assetId) continue;
-      counts[node.data.assetId] = (counts[node.data.assetId] ?? 0) + 1;
+      if (node.type !== "studio") continue;
+      if (node.data.assetId) counts[node.data.assetId] = (counts[node.data.assetId] ?? 0) + 1;
+      for (const id of node.data.generatedHistory?.inputAssetIds ?? []) counts[id] = (counts[id] ?? 0) + 1;
     }
     for (const snapshot of constraintSnapshots) {
       for (const region of snapshot.editableRegions) {
@@ -1039,6 +1069,7 @@ function CanvasKernel() {
   const activeConstraintSnapshot = selectedConstraint?.data.constraintSnapshotId
     ? constraintSnapshots.find((snapshot) => snapshot.id === selectedConstraint.data.constraintSnapshotId) ?? null
     : null;
+  const selectedGenerated = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && Boolean(node.data.generatedHistory));
   const saveConstraintSnapshot = useCallback((draft: ConstraintDraft) => {
     if (!selectedConstraint) return;
     const snapshot = constraintRepository.save(projectId, draft);
@@ -1243,11 +1274,24 @@ function CanvasKernel() {
         {runPanelOpen && <Suspense fallback={<aside className="inspector" role="status">正在加载任务面板…</aside>}>
           <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots}
             missingOriginalAssetIds={missingOriginalAssetIds} onClose={() => setRunPanelOpen(false)}
-            onBatches={rememberRunReferences} onAddResults={addRunResults} onCachedAsset={(asset) => {
+            onBatches={rememberRunReferences} onAddResults={addRunResults} onAddGenerated={addGeneratedResult} onCachedAsset={(asset) => {
               if (asset.projectId === activeProjectIdRef.current) setAssetCatalogRevision((revision) => revision + 1);
             }} />
         </Suspense>}
 
+        {selectedGenerated?.data.generatedHistory && !runPanelOpen && <aside className="inspector generated-history-inspector" aria-label="生成结果历史">
+          <strong>{selectedGenerated.data.generatedHistory.evidence === "imported-copy-history" ? "导入副本的生成历史" : "生成结果历史观察"}</strong>
+          <p>这是回画布时保存的关系，不是实时账本或当前服务端授权；本地假响应不代表真实供应商生成。</p>
+          <small>{selectedGenerated.data.generatedHistory.protocol} · {selectedGenerated.data.generatedHistory.model} · 修订 {selectedGenerated.data.generatedHistory.connectionRevision}</small>
+          <p>人工确认：{selectedGenerated.data.generatedHistory.confirmedBy} · {selectedGenerated.data.generatedHistory.confirmedAt}</p>
+          <p>原估价 {selectedGenerated.data.generatedHistory.estimatedCostMinor} · 原上限 {selectedGenerated.data.generatedHistory.maxCostMinor} · {selectedGenerated.data.generatedHistory.currency}（最小货币单位）</p>
+          <p>{selectedGenerated.data.generatedHistory.billingState === "unknown" ? `观察时费用未知，预留 ${selectedGenerated.data.generatedHistory.reservedMinor}` : `观察时已核账，实费 ${selectedGenerated.data.generatedHistory.actualMinor}`}</p>
+          <small>原批次 {selectedGenerated.data.generatedHistory.batchId} · 原任务 {selectedGenerated.data.generatedHistory.jobId}</small>
+          <small>原确认项目 {selectedGenerated.data.generatedHistory.originProjectId}</small>
+          <small>当前输出 {selectedGenerated.data.assetId} · 约束 {selectedGenerated.data.constraintSnapshotId}</small>
+          <small>来源 {selectedGenerated.data.generatedHistory.inputAssetIds.join("、") || "无输入（生成）"}</small>
+          <small>原图 SHA-256 {selectedGenerated.data.generatedHistory.checksumSha256}</small>
+        </aside>}
         {selectedText && !runPanelOpen && (
           <aside className="inspector" onPointerDown={(event) => event.stopPropagation()}>
             <span>文字资产</span>

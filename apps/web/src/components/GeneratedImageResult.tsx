@@ -3,19 +3,23 @@ import type { GeneratedAssetLineage, RunBatchAggregate, RunJob } from "@canvas/c
 import { StudioRunClient } from "../runs/runClient";
 
 // Explicit read only. No task refresh/recovery, cache fallback or accounting.
-export default function GeneratedImageResult({ batch, job }: { batch: RunBatchAggregate; job: RunJob }) {
-  const [view, setView] = useState<GeneratedAssetLineage | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
+export default function GeneratedImageResult({ batch, job, onAddToCanvas, disabled }: { batch: RunBatchAggregate; job: RunJob;
+  onAddToCanvas: (view: GeneratedAssetLineage, signal: AbortSignal) => Promise<void>; disabled: boolean }) {
+  const [view, setView] = useState<GeneratedAssetLineage | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
   const controller = useRef<AbortController | null>(null), pending = useRef(false);
   useEffect(() => {
-    const active = new AbortController(); controller.current = active; pending.current = false; setView(null); setError(""); setBusy(false);
+    const active = new AbortController(); controller.current = active; pending.current = false; setView(null); setError(""); setBusy(false); setMessage("");
     return () => { active.abort(); if (controller.current === active) controller.current = null; };
   }, [batch.batch.projectId, batch.batch.id, job.id, job.status, job.outputAssetIds[0]]);
-  const read = async () => {
+  const read = async (addToCanvas = false) => {
     const active = controller.current;
     if (!active || pending.current) return;
-    pending.current = true; setBusy(true); setView(null); setError("");
+    pending.current = true; setBusy(true); setView(null); setError(""); setMessage("");
     try {
       const result = await new StudioRunClient(active.signal).generatedLineage(batch, job);
+      if (controller.current !== active || active.signal.aborted) return;
+      if (addToCanvas) await onAddToCanvas(result, active.signal);
+      if (addToCanvas && controller.current === active && !active.signal.aborted) setMessage("已核验缓存原图并回到画布；未生成、发送或改变费用。");
       if (controller.current === active && !active.signal.aborted) setView(result);
     } catch (failure) {
       if (controller.current === active && !active.signal.aborted) setError(failure instanceof Error ? failure.message : "结果读取失败。");
@@ -24,7 +28,10 @@ export default function GeneratedImageResult({ batch, job }: { batch: RunBatchAg
     }
   };
   return <section className="image-result-lineage" aria-label="实际图片结果谱系">
-    <button disabled={busy} onClick={() => void read()}>只读核验输出 {job.outputIndex + 1} 谱系</button>
+    <button disabled={busy || disabled} onClick={() => void read()}>只读核验输出 {job.outputIndex + 1} 谱系</button>
+    <button disabled={busy || disabled} onClick={() => void read(true)}>核验缓存原图并回画布</button>
+    <small>回画布会重新核验当前权限及实际任务谱系，要求先完整缓存原图；不使用上次授权视图。</small>
+    {message && <p role="status">{message}</p>}
     {error && <p className="run-error" role="alert">{error}</p>}
     {view && <article aria-label="已核验实际图片结果">
       <strong>已验证原图 · 本地假响应产物，非真实供应商生成</strong>
@@ -41,7 +48,7 @@ export default function GeneratedImageResult({ batch, job }: { batch: RunBatchAg
       <small>不可变产物摘要：{view.generatedRecordFingerprint}</small>
       <p>假报价 {view.pricing.quote.currency} · 原估价 {view.pricing.quote.estimatedCostMinor} · 原上限 {view.pricing.quote.maxCostMinor}（最小货币单位）</p>
       <p>{view.billing.state === "unknown" ? `费用未知 · 预留 ${view.billing.reservedMinor}，有图不等于已结算` : `已人工核账 · 实费 ${view.billing.actualMinor} · 预留 ${view.billing.reservedMinor}`} {view.billing.currency}</p>
-      <small>此读取不发送、不核账、不释放预留；画布回流尚未开放。</small>
+      <small>此读取不发送、不核账、不释放预留；画布费用是核验时的历史观察，不是实时账本。</small>
     </article>}
   </section>;
 }

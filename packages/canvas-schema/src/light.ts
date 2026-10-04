@@ -1,4 +1,6 @@
 import type { CanvasDocument } from "@canvas/contracts";
+import { assertGeneratedNodeHistory } from "./generatedHistory.ts";
+export { parseGeneratedCanvasHistory, type GeneratedCanvasHistory } from "./generatedHistory.ts";
 
 const CURRENT_VERSION = 2;
 const NODE_TYPES = new Set(["image", "video", "text", "constraint", "tool", "output", "group", "note"]);
@@ -59,6 +61,7 @@ function assertCanvasShape(value: UnknownRecord): void {
       throw new Error("画布节点无效");
     }
     if (node.parentId !== undefined && !isId(node.parentId)) throw new Error("节点父级无效");
+    assertGeneratedNodeHistory(node.data, value.projectId as string);
   }
 
   for (const edge of value.edges) {

@@ -3,6 +3,7 @@ import {
   CanvasDocumentSchema,
   type CanvasDocument,
 } from "@canvas/contracts";
+import { assertGeneratedNodeHistory } from "./generatedHistory.ts";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -47,7 +48,9 @@ export function migrateCanvasDocument(input: unknown): CanvasDocument {
   if (migratedVersion === 1) {
     migrated = migrateV1(migrated);
   }
-  return CanvasDocumentSchema.parse(migrated);
+  const document = CanvasDocumentSchema.parse(migrated);
+  for (const node of document.nodes) assertGeneratedNodeHistory(node.data, document.projectId);
+  return document;
 }
 
 export { CURRENT_CANVAS_SCHEMA_VERSION };

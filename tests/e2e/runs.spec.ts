@@ -186,7 +186,7 @@ for (const status of ["billing_unknown", "succeeded"] as const) test(`已绑定�
     await route.fulfill({ response, json: [fixture, ...await response.json()] });
   });
   const panel = await prepare(page), current = panel.getByRole("region", { name: "当前批次" });
-  await expect(current).toContainText("已验证资产已绑定；画布图片回流尚未开放");
+  await expect(current).toContainText("已验证资产已绑定；仅完整缓存原图经当前谱系核验后可回画布");
   await expect(current.getByRole("button", { name: "结果回到画布" })).toHaveCount(0);
   await expect(current.getByRole("button", { name: "人工重试输出 1" })).toHaveCount(0);
   await expect(current.getByRole("button", { name: "执行排队任务" })).toHaveCount(0);

@@ -1,5 +1,5 @@
 import type { Asset, CanvasDocument, ConstraintSnapshot } from "@canvas/contracts";
-import { migrateCanvasDocumentLight } from "@canvas/canvas-schema/light";
+import { migrateCanvasDocumentLight, parseGeneratedCanvasHistory } from "@canvas/canvas-schema/light";
 
 const MAGIC = "AICPKG01";
 const MAGIC_BYTES = new TextEncoder().encode(MAGIC);
@@ -124,6 +124,12 @@ function validateReferences(document: CanvasDocument, constraints: ConstraintSna
     if (node.data.assetId && !assetMap.has(node.data.assetId)) throw new Error(`节点 ${node.id} 的资产引用已断裂`);
     if (node.data.constraintSnapshotId && !constraintIds.has(node.data.constraintSnapshotId)) {
       throw new Error(`节点 ${node.id} 的约束引用已断裂`);
+    }
+    if (node.data.generatedHistory !== undefined) {
+      const history = parseGeneratedCanvasHistory(node.data.generatedHistory), output = assetMap.get(history.assetId);
+      if (!output || output.purpose !== "generated" || output.contentFingerprint !== `sha256:${history.checksumSha256}`
+        || history.inputAssetIds.some(id => !assetMap.has(id))) throw new Error("生成结果历史的输出或输入引用已断裂");
+      if (history.evidence === "local-fixture-history" && history.originProjectId !== document.projectId) throw new Error("生成结果历史项目错配");
     }
   }
 }
@@ -315,10 +321,16 @@ export function remapProjectPackage(source: PortableProject, documentId: string,
       ...node,
       data: {
         ...node.data,
+        ...(node.data.generatedHistory === undefined ? {} : { badge: "导入历史副本", subtitle: "离线原图与历史关系 · 非服务端新授权" }),
         assetId: node.data.assetId ? assetIds.get(node.data.assetId) : undefined,
         constraintSnapshotId: node.data.constraintSnapshotId
           ? constraintIds.get(node.data.constraintSnapshotId)
           : undefined,
+        generatedHistory: node.data.generatedHistory === undefined ? undefined : (() => {
+          const history = parseGeneratedCanvasHistory(node.data.generatedHistory);
+          return { ...history, evidence: "imported-copy-history" as const, assetId: assetIds.get(history.assetId),
+            inputAssetIds: history.inputAssetIds.map(id => assetIds.get(id)), constraintSnapshotId: constraintIds.get(history.constraintSnapshotId) };
+        })(),
       },
     })),
   });

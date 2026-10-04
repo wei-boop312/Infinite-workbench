@@ -6,6 +6,7 @@ const DATABASE_VERSION = 3;
 const ASSET_STORE = "assets";
 const BLOB_STORE = "blobs";
 const GENERATED_CACHE_STORE = "generatedCaches";
+let generatedReads = 0;
 type GeneratedCacheRecord = { assetId: string; projectId: string; tenantId: string; metadata: string; checksum: string };
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
@@ -28,6 +29,7 @@ export interface AssetRepositoryPort {
   restore(projectId: string, records: RestoredAsset[]): Promise<void>;
   restoreOriginal(projectId: string, assetId: string, blob: Blob): Promise<Asset>;
   cacheGenerated(receipt: VerifiedImage, original: Blob, signal: AbortSignal): Promise<Asset>;
+  readGenerated(receipt: VerifiedImage, signal: AbortSignal): Promise<Asset>;
   remove(projectId: string, assetId: string): Promise<boolean>;
   usage(projectId: string): Promise<AssetUsage>;
 }
@@ -219,6 +221,47 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
     }
     const originalBytes = assets.reduce((total, asset) => total + asset.byteSize, 0);
     return { count: assets.length, originalBytes, proxyBytes, totalBytes: originalBytes + proxyBytes };
+  }
+
+  async readGenerated(input: VerifiedImage, abortSignal: AbortSignal): Promise<Asset> {
+    if (generatedReads >= 2) throw new Error("生成原图校验正在进行，请稍后再操作。");
+    generatedReads++;
+    try {
+      const signal = AbortSignal.any([abortSignal, AbortSignal.timeout(30_000)]);
+      const { VerifiedImageSchema } = await import("@canvas/contracts");
+      const receipt = VerifiedImageSchema.parse(structuredClone(input)), expected = receipt.asset;
+      assertGeneratedReceipt(receipt, expected.projectId, expected.id); signal.throwIfAborted();
+      const database = await openDatabase(signal);
+      let asset: Asset | undefined, marker: GeneratedCacheRecord | undefined, original: BlobRecord | undefined;
+      try {
+        const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE], "readonly"), done = transactionComplete(transaction);
+        void done.catch(() => undefined);
+        const abort = () => { try { transaction.abort(); } catch { /* The read snapshot has completed. */ } };
+        signal.addEventListener("abort", abort, { once: true });
+        try {
+          [asset, marker, original] = await Promise.all([
+            requestResult(transaction.objectStore(ASSET_STORE).get(expected.id) as IDBRequest<Asset | undefined>),
+            requestResult(transaction.objectStore(GENERATED_CACHE_STORE).get(expected.id) as IDBRequest<GeneratedCacheRecord | undefined>),
+            requestResult(transaction.objectStore(BLOB_STORE).get(`${expected.id}:original`) as IDBRequest<BlobRecord | undefined>),
+          ]);
+          await done; signal.throwIfAborted();
+        } catch (failure) { abort(); await done.catch(() => undefined); throw failure; }
+        finally { signal.removeEventListener("abort", abort); }
+      } finally { database.close(); }
+      const expectedMarker: GeneratedCacheRecord = { assetId: expected.id, projectId: expected.projectId, tenantId: receipt.tenantId,
+        metadata: JSON.stringify(expected), checksum: receipt.checksumSha256 };
+      if (!asset || !marker || !original) throw new Error("请先完整缓存当前任务的生成原图；普通资产或导入副本不能替代缓存证据。");
+      if (JSON.stringify(asset) !== JSON.stringify(expected) || JSON.stringify(marker) !== JSON.stringify(expectedMarker)
+        || original.key !== `${expected.id}:original` || original.assetId !== expected.id || original.role !== "original"
+        || !(original.blob instanceof Blob) || original.blob.size !== expected.byteSize || original.blob.type !== expected.mimeType) throw new Error("生成原图缓存编号、项目、元数据或标记错配。");
+      if (await blobSha256(original.blob) !== receipt.checksumSha256) throw new Error("生成原图缓存内容 SHA-256 不匹配。");
+      signal.throwIfAborted();
+      const bitmap = await createImageBitmap(original.blob);
+      try { if (bitmap.width !== expected.width || bitmap.height !== expected.height) throw new Error("生成原图缓存实际尺寸错配。"); }
+      finally { bitmap.close(); }
+      signal.throwIfAborted();
+      return structuredClone(asset);
+    } finally { generatedReads--; }
   }
 
   async saveMask(projectId: string, sourceAssetId: string, blob: Blob, width: number, height: number): Promise<Asset> {
