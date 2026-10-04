@@ -1,5 +1,7 @@
 # 原锁区专项 A：纯完整像素核验草稿
 
+实际链接线设计见[locked-image-task-binding-design.md](locked-image-task-binding-design.md)：旧none历史不能升级，新政策须在原价格/人工确认前冻结、不可变保护证据与原产物同库保存并同步恢复公开缓存回流。该文档仅设计，尚未实施，不改变本A草稿或实际拒绝闸门。
+
 2026-10-05（上海）。本次来自冻结阶段4第6项专项盘点，不增加产品目标：原`image-provider-contract`与`generated-image-ingestion`已明确把可验证锁区保护留待真实资产回流阶段。6A–6D9完成的不是硬像素保护；旧拒绝闸门不能作为该功能已实现的证据。本次只补独立纯核验原语，实际任务绑定、产物事务接线、生产硬锁区功能及真实供应商验收仍未完成。
 
 `verifyLockedImagePixels`仅接受显式pixel-exact草稿、完整原ConstraintSnapshot、源图/蒙版收据形状及原字节、候选原字节。首await前复制原字节与完整元信息，核注册元信息SHA、原字节SHA/精确长度、tenant/project/来源编号、蒙版来源SHA、区域与唯一蒙版绑定、原输出格式/尺寸。输入单份30MiB、总声明64MiB、候选20MiB、元信息512KiB、8192/1600万像素守卫在复制/解码前运行。收据/schema/SHA只是纯输入关系，**不是当前实际任务、数据库、权限或提交证明**。
