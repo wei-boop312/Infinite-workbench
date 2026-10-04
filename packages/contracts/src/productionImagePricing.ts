@@ -19,6 +19,20 @@ export const ProductionImageRequestDraftSchema = z.discriminatedUnion("operation
   ImageRequestTemplateSchema.options[0].omit({ quote: true }).strict(),
   ImageRequestTemplateSchema.options[1].omit({ quote: true }).strict(),
 ]);
+// Syntactic protocol request only: job/key fields do not prove a persisted task,
+// human confirmation, budget reservation, lease or permission to send.
+export const ProductionImageExecutionRequestSchema = z.discriminatedUnion("operation", [
+  ProductionImageRequestDraftSchema.options[0].extend({ jobId: Id, idempotencyKey: Id, quote: ProductionImageQuoteSchema }).strict(),
+  ProductionImageRequestDraftSchema.options[1].extend({ jobId: Id, idempotencyKey: Id, quote: ProductionImageQuoteSchema }).strict(),
+]);
+export const ConfirmProductionImagePreparationSchema = z.object({
+  expectedSnapshotFingerprint: Hash, expectedPricingFingerprint: Hash,
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/), expectedMaxCostMinor: Money,
+  estimate: z.discriminatedUnion("state", [
+    z.object({ state: z.literal("known"), expectedEstimatedCostMinor: Money }).strict(),
+    z.object({ state: z.literal("unknown") }).strict(),
+  ]),
+}).strict();
 export const ProductionImagePriceScopeSchema = z.object({
   tenantId: Id, projectId: Id, actorId: Id, connectionId: Id,
   connectionRevision: z.number().int().positive(), model: Id, capabilityVersion: Id,
@@ -40,6 +54,8 @@ export const FixtureProductionImagePricingSchema = z.object({
 }).strict().refine((p) => Date.parse(p.evidence.checkedAt) < Date.parse(p.quote.expiresAt), { message: "假依据时间不一致" });
 
 export type ProductionImageQuote = z.infer<typeof ProductionImageQuoteSchema>;
+export type ProductionImageExecutionRequest = z.infer<typeof ProductionImageExecutionRequestSchema>;
+export type ConfirmProductionImagePreparation = z.infer<typeof ConfirmProductionImagePreparationSchema>;
 export type ProductionImageRequestDraft = z.infer<typeof ProductionImageRequestDraftSchema>;
 export type ProductionImagePriceScope = z.infer<typeof ProductionImagePriceScopeSchema>;
 export type ProductionImagePricing = z.infer<typeof ProductionImagePricingSchema>;

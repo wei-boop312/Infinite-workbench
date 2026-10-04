@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
-  ImageExecutionRequestSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, VerifiedImageSchema,
-  type ImageExecutionRequest, type ImageProviderConnection, type VerifiedImage,
+  ImageExecutionRequestSchema, ProductionImageExecutionRequestSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, VerifiedImageSchema,
+  type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type VerifiedImage,
 } from "@canvas/contracts";
 
 export class ImageProviderContractError extends Error {
@@ -31,6 +31,23 @@ export function validateImageProviderRequest(connectionInput: unknown, requestIn
 } {
   const connection = ImageProviderConnectionSchema.parse(connectionInput);
   const request = ImageExecutionRequestSchema.parse(requestInput);
+  return validateRequestPolicy(connection, request, now);
+}
+
+// Separate strict entry point: manual-budget has NO estimatedCostMinor. Sharing
+// capability checks does not make production requests valid legacy tasks.
+export function validateProductionImageProviderRequest(connectionInput: unknown, requestInput: unknown, now: string) {
+  const connection = ImageProviderConnectionSchema.parse(connectionInput);
+  const request = ProductionImageExecutionRequestSchema.parse(requestInput);
+  const size = request.parameters.size;
+  if (size === "auto") reject("image_explicit_output_required");
+  if (Math.max(size.width, size.height) > 8192 || size.width * size.height > 16_000_000) reject("image_output_dimensions_exceeded");
+  return validateRequestPolicy(connection, request, now);
+}
+
+function validateRequestPolicy<R extends ImageExecutionRequest | ProductionImageExecutionRequest>(connection: ImageProviderConnection, request: R, now: string): {
+  connection: ImageProviderConnection; request: R; fingerprint: string;
+} {
   if (connection.tenantId !== request.tenantId || connection.projectId !== request.projectId || connection.id !== request.connectionId) reject("image_connection_not_found");
   if (!connection.enabled) reject("image_connection_disabled");
   if (connection.revision !== request.connectionRevision || connection.adapterId !== request.adapterId) reject("image_connection_changed");
@@ -84,12 +101,26 @@ export function validateImageProviderRequest(connectionInput: unknown, requestIn
         || request.inputs.some((input) => input.assetId === request.mask?.assetId)) reject("image_mask_invalid");
     }
   }
-  return { connection, request, fingerprint: imageConfirmationFingerprint(connection, request) };
+  return { connection, request, fingerprint: hash({ connection, request }) };
 }
 
 // Receipts MUST come from the authoritative server asset service, never HTTP input.
 export function validateImageProviderInputs(request: ImageExecutionRequest, trustedReceipts: readonly VerifiedImage[]): void {
   const parsed = ImageExecutionRequestSchema.parse(request);
+  validateInputPolicy(parsed, trustedReceipts);
+}
+
+export function validateProductionImageProviderInputs(request: ProductionImageExecutionRequest, trustedReceipts: readonly VerifiedImage[]): void {
+  validateInputPolicy(ProductionImageExecutionRequestSchema.parse(request), trustedReceipts);
+}
+
+// Internal shared payload/asset policy only; callers still use their own strict
+// legacy or production entry point before reaching normalization.
+export function validateImageProtocolInputs(request: ImageExecutionRequest | ProductionImageExecutionRequest, trustedReceipts: readonly VerifiedImage[]): void {
+  const production = ProductionImageExecutionRequestSchema.safeParse(request);
+  validateInputPolicy(production.success ? production.data : ImageExecutionRequestSchema.parse(request), trustedReceipts);
+}
+function validateInputPolicy(parsed: ImageExecutionRequest | ProductionImageExecutionRequest, trustedReceipts: readonly VerifiedImage[]): void {
   const receipts = trustedReceipts.map((receipt) => VerifiedImageSchema.parse(receipt));
   if (parsed.operation === "generate") return;
   for (const input of [...parsed.inputs, ...(parsed.mask ? [parsed.mask] : [])]) {

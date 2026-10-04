@@ -1,5 +1,5 @@
-import type { ImageExecutionRequest, ImageProviderConnection } from "@canvas/contracts";
-import { ImageProviderContractError, validateImageProviderRequest } from "./imageProviderContract";
+import type { ImageExecutionRequest, ProductionImageExecutionRequest, ImageProviderConnection } from "@canvas/contracts";
+import { ImageProviderContractError, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
 import { MAX_IMAGE_PROTOCOL_REQUEST_BYTES, encodeImageJson, imagePayloadSha256, prepareImagePayloadParts,
   type ImageInputTransform, type ImagePayloadParts, type TrustedImageBytes } from "./imageRequestPayload";
 import { parseOpenAiImageResponse, type ImageProtocolResponse } from "./openaiImageProtocol";
@@ -50,6 +50,12 @@ function encodeMultipart(parts: ImagePayloadParts, encoding: "multipart-image-ar
 // Pure preparation: no fetch/SDK/secret lookup, and never relaxes the real gate.
 export async function prepareCompatibleImageRequest(connection: ImageProviderConnection, input: ImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<CompatibleImagePreparedRequest> {
   const validated = validateImageProviderRequest(connection, input, now);
+  return buildCompatibleImageRequest(validated, trustedImages);
+}
+export async function prepareProductionCompatibleImageRequest(connection: ImageProviderConnection, input: ProductionImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<CompatibleImagePreparedRequest> {
+  return buildCompatibleImageRequest(validateProductionImageProviderRequest(connection, input, now), trustedImages);
+}
+async function buildCompatibleImageRequest(validated: { connection: ImageProviderConnection; request: ImageExecutionRequest | ProductionImageExecutionRequest; fingerprint: string }, trustedImages: readonly TrustedImageBytes[]): Promise<CompatibleImagePreparedRequest> {
   const config = validated.connection; const request = validated.request;
   if (config.protocol !== "openai-compatible") reject("image_protocol_mismatch");
   const profile = config.compatibility;

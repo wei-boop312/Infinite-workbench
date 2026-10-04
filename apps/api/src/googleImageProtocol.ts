@@ -1,6 +1,6 @@
 import { TextDecoder } from "node:util";
-import { ImageExecutionRequestSchema, ImageUsageSchema, type GoogleImageProfile, type ImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome } from "@canvas/contracts";
-import { ImageProviderContractError, validateImageProviderRequest } from "./imageProviderContract";
+import { ImageExecutionRequestSchema, ImageUsageSchema, type GoogleImageProfile, type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome } from "@canvas/contracts";
+import { ImageProviderContractError, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
 import { imagePayloadSha256, prepareImagePayloadParts, type ImageInputTransform, type ImagePayloadParts, type TrustedImageBytes } from "./imageRequestPayload";
 import { decodeImageCandidate, imageProtocolOutcome, MAX_IMAGE_PROTOCOL_RESPONSE_BYTES, type ImageProtocolResponse, type ParsedImageProtocolResponse } from "./imageProtocolResponse";
 
@@ -40,6 +40,12 @@ export function encodeGoogleImageJson(prompt: string, images: ImagePayloadParts[
 // mutate a task/ledger, accept a client's receipt, or enable the real gate.
 export async function prepareGoogleImageRequest(connection: ImageProviderConnection, input: ImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<GoogleImagePreparedRequest> {
   const validated = validateImageProviderRequest(connection, input, now);
+  return buildGoogleImageRequest(validated, trustedImages);
+}
+export async function prepareProductionGoogleImageRequest(connection: ImageProviderConnection, input: ProductionImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<GoogleImagePreparedRequest> {
+  return buildGoogleImageRequest(validateProductionImageProviderRequest(connection, input, now), trustedImages);
+}
+async function buildGoogleImageRequest(validated: { connection: ImageProviderConnection; request: ImageExecutionRequest | ProductionImageExecutionRequest; fingerprint: string }, trustedImages: readonly TrustedImageBytes[]): Promise<GoogleImagePreparedRequest> {
   const request = validated.request;
   if (validated.connection.protocol !== "google") reject("image_protocol_mismatch");
   const profile = validated.connection.googleNative;

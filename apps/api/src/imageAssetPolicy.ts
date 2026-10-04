@@ -1,5 +1,5 @@
-import { ConstraintSnapshotSchema, type ConstraintSnapshot, type ImageExecutionRequest } from "@canvas/contracts";
-import { validateImageProviderInputs } from "./imageProviderContract";
+import { ConstraintSnapshotSchema, ImageExecutionRequestSchema, ProductionImageExecutionRequestSchema, type ConstraintSnapshot, type ImageExecutionRequest, type ProductionImageExecutionRequest } from "@canvas/contracts";
+import { validateImageProtocolInputs } from "./imageProviderContract";
 import { imagePayloadSha256 } from "./imageRequestPayload";
 import { MAX_STATIC_IMAGE_EDGE, MAX_STATIC_IMAGE_PIXELS } from "./staticImageDecoder";
 import { assetMetadataFingerprint } from "./verifiedAssets";
@@ -14,6 +14,12 @@ function reject(code: string): never { throw new RunKernelError(422, code, "å›¾ç
 // Called under the caller's transaction after permission checks. Shared by
 // preparation and ingestion, and must also run before future confirm/dispatch.
 export function validateLocalImageAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest) {
+  return validateAssetPolicy(store, ImageExecutionRequestSchema.parse(request));
+}
+export function validateProductionImageAssetPolicy(store: SqliteRunKernelStateStore, request: ProductionImageExecutionRequest) {
+  return validateAssetPolicy(store, ProductionImageExecutionRequestSchema.parse(request));
+}
+function validateAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest | ProductionImageExecutionRequest) {
   const catalog = store.loadCatalog();
   const project = catalog?.projects.find((item) => item.projectId === request.projectId);
   const constraint = project?.constraints.find((item) => item.id === request.constraintSnapshotId);
@@ -33,6 +39,6 @@ export function validateLocalImageAssetPolicy(store: SqliteRunKernelStateStore, 
     if (!receipt || !registered || receipt.registeredMetadataSha256 !== assetMetadataFingerprint(registered)) reject("image_input_not_verified");
     return receipt;
   });
-  validateImageProviderInputs(request, receipts);
+  validateImageProtocolInputs(request, receipts);
   return { catalog, project, constraint, receipts };
 }

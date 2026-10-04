@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import sharp from "sharp";
-import { ImageInputTransformSchema, type ImageExecutionRequest, type ImageModelCapability, type VerifiedImage } from "@canvas/contracts";
-import { ImageProviderContractError, validateImageProviderInputs } from "./imageProviderContract";
+import { ImageInputTransformSchema, type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageModelCapability, type VerifiedImage } from "@canvas/contracts";
+import { ImageProviderContractError, validateImageProtocolInputs } from "./imageProviderContract";
 import { withStaticImageDecodeSlot } from "./staticImageDecoder";
 
 export const MAX_IMAGE_PROTOCOL_REQUEST_BYTES = 64 * 1024 * 1024;
@@ -26,8 +26,8 @@ async function normalizedPixels(body: Buffer, width: number, height: number) {
 }
 
 // Called only with a request/capability already checked by the provider contract.
-export async function prepareImagePayloadParts(request: ImageExecutionRequest, capability: ImageModelCapability, trustedImages: readonly TrustedImageBytes[], allowedMaskPolarity: "transparent-edit" | "declared"): Promise<ImagePayloadParts> {
-  validateImageProviderInputs(request, trustedImages.map((image) => image.receipt));
+export async function prepareImagePayloadParts(request: ImageExecutionRequest | ProductionImageExecutionRequest, capability: ImageModelCapability, trustedImages: readonly TrustedImageBytes[], allowedMaskPolarity: "transparent-edit" | "declared"): Promise<ImagePayloadParts> {
+  validateImageProtocolInputs(request, trustedImages.map((image) => image.receipt));
   const params = request.parameters;
   const fields: ImagePayloadParts["fields"] = { model: request.model, prompt: params.prompt, n: 1,
     size: params.size === "auto" ? "auto" : `${params.size.width}x${params.size.height}`,

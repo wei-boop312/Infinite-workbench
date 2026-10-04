@@ -1,9 +1,9 @@
 import { TextDecoder } from "node:util";
 import {
   ImageExecutionRequestSchema, ImageUsageSchema,
-  type ImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome,
+  type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome,
 } from "@canvas/contracts";
-import { ImageProviderContractError, validateImageProviderRequest } from "./imageProviderContract";
+import { ImageProviderContractError, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
 import { encodeImageJson, imagePayloadSha256, prepareImagePayloadParts, type ImageInputTransform, type TrustedImageBytes } from "./imageRequestPayload";
 export { MAX_IMAGE_PROTOCOL_REQUEST_BYTES } from "./imageRequestPayload";
 export type { TrustedImageBytes } from "./imageRequestPayload";
@@ -26,6 +26,12 @@ export type PreparedImageProtocolRequest = {
 // Bytes and receipts must be loaded by the trusted server asset service.
 export async function prepareOpenAiImageRequest(connection: ImageProviderConnection, input: ImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<PreparedImageProtocolRequest> {
   const validated = validateImageProviderRequest(connection, input, now);
+  return buildOpenAiImageRequest(validated, trustedImages);
+}
+export async function prepareProductionOpenAiImageRequest(connection: ImageProviderConnection, input: ProductionImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<PreparedImageProtocolRequest> {
+  return buildOpenAiImageRequest(validateProductionImageProviderRequest(connection, input, now), trustedImages);
+}
+async function buildOpenAiImageRequest(validated: { connection: ImageProviderConnection; request: ImageExecutionRequest | ProductionImageExecutionRequest; fingerprint: string }, trustedImages: readonly TrustedImageBytes[]): Promise<PreparedImageProtocolRequest> {
   const request = validated.request;
   if (validated.connection.protocol !== "openai") reject("image_protocol_mismatch");
   const capability = validated.connection.models.find((model) => model.model === request.model)!;

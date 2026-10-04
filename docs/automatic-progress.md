@@ -4,7 +4,7 @@
 
 当前对话已经创建应用内 heartbeat 自动续做，ID 为 `automation`，每 10 分钟接续当前对话；不是独立 cron 项目，也不创建新的聊天。电脑需保持开机、应用保持运行。
 
-2026-10-04 最新本地验收为阶段4的 **6D1 独立生产准备/价格依据合同**，785 项单元/集成（41 文件）、92 项 Chrome、6 个工作区构建通过；真实生成仍关闭。10:30 周已用65%/剩余35%，高于20%停止线，原自动续做保持 ACTIVE，下一步 **6D2 独立完整人工确认与同库统一预算/实际任务快照**，随后生产租约/发送响应证据/产物与费用分步。6D1不创建任务或预留；manual-budget只有上限、没有估价，source标签/schema本身不证明可信，假oracle独立contract-fixture证据不冒充供应商价格。SQLite v6只追加生产准备/存在表，旧用户记录/预算/配置指纹不变；ICRD凭证库独立不改。仅自有假价格/随机材料/临时存储，不读取私人密钥或创建生产根钥匙/打开发送。6A–6C不是生产保险库/实际任务授权，回环夹具不是生产网络/SSRF全验收。完整边界见 `production-image-preparations.md`、`encrypted-image-credentials.md`、`native-image-network.md`、`image-egress-contract.md`、`phase4-provider-plan.md` 和 outputs 最新记录。
+2026-10-04 最新本地验收为阶段4的 **6D2A 独立期待金额/摘要合同及发送前纯协议准备**，836 项单元/集成（42 文件）、93 项 Chrome、6 个工作区构建通过；6D2 整体和真实生成未完成。11:00 周已用68%/剩余32%，高于20%停止线，原自动续做保持 ACTIVE，下一步 **6D2B 独立完整人工确认与同库统一预算/实际任务快照**，随后生产租约/发送响应证据/产物与费用分步。6D2A构造三协议实际JSON/表单/原生负载及原图转换摘要，但snapshot仍unconfirmed/execfalse/realfalse；候选编号不是实际任务，无当前价格/权限/目录查询或预算预留，原准备不改写。manual-budget估价明确未知，不补0或上限；旧任务/账本合同暂不扩展。SQLite v6及ICRD凭证库不变。只自有假价格/随机材料/临时存储，不读取私人密钥或创建生产根钥匙/打开发送。6A–6C不是生产保险库/实际任务授权，回环夹具不是生产网络/SSRF全验收。完整边界见 `production-image-protocol.md`、`production-image-preparations.md`、`encrypted-image-credentials.md`、`native-image-network.md`、`image-egress-contract.md`、`phase4-provider-plan.md` 和 outputs 最新记录。
 
 ## 执行规则
 

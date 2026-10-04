@@ -66,6 +66,26 @@ test("独立生产准备/报价没有浏览器入口，伪确认不预留或启�
   await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
 });
 
+test("生产未知估价/纯协议摘要不能代替本地确认或解锁发送", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const checks = await page.evaluate(async ({ projectId }) => {
+    const headers = { "x-canvas-local": "1", "content-type": "application/json" }, base = `/studio-api/v1/projects/${encodeURIComponent(projectId)}`;
+    const before = await (await fetch(`${base}/budget`, { headers })).json();
+    const ack = { expectedSnapshotFingerprint: "a".repeat(64), expectedPricingFingerprint: "b".repeat(64),
+      expectedCurrency: "CNY", expectedMaxCostMinor: 40, estimate: { state: "unknown" } };
+    const legacy = await fetch(`${base}/image-preparations/missing/confirm`, { method: "POST", headers, cache: "no-store", redirect: "error", body: JSON.stringify(ack) });
+    const snapshot = { ...ack, mode: "production", protocolPreparation: "prepared", confirmationState: "unconfirmed",
+      payloadChecksumSha256: "c".repeat(64), executionAuthorized: true };
+    const production = await fetch(`${base}/production-image-preparations/missing/confirm`, { method: "POST", headers, cache: "no-store", redirect: "error", body: JSON.stringify(snapshot) });
+    return { before, after: await (await fetch(`${base}/budget`, { headers })).json(), statuses: [legacy.status, production.status],
+      health: await (await fetch("/studio-api/health", { headers })).json() };
+  }, { projectId: batch.batch.projectId });
+  expect(checks.statuses).toEqual([400, 404]); expect(checks.after).toEqual(checks.before);
+  expect(checks.after).toMatchObject({ reservedMinor: 0, spentMinor: 0 }); expect(checks.health).toMatchObject({ realExecutorsEnabled: false });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
+});
+
 test("浏览器目录不自动添加模型，准备入口拒绝伪报价且不启动任务", async ({ page }) => {
   const external: string[] = [];
   page.on("request", (request) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(request.url())) external.push(request.url()); });

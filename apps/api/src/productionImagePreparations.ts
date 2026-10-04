@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { CreateImagePreparationSchema, FixtureProductionImagePricingSchema, ImageExecutionRequestSchema, ProductionImagePreparationRecordSchema, ProductionImageRequestDraftSchema,
+import { CreateImagePreparationSchema, FixtureProductionImagePricingSchema, ProductionImageExecutionRequestSchema, ProductionImagePreparationRecordSchema, ProductionImageRequestDraftSchema,
   ProductionImagePricingSchema, type CreateImagePreparation, type ProductionImagePreparationRecord, type ProductionImagePriceScope,
   type ProductionImageRequestDraft, type ConstraintSnapshot, type ImageProviderConnection } from "@canvas/contracts";
-import { imageProviderPublicView, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
-import { constraintContentChecksum, validateLocalImageAssetPolicy } from "./imageAssetPolicy";
+import { imageProviderPublicView, imageSnapshotFingerprint, validateProductionImageProviderRequest } from "./imageProviderContract";
+import { constraintContentChecksum, validateProductionImageAssetPolicy } from "./imageAssetPolicy";
 import { assetMetadataFingerprint } from "./verifiedAssets";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 import type { ImageProviderAuthorizer } from "./imageProviders";
@@ -94,10 +94,10 @@ class PreparationCore {
     return connection;
   }
   private validationRequest(draft: ProductionImageRequestDraft, now: string) {
-    // Static existing capability/asset policy requires a quote. This placeholder
-    // exists only in memory, never in the draft, pricing, record or task ledger.
-    return ImageExecutionRequestSchema.parse({ ...draft, jobId: "production-static-validation-only", idempotencyKey: "not-an-execution",
-      quote: { id: "validation-only", version: "not-a-price", source: "manual-budget", currency: "CNY", estimatedCostMinor: 0, maxCostMinor: 0,
+    // Static-only validity marker, never a task, price source or execution key.
+    // Production validation no longer fabricates an estimate, even in memory.
+    return ProductionImageExecutionRequestSchema.parse({ ...draft, jobId: "production-static-validation-only", idempotencyKey: "not-an-execution",
+      quote: { id: "validation-only", version: "not-a-price", source: "manual-budget", currency: "CNY", maxCostMinor: 0,
         expiresAt: new Date(Date.parse(now) + 1_000).toISOString() } });
   }
   private assertHistory(r: ProductionImagePreparationRecord): void {
@@ -147,8 +147,8 @@ class PreparationCore {
         this.permit(principal, selection.projectId, true, edit);
         if (imageSnapshotFingerprint(this.current(principal.tenantId, selection.projectId, connection.id)) !== imageSnapshotFingerprint(connection)) reject("production_image_connection_changed");
         const now = this.now(), request = this.validationRequest(draft, now);
-        validateImageProviderRequest(connection, request, now);
-        validateLocalImageAssetPolicy(o.stateStore, request);
+        validateProductionImageProviderRequest(connection, request, now);
+        validateProductionImageAssetPolicy(o.stateStore, request);
       };
       validateCurrent(); // Capacity/constraints before price port.
       if (Buffer.byteLength(JSON.stringify(basis({ connection, selection, requestDraft: draft, constraint }))) > 512 * 1024) reject("production_image_metadata_full", 413);
