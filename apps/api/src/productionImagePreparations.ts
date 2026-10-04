@@ -61,6 +61,7 @@ let activeConfirmations = 0;
 // No HTTP route, live inquiry, credential port, network or executor.
 class PreparationCore {
   private readonly pending = new Map<string, string>();
+  usesStateStore(store: SqliteRunKernelStateStore): boolean { return this.options?.stateStore === store; }
   constructor(private readonly mode: Mode, private readonly options?: Options) {
     if (options) {
       const limit = options.maxMetadataBytes ?? 16 * 1024 * 1024;

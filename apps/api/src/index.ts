@@ -27,6 +27,8 @@ import type { LocalImageProviders } from "./imageProviders";
 import type { GeneratedAssetReadPort, GeneratedAssetLineagePort } from "./generatedAssetReads";
 import { MAX_IMAGE_PROTOCOL_OUTPUT_BYTES } from "./imageProtocolResponse";
 import { imageMagicMime } from "./staticImageDecoder";
+import { handleProductionImagePublicHttp } from "./productionImagePublicHttp";
+import type { ProductionImagePublicPort } from "./productionImagePublic";
 
 let activeGeneratedTransfers = 0;
 
@@ -39,6 +41,7 @@ export type ApiServerOptions = {
   runKernel?: RunKernelPort;
   verifiedAssets?: VerifiedAssetPort;
   imageProviders?: LocalImageProviders;
+  productionImagePreparations?: ProductionImagePublicPort;
   generatedAssetReads?: GeneratedAssetReadPort;
   generatedAssetLineages?: GeneratedAssetLineagePort;
 };
@@ -92,6 +95,7 @@ export function createApiServer(options: ApiServerOptions = {}) {
     }
 
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1"), pathname = requestUrl.pathname;
+    if (await handleProductionImagePublicHttp(request, response, options.productionImagePreparations)) return;
     const generatedLineageMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/generated-assets\/([^/]+)\/lineage$/);
     if (generatedLineageMatch) {
       const fail = (status: number, code: string) => sendJson(response, status, { error: code }, "private, no-store");

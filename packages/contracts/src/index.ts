@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
-import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
+import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImagePublicPricingSchema, ProductionImageTaskIdentitySchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
 import { ProductionImageBillingRecordSchema, ProductionImageBillingSummarySchema } from "./productionImageBilling.ts";
 
 export * from "./imageProviders.ts";
@@ -742,6 +742,64 @@ export const ImageConfirmationHistorySchema = z.object({
   }
 });
 export type ImageConfirmationPublic = z.infer<typeof ImageConfirmationPublicSchema>;
+
+const ProductionPublicHash = z.string().regex(/^[a-f0-9]{64}$/);
+const ProductionPublicMode = z.enum(["production", "production-contract-fixture"]);
+export const ProductionImagePreparationPublicSchema = z.object({
+  schemaVersion: z.literal(1), id: IdSchema, tenantId: IdSchema, projectId: IdSchema, mode: ProductionPublicMode,
+  status: z.literal("unconfirmed"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false), protocolPreparation: z.literal("not-run"),
+  snapshotFingerprint: ProductionPublicHash, basisFingerprint: ProductionPublicHash, pricingFingerprint: ProductionPublicHash,
+  createdBy: IdSchema, createdAt: IsoDateSchema, connection: ImageProviderPublicSchema,
+  requestDraft: ProductionImageRequestDraftSchema, constraint: ConstraintSnapshotSchema, pricing: ProductionImagePublicPricingSchema,
+}).strict().superRefine((p, ctx) => {
+  const d = p.requestDraft, c = p.constraint, q = p.pricing.quote, model = p.connection.models.find(m => m.model === d.model);
+  if (d.tenantId !== p.tenantId || d.projectId !== p.projectId || c.projectId !== p.projectId || d.constraintSnapshotId !== c.id
+    || d.connectionId !== p.connection.id || d.connectionRevision !== p.connection.revision || !model || model.capabilityVersion !== d.capabilityVersion
+    || !model.operations.includes(d.operation) || d.protection !== "none" || c.lockedPaths.includes("product.pixels")
+    || d.parameters.size === "auto" || d.parameters.size.width !== c.outputSpec.width || d.parameters.size.height !== c.outputSpec.height
+    || c.outputSpec.width > 8192 || c.outputSpec.height > 8192 || c.outputSpec.width * c.outputSpec.height > 16_000_000
+    || d.parameters.outputFormat !== c.outputSpec.format || Date.parse(p.createdAt) >= Date.parse(q.expiresAt)
+    || Date.parse(p.pricing.evidence.checkedAt) > Date.parse(p.createdAt)
+    || (p.mode === "production") === (p.pricing.evidence.kind === "contract-fixture")) ctx.addIssue({ code: "custom", message: "公开生产准备与原约束/价格/命名空间不一致" });
+});
+// No RunBatchAggregate: its private execution keys and live leases are NOT public confirmation data.
+export const ProductionImageConfirmationPublicSchema = z.object({
+  schemaVersion: z.literal(1), tenantId: IdSchema, projectId: IdSchema, mode: ProductionPublicMode,
+  executionState: z.literal("confirmed-not-dispatchable"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false), protocolPreparation: z.literal("prepared"),
+  preparationId: IdSchema, preparationFingerprint: ProductionPublicHash, pricingFingerprint: ProductionPublicHash,
+  executionFingerprint: ProductionPublicHash, requestFingerprint: ProductionPublicHash, payloadChecksumSha256: ProductionPublicHash,
+  payloadByteSize: z.number().int().positive().max(64 * 1024 * 1024), contentType: PreparedProductionImageProtocolSnapshotSchema.shape.contentType,
+  transformedInputs: z.array(ImageInputTransformSchema).max(21), confirmedBy: IdSchema, confirmedAt: IsoDateSchema,
+  pricing: ProductionImagePublicPricingSchema,
+  task: z.object({ batchId: ProductionImageBatchIdSchema, jobId: ProductionImageTaskIdentitySchema.shape.jobId,
+    tool: z.enum(["image-generate", "image-edit"]), adapterId: IdSchema, constraintSnapshotId: IdSchema,
+    inputAssetIds: z.array(IdSchema).max(20), outputAssetIds: z.array(IdSchema).max(1),
+    batchStatus: z.enum(["queued", "running", "billing_unknown", "cancelled", "succeeded", "failed"]),
+    jobStatus: z.enum(["queued", "leased", "running", "billing_unknown", "cancelled", "succeeded", "failed"]),
+    estimatedCostMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+    currentMaxCostMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    actualCostMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  }).strict(),
+}).strict().superRefine((p, ctx) => {
+  const q = p.pricing.quote, t = p.task;
+  if ((p.mode === "production") === (p.pricing.evidence.kind === "contract-fixture") || Date.parse(p.confirmedAt) >= Date.parse(q.expiresAt)
+    || Date.parse(p.confirmedAt) < Date.parse(p.pricing.evidence.checkedAt) || t.currentMaxCostMinor < q.maxCostMinor
+    || t.estimatedCostMinor !== (q.source === "manual-budget" ? null : q.estimatedCostMinor)
+    || (t.tool === "image-generate" ? t.inputAssetIds.length !== 0 : t.inputAssetIds.length === 0)
+    || (t.jobStatus === "leased" ? t.batchStatus !== "queued" : t.batchStatus !== t.jobStatus)
+    || (t.jobStatus === "succeeded" && (t.outputAssetIds.length !== 1 || t.actualCostMinor === undefined))
+    || (t.actualCostMinor !== undefined && !["failed", "succeeded", "cancelled"].includes(t.jobStatus))) ctx.addIssue({ code: "custom", message: "公开生产确认与实际任务/原金额不一致" });
+});
+export const ProductionImageConfirmationHistorySchema = z.object({
+  schemaVersion: z.literal(1), mode: ProductionPublicMode, tenantId: IdSchema, projectId: IdSchema,
+  preparationId: IdSchema, preparationFingerprint: ProductionPublicHash, pricingFingerprint: ProductionPublicHash,
+  confirmation: ProductionImageConfirmationPublicSchema.nullable(),
+}).strict().refine(p => !p.confirmation || (p.confirmation.mode === p.mode && p.confirmation.tenantId === p.tenantId && p.confirmation.projectId === p.projectId
+  && p.confirmation.preparationId === p.preparationId && p.confirmation.preparationFingerprint === p.preparationFingerprint && p.confirmation.pricingFingerprint === p.pricingFingerprint),
+{ message: "生产确认历史与原准备不一致" });
+export type ProductionImagePreparationPublic = z.infer<typeof ProductionImagePreparationPublicSchema>;
+export type ProductionImageConfirmationPublic = z.infer<typeof ProductionImageConfirmationPublicSchema>;
+export type ProductionImageConfirmationHistory = z.infer<typeof ProductionImageConfirmationHistorySchema>;
 // A read-only recovery pointer; it contains no price or executable authorization.
 export const ImageConfirmationRecoverySchema = z.object({
   schemaVersion: z.literal(1), projectId: IdSchema, preparationId: IdSchema, preparationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),

@@ -178,6 +178,20 @@ test("独立生产结算和第二人审批仍无日常HTTP入口，不借草稿�
   expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
 });
 
+test("生产公开准备/确认合同不会自动启用日常确认及只读历史路由", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["production-image-preparations/fake", "production-image-preparations/fake/confirm", "production-image-preparations/fake/confirmation"]) {
+    expect((await page.request.get(`${base}/${suffix}`, { headers })).status()).toBe(404);
+    expect((await page.request.post(`${base}/${suffix}`, { headers, data: { expectedSnapshotFingerprint: "a".repeat(64), expectedPricingFingerprint: "b".repeat(64),
+      expectedCurrency: "CNY", expectedMaxCostMinor: 40, estimate: { state: "unknown" } } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+});
+
 test("生产未知估价/纯协议摘要不能代替本地确认或解锁发送", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
@@ -433,12 +447,14 @@ test("画布内预估、确认、部分失败和人工重试，结果可回画�
   const panel = await prepare(page);
   await panel.getByText("模拟运行情况", { exact: true }).click();
   await panel.getByLabel("模拟运行情况").selectOption("partial-failure");
+  const createdResponse = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click();
+  const batchId = (await (await createdResponse).json()).batch.id as string;
+  await expect(panel.getByLabel("选择任务批次")).toHaveValue(batchId);
   const current = panel.getByRole("region", { name: "当前批次" });
   await expect(current.getByText("待人工确认", { exact: true })).toBeVisible();
   await expect(current).toContainText("¥0.50");
   await expect(current.getByRole("article")).toHaveCount(0);
-  const batchId = await panel.getByLabel("选择任务批次").inputValue();
   await panel.getByRole("button", { name: "确认模拟成本并排队" }).click();
   await expect(current.getByRole("article")).toHaveCount(2);
   await panel.getByRole("button", { name: "执行排队任务" }).click();

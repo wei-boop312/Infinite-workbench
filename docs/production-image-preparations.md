@@ -1,5 +1,7 @@
 # 6D1 独立生产准备与价格依据合同
 
+最新增量6D8A公开字段白名单及显式默认关闭HTTP接线见 production-image-public-http.md；下方“没有HTTP”为6D1验收时点，日常bridge仍未接生产、人工UI与真实执行未开放。
+
 2026-10-04（上海）。本地合同与自有假价格端口验收；**不是已核验供应商价格、生产授权或真实接通**。实现入口 `productionImagePreparations.ts`，旧 `LocalImageProviders` 的准备、确认、任务与费用语义不变。
 
 ## 准备不等于确认或执行

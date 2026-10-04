@@ -80,3 +80,16 @@ export type ProductionImageRequestDraft = z.infer<typeof ProductionImageRequestD
 export type ProductionImagePriceScope = z.infer<typeof ProductionImagePriceScopeSchema>;
 export type ProductionImagePricing = z.infer<typeof ProductionImagePricingSchema>;
 export type FixtureProductionImagePricing = z.infer<typeof FixtureProductionImagePricingSchema>;
+
+// Explicit public allowlist; full private pricing/scope SHA remains opaque.
+export const ProductionImagePublicPricingSchema = z.union([
+  z.object({ schemaVersion: z.literal(1), quote: ProductionImageQuoteSchema,
+    evidence: ProductionImagePricingSchema.shape.evidence }).strict().superRefine((p, ctx) => {
+    if ((p.quote.source === "server-price-table" ? "server-verified-price" : "server-approved-budget") !== p.evidence.kind
+      || Date.parse(p.evidence.checkedAt) >= Date.parse(p.quote.expiresAt)) ctx.addIssue({ code: "custom", message: "价格依据与来源或时间不一致" });
+  }),
+  z.object({ schemaVersion: z.literal(1), quote: ProductionImageQuoteSchema,
+    evidence: FixtureProductionImagePricingSchema.shape.evidence }).strict()
+    .refine((p) => Date.parse(p.evidence.checkedAt) < Date.parse(p.quote.expiresAt), { message: "假依据时间不一致" }),
+]);
+export type ProductionImagePublicPricing = z.infer<typeof ProductionImagePublicPricingSchema>;

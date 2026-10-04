@@ -55,5 +55,5 @@ export async function productionBillingTaskFixture(options: { protocol?: ImagePr
   if (options.productionStartOnly) { await reconstruction.start(...args); f.advance(30_000); f.kernel.reconcileProductionImageBatch(principal, "project-a", b.batch.id); }
   else await reconstruction.executeFixture(...args);
   const saved = () => f.store.load()!.batches.find(s => s.aggregate.batch.id === b.batch.id)!;
-  return { f, config, price, artifacts, artifactOptions, kernelOptions, auth, output, send, args, saved, denied, revoke: () => { allowed = false; } };
+  return { f, config, price, preparations, preparation, artifacts, artifactOptions, kernelOptions, auth, output, send, args, saved, denied, revoke: () => { allowed = false; } };
 }
