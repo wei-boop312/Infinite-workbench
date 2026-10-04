@@ -10,6 +10,7 @@ import { productionExpected } from "../apps/api/src/productionImageConfirmationI
 import { ImageProductionReconstructionHarness, ProductionImageTaskReconstruction } from "../apps/api/src/productionImageTaskReconstruction";
 import * as productionProtocol from "../apps/api/src/productionImageProtocol";
 import { validateProductionImageAssetPolicy } from "../apps/api/src/imageAssetPolicy";
+import { assertProductionDispatchIntent } from "../apps/api/src/productionImageDispatchIntentIntegrity";
 import { RunKernelError } from "../apps/api/src/runKernel";
 import { at, connection, principal, setupImageTask } from "./helpers/image-task-fixture";
 
@@ -65,6 +66,65 @@ function fixture(options: { protocol?: ImageProviderConnection["protocol"]; manu
 const unchanged = (f: ReturnType<typeof fixture>, action: () => unknown) => {
   const before = f.store.load(); expect(action).toThrow(); expect(f.store.load()).toEqual(before);
 };
+
+describe("6D3B2 意图关系草稿（未接启动或持久化，不构成里程碑验收）", () => {
+  async function evidence(options: Parameters<typeof fixture>[0] = { manual: true }) {
+    const f = fixture(options), batch = await f.confirm(); f.claim(batch.batch.id);
+    const stored = f.store.load()!.batches[0], e = stored.productionImageExecution!, lease = stored.productionImageLeases![0], protocol = e.protocol;
+    const intent = { schemaVersion: 1, mode: e.mode, transport: "not-connected",
+      id: "production-image-intent:00000000-0000-4000-8000-000000000001", batchId: e.batchId, jobId: protocol.request.jobId,
+      actorId: lease.actorId, workerId: lease.workerId, leaseId: lease.leaseId, executionFingerprint: imageSnapshotFingerprint(e),
+      leaseFingerprint: imageSnapshotFingerprint(lease), requestFingerprint: protocol.requestFingerprint,
+      payloadChecksumSha256: protocol.payloadChecksumSha256, payloadByteSize: protocol.payloadByteSize, contentType: protocol.contentType,
+      transformedInputsFingerprint: imageSnapshotFingerprint(protocol.transformedInputs), protocolVersion: protocol.protocolVersion,
+      confirmedAt: e.confirmedAt, reconstructedAt: lease.leasedAt, recordedAt: lease.leasedAt };
+    return { f, e, lease, intent };
+  }
+  it("只校验历史关系，不改变任务/预算或将未知估价补零", async () => {
+    const { f, e, lease, intent } = await evidence(), before = f.store.load();
+    expect(assertProductionDispatchIntent(intent, imageSnapshotFingerprint(intent), e, lease)).toEqual(intent);
+    expect(f.store.load()).toEqual(before); expect(before!.batches[0].aggregate.jobs[0]).toMatchObject({ status: "leased", estimatedCostMinor: null });
+    expect(before!.batches[0]).not.toHaveProperty("productionImageDispatchIntent");
+  });
+  it.each(["mode", "transport", "id", "jobId", "batchId", "actorId", "workerId", "leaseId", "executionFingerprint", "leaseFingerprint",
+    "requestFingerprint", "payloadChecksumSha256", "payloadByteSize", "contentType", "transformedInputsFingerprint", "protocolVersion", "confirmedAt"])("重算意图SHA仍不能绕过 %s 关系", async (field) => {
+    const { e, lease, intent } = await evidence(), changed: Record<string, unknown> = { ...intent };
+    changed[field] = field === "mode" ? "production" : field === "transport" ? "sent" : field === "id" ? "image-intent-00000000-0000-4000-8000-000000000001"
+      : field.endsWith("Fingerprint") || field.endsWith("Sha256") ? "f".repeat(64)
+      : field === "payloadByteSize" ? intent.payloadByteSize + 1 : field === "confirmedAt" ? new Date(Date.parse(intent.confirmedAt) + 1).toISOString() : "forged";
+    expect(() => assertProductionDispatchIntent(changed, imageSnapshotFingerprint(changed), e, lease)).toThrow();
+  });
+  it.each(["lease-expired", "price-expired", "before-lease", "before-confirmation", "future-reconstruction", "extra-permit"])("时间或伪许可 %s 拒绝", async (kind) => {
+    const { e, lease, intent } = await evidence();
+    const changed = { ...intent, ...(kind === "extra-permit" ? { executionAuthorized: true } : {}),
+      ...(kind === "lease-expired" ? { recordedAt: lease.expiresAt } : {}),
+      ...(kind === "price-expired" ? { recordedAt: e.protocol.request.quote.expiresAt } : {}),
+      ...(kind === "before-lease" ? { reconstructedAt: new Date(Date.parse(lease.leasedAt) - 1).toISOString() } : {}),
+      ...(kind === "before-confirmation" ? { reconstructedAt: new Date(Date.parse(e.confirmedAt) - 1).toISOString() } : {}),
+      ...(kind === "future-reconstruction" ? { reconstructedAt: new Date(Date.parse(intent.recordedAt) + 1).toISOString() } : {}) };
+    expect(() => assertProductionDispatchIntent(changed, imageSnapshotFingerprint(changed), e, lease)).toThrow();
+  });
+  it("损坏摘要和替换原租约/确认拒绝，校验结果不能作为启动端口", async () => {
+    const { e, lease, intent } = await evidence(), digest = imageSnapshotFingerprint(intent);
+    expect(() => assertProductionDispatchIntent(intent, "0".repeat(64), e, lease)).toThrow();
+    expect(() => assertProductionDispatchIntent(intent, digest, e, { ...lease, actorId: "other" })).toThrow();
+    expect(() => assertProductionDispatchIntent(intent, digest, { ...e, confirmedBy: "other" }, lease)).toThrow();
+  });
+  it.each(["openai", "openai-compatible", "google"] as const)("%s 生成/编辑及known/unknown只绑定完整原冻结关系", async (protocol) => {
+    for (const edit of [false, true]) for (const manual of [false, true]) {
+      const { f, e, lease, intent } = await evidence({ protocol, edit, manual }), before = f.store.load();
+      expect(assertProductionDispatchIntent(intent, imageSnapshotFingerprint(intent), e, lease)).toEqual(intent);
+      expect(f.store.load()).toEqual(before); expect(f.pricePort.read).toHaveBeenCalledTimes(1);
+      expect(before!.batches[0].aggregate.jobs[0].estimatedCostMinor).toBe(manual ? null : 25);
+    }
+  });
+  it("更换有效原执行/租约并重算部分摘要仍不匹配原完整确认", async () => {
+    const first = await evidence(), second = await evidence(), changed = { ...first.intent, leaseFingerprint: imageSnapshotFingerprint(second.lease) };
+    expect(() => assertProductionDispatchIntent(changed, imageSnapshotFingerprint(changed), first.e, second.lease)).toThrow();
+    const changedExecution = { ...first.intent, executionFingerprint: imageSnapshotFingerprint(second.e) };
+    expect(() => assertProductionDispatchIntent(changedExecution, imageSnapshotFingerprint(changedExecution), second.e, first.lease)).toThrow();
+  });
+});
 
 describe("6D3A 独立生产租约（自有零费用合同夹具，无发送）", () => {
   it("政策无配置默认关闭；生产类拒绝假价格端口", () => {

@@ -772,6 +772,24 @@ export const ProductionImageLeaseEvidenceSchema = RunJobLeaseSchema.extend({
 }).strict().refine((lease) => Date.parse(lease.expiresAt) > Date.parse(lease.leasedAt), { message: "生产租约期限无效" });
 export type ProductionImageLeaseEvidence = z.infer<typeof ProductionImageLeaseEvidenceSchema>;
 
+// Private historical evidence only. This shape cannot authorize a start, send,
+// credential read or artifact commit. It is NOT yet a persisted task field.
+export const ProductionImageDispatchIntentSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]),
+  transport: z.literal("not-connected"),
+  id: z.string().regex(/^production-image-intent:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/),
+  jobId: IdSchema, batchId: IdSchema, actorId: IdSchema, workerId: IdSchema, leaseId: IdSchema,
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  leaseFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadChecksumSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadByteSize: z.number().int().positive().max(64 * 1024 * 1024), contentType: z.string().min(1).max(256),
+  transformedInputsFingerprint: z.string().regex(/^[a-f0-9]{64}$/), protocolVersion: IdSchema,
+  confirmedAt: IsoDateSchema, reconstructedAt: IsoDateSchema, recordedAt: IsoDateSchema,
+}).strict().refine((intent) => Date.parse(intent.confirmedAt) <= Date.parse(intent.reconstructedAt)
+  && Date.parse(intent.reconstructedAt) <= Date.parse(intent.recordedAt), { message: "生产意图时间关系无效" });
+export type ProductionImageDispatchIntent = z.infer<typeof ProductionImageDispatchIntentSchema>;
+
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,
   projectId: IdSchema,
