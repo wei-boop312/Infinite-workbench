@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ProductionImagePreparationRecordSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ProductionImagePreparationRecord, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
@@ -38,7 +38,8 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
       this.transaction(() => {
         const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version);
-        if (![0, 1, 2, 3, 4, 5].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
+        if (![0, 1, 2, 3, 4, 5, 6].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
+        if (version === 6 && ["production_image_preparations", "production_image_preparation_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产准备表丢失，禁止重新创建");
         this.database.exec(`CREATE TABLE IF NOT EXISTS kernel_state (
           kind TEXT PRIMARY KEY CHECK (kind IN ('runs', 'catalog')),
           revision INTEGER NOT NULL CHECK (revision > 0),
@@ -94,7 +95,17 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
           tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, job_id TEXT NOT NULL,
           PRIMARY KEY (tenant_id, project_id, job_id)
         ) STRICT;
-        PRAGMA user_version = 5`);
+        CREATE TABLE IF NOT EXISTS production_image_preparations (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('production', 'production-contract-fixture')),
+          id TEXT NOT NULL, action_key TEXT NOT NULL, record TEXT NOT NULL, record_sha256 TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, mode, id), UNIQUE (tenant_id, project_id, mode, action_key)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS production_image_preparation_presence (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('production', 'production-contract-fixture')),
+          id TEXT NOT NULL, action_key TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, mode, id), UNIQUE (tenant_id, project_id, mode, action_key)
+        ) STRICT;
+        PRAGMA user_version = 6`);
       });
     } catch (error) {
       this.database.close();
@@ -276,9 +287,38 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   imagePreparationCount(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COUNT(*) AS count FROM image_preparation_presence WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.count ?? 0);
   }
+  loadProductionImagePreparation(tenantId: string, projectId: string, mode: ProductionImagePreparationRecord["mode"], id: string): ProductionImagePreparationRecord | null {
+    return this.readProductionImagePreparation(tenantId, projectId, mode, "id", id);
+  }
+  loadProductionImagePreparationByAction(tenantId: string, projectId: string, mode: ProductionImagePreparationRecord["mode"], key: string): ProductionImagePreparationRecord | null {
+    return this.readProductionImagePreparation(tenantId, projectId, mode, "action_key", key);
+  }
+  private readProductionImagePreparation(tenantId: string, projectId: string, mode: ProductionImagePreparationRecord["mode"], field: "id" | "action_key", value: string): ProductionImagePreparationRecord | null {
+    try {
+      const args = [tenantId, projectId, mode, value];
+      const row = this.database.prepare(`SELECT id, action_key, substr(record, 1, 524289) AS record, length(CAST(record AS BLOB)) AS bytes, record_sha256 FROM production_image_preparations WHERE tenant_id = ? AND project_id = ? AND mode = ? AND ${field} = ?`).get(...args);
+      const marker = this.database.prepare(`SELECT id, action_key FROM production_image_preparation_presence WHERE tenant_id = ? AND project_id = ? AND mode = ? AND ${field} = ?`).get(...args);
+      if (!row && !marker) return null;
+      if (!row || !marker || marker.id !== row.id || marker.action_key !== row.action_key || typeof row.bytes !== "number" || row.bytes > 512 * 1024) throw new Error("生产准备证据丢失或超限");
+      const r = ProductionImagePreparationRecordSchema.parse(this.readImageMetadata(row));
+      if (r.tenantId !== tenantId || r.projectId !== projectId || r.mode !== mode || r.id !== row.id || r.selection.idempotencyKey !== row.action_key) throw new Error("生产准备归属不一致");
+      return r;
+    } catch (error) { throw databaseError(error); }
+  }
+  saveProductionImagePreparation(input: ProductionImagePreparationRecord): void {
+    if (this.depth === 0) throw new Error("必须在事务中保存生产准备单");
+    const r = ProductionImagePreparationRecordSchema.parse(input), payload = this.imageMetadataPayload(r);
+    this.database.prepare("INSERT INTO production_image_preparations(tenant_id, project_id, mode, id, action_key, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(r.tenantId, r.projectId, r.mode, r.id, r.selection.idempotencyKey, payload, createHash("sha256").update(payload).digest("hex"));
+    this.database.prepare("INSERT INTO production_image_preparation_presence(tenant_id, project_id, mode, id, action_key) VALUES (?, ?, ?, ?, ?)")
+      .run(r.tenantId, r.projectId, r.mode, r.id, r.selection.idempotencyKey);
+  }
+  productionImagePreparationCount(tenantId: string, projectId: string): number {
+    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM production_image_preparation_presence WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.count ?? 0);
+  }
   imageMetadataBytes(tenantId: string, projectId: string): number {
-    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM generated_images WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
-      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
+    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM generated_images WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_preparations WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
+      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
   }
   imageFixtureResponseBytes(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);

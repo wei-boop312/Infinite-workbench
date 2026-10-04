@@ -4,7 +4,7 @@
 
 当前对话已经创建应用内 heartbeat 自动续做，ID 为 `automation`，每 10 分钟接续当前对话；不是独立 cron 项目，也不创建新的聊天。电脑需保持开机、应用保持运行。
 
-2026-10-04 最新本地验收为阶段 4 的 6C 默认关闭加密凭证底座，702 项单元/集成（40 文件）、91 项 Chrome、6 个工作区构建通过；真实生成仍关闭。09:58 周剩余38%，高于20%停止线，原自动续做保持 ACTIVE，下一步为6D1独立生产准备与可信报价合同；随后完整确认/统一预算任务、生产租约/发送响应证据按冻结计划分步。仅自有假价格/随机材料/临时存储，不读取私人密钥或创建生产根钥匙/打开发送。6C不是生产保险库或实际任务授权，回环网络夹具不是生产供应商/公网路由/SSRF全部验收。完整边界见 `encrypted-image-credentials.md`、`native-image-network.md`、`image-egress-contract.md`、`phase4-provider-plan.md` 和 outputs 最新记录。
+2026-10-04 最新本地验收为阶段4的 **6D1 独立生产准备/价格依据合同**，785 项单元/集成（41 文件）、92 项 Chrome、6 个工作区构建通过；真实生成仍关闭。10:30 周已用65%/剩余35%，高于20%停止线，原自动续做保持 ACTIVE，下一步 **6D2 独立完整人工确认与同库统一预算/实际任务快照**，随后生产租约/发送响应证据/产物与费用分步。6D1不创建任务或预留；manual-budget只有上限、没有估价，source标签/schema本身不证明可信，假oracle独立contract-fixture证据不冒充供应商价格。SQLite v6只追加生产准备/存在表，旧用户记录/预算/配置指纹不变；ICRD凭证库独立不改。仅自有假价格/随机材料/临时存储，不读取私人密钥或创建生产根钥匙/打开发送。6A–6C不是生产保险库/实际任务授权，回环夹具不是生产网络/SSRF全验收。完整边界见 `production-image-preparations.md`、`encrypted-image-credentials.md`、`native-image-network.md`、`image-egress-contract.md`、`phase4-provider-plan.md` 和 outputs 最新记录。
 
 ## 执行规则
 

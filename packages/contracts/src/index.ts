@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
+import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema } from "./productionImagePricing.ts";
 
 export * from "./imageProviders.ts";
+export * from "./productionImagePricing.ts";
 
 export const CURRENT_CANVAS_SCHEMA_VERSION = 2 as const;
 
@@ -182,6 +184,43 @@ export const ConstraintSnapshotSchema = z.object({
   }).strict(),
   createdAt: IsoDateSchema,
 }).strict();
+
+// Derived from the immutable server record, not the browser's current constraint.
+const ProductionPreparationBase = {
+  schemaVersion: z.literal(1), id: IdSchema, tenantId: IdSchema, projectId: IdSchema,
+  status: z.literal("unconfirmed"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),
+  protocolPreparation: z.literal("not-run"), selection: CreateImagePreparationSchema,
+  selectionFingerprint: z.string().regex(/^[a-f0-9]{64}$/), basisFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  snapshotFingerprint: z.string().regex(/^[a-f0-9]{64}$/), connection: ImageProviderConnectionSchema,
+  requestDraft: ProductionImageRequestDraftSchema, constraint: ConstraintSnapshotSchema,
+  createdBy: IdSchema, createdAt: IsoDateSchema,
+};
+export const ProductionImagePreparationRecordSchema = z.discriminatedUnion("mode", [
+  z.object({ ...ProductionPreparationBase, mode: z.literal("production"), pricing: ProductionImagePricingSchema }).strict(),
+  z.object({ ...ProductionPreparationBase, mode: z.literal("production-contract-fixture"), pricing: FixtureProductionImagePricingSchema }).strict(),
+]).superRefine((r, ctx) => {
+  const s = r.selection, d = r.requestDraft, c = r.connection, scope = r.pricing.scope;
+  const model = c.models.find((m) => m.model === s.model);
+  if (r.tenantId !== c.tenantId || d.tenantId !== r.tenantId
+    || [s.projectId, c.projectId, d.projectId, r.constraint.projectId].some((id) => id !== r.projectId)
+    || s.connectionId !== c.id || d.connectionId !== c.id || s.connectionRevision !== c.revision || d.connectionRevision !== c.revision
+    || !c.enabled || !model || model.version !== s.capabilityVersion || d.capabilityVersion !== s.capabilityVersion
+    || d.model !== s.model || d.adapterId !== c.adapterId || d.operation !== s.operation
+    || d.constraintSnapshotId !== r.constraint.id || s.constraintSnapshotId !== r.constraint.id
+    || d.protection !== "none" || s.protection !== "none" || r.constraint.lockedPaths.includes("product.pixels")
+    || d.parameters.size === "auto" || d.parameters.size.width !== r.constraint.outputSpec.width || d.parameters.size.height !== r.constraint.outputSpec.height
+    || d.parameters.outputFormat !== r.constraint.outputSpec.format
+    || JSON.stringify(d.parameters) !== JSON.stringify(s.parameters) || JSON.stringify(d.providerParameters) !== JSON.stringify(s.providerParameters)
+    || JSON.stringify(d.inputs.map((i) => i.assetId)) !== JSON.stringify(s.inputAssetIds)
+    || (d.operation === "edit" ? d.mask?.assetId : undefined) !== (s.operation === "edit" ? s.maskAssetId : undefined)
+    || scope.tenantId !== r.tenantId || scope.projectId !== r.projectId || scope.actorId !== r.createdBy
+    || scope.connectionId !== c.id || scope.connectionRevision !== c.revision || scope.model !== d.model || scope.capabilityVersion !== d.capabilityVersion
+    || scope.operation !== d.operation || scope.basisFingerprint !== r.basisFingerprint || scope.selectionFingerprint !== r.selectionFingerprint
+    || Date.parse(r.pricing.evidence.checkedAt) > Date.parse(r.createdAt) || Date.parse(r.createdAt) >= Date.parse(r.pricing.quote.expiresAt)) {
+    ctx.addIssue({ code: "custom", message: "独立生产准备或价格范围不一致" });
+  }
+});
+export type ProductionImagePreparationRecord = z.infer<typeof ProductionImagePreparationRecordSchema>;
 
 // Derived from the immutable server record, not the browser's current constraint.
 export const ImagePreparationPublicSchema = z.object({

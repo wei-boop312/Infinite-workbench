@@ -47,6 +47,25 @@ test("凭证与出站合同没有浏览器HTTP入口，探测不改变预算或�
   await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
 });
 
+test("独立生产准备/报价没有浏览器入口，伪确认不预留或启用执行", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const checks = await page.evaluate(async ({ projectId }) => {
+    const headers = { "x-canvas-local": "1", "content-type": "application/json" }, base = `/studio-api/v1/projects/${encodeURIComponent(projectId)}`;
+    const before = await (await fetch(`${base}/budget`, { headers })).json(), statuses: number[] = [];
+    for (const suffix of ["production-image-preparations", "production-image-pricing", "production-image-preparations/fake/confirm"]) {
+      statuses.push((await fetch(`${base}/${suffix}`, { headers, redirect: "error", cache: "no-store" })).status);
+      statuses.push((await fetch(`${base}/${suffix}`, { method: "POST", headers, redirect: "error", cache: "no-store",
+        body: JSON.stringify({ mode: "production", source: "server-price-table", estimatedCostMinor: 0, confirmed: true, executionAuthorized: true }) })).status);
+    }
+    return { before, after: await (await fetch(`${base}/budget`, { headers })).json(), statuses,
+      health: await (await fetch("/studio-api/health", { headers })).json() };
+  }, { projectId: batch.batch.projectId });
+  expect(checks.statuses).toEqual(Array(6).fill(404)); expect(checks.after).toEqual(checks.before);
+  expect(checks.health).toMatchObject({ realExecutorsEnabled: false });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
+});
+
 test("浏览器目录不自动添加模型，准备入口拒绝伪报价且不启动任务", async ({ page }) => {
   const external: string[] = [];
   page.on("request", (request) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(request.url())) external.push(request.url()); });
