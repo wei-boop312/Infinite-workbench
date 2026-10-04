@@ -800,6 +800,16 @@ export const ProductionImageConfirmationHistorySchema = z.object({
 export type ProductionImagePreparationPublic = z.infer<typeof ProductionImagePreparationPublicSchema>;
 export type ProductionImageConfirmationPublic = z.infer<typeof ProductionImageConfirmationPublicSchema>;
 export type ProductionImageConfirmationHistory = z.infer<typeof ProductionImageConfirmationHistorySchema>;
+// Trusted host UI configuration, never a server authorization or browser preference.
+export const ProductionImageUiScopeSchema = z.object({ preparationUiEnabled: z.literal(true), tenantId: IdSchema, mode: ProductionPublicMode }).strict();
+export type ProductionImageUiScope = z.infer<typeof ProductionImageUiScopeSchema>;
+export const ProductionImageRecoverySchema = z.object({
+  schemaVersion: z.literal(1), tenantId: IdSchema, projectId: IdSchema, mode: ProductionPublicMode,
+  actionId: IdSchema, stage: z.enum(["preparing", "prepared", "confirm-submitted"]),
+  preparationId: IdSchema.optional(), preparationFingerprint: ProductionPublicHash.optional(), pricingFingerprint: ProductionPublicHash.optional(),
+}).strict().refine(p => p.stage === "preparing" ? !p.preparationId && !p.preparationFingerprint && !p.pricingFingerprint
+  : Boolean(p.preparationId && p.preparationFingerprint && p.pricingFingerprint), { message: "生产只读恢复指针不完整" });
+export type ProductionImageRecovery = z.infer<typeof ProductionImageRecoverySchema>;
 // A read-only recovery pointer; it contains no price or executable authorization.
 export const ImageConfirmationRecoverySchema = z.object({
   schemaVersion: z.literal(1), projectId: IdSchema, preparationId: IdSchema, preparationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),

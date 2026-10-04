@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Asset, ConstraintSnapshot, CreateRunBatchRequest, ProjectBudgetSnapshot, GeneratedAssetLineage,
-  ResolveBillingUnknownRequest, RunBatchAggregate, RunJob, BillingOverage,
+  ResolveBillingUnknownRequest, RunBatchAggregate, RunJob, BillingOverage, ProductionImageUiScope,
 } from "@canvas/contracts";
 import { money, parseMoney, RUN_STATUS_LABEL, StudioRunClient } from "../runs/runClient";
 import { assetRepository } from "../assets/assetRepository";
 import ImagePreparationPanel from "./ImagePreparationPanel";
+import ProductionImagePreparationPanel from "./ProductionImagePreparationPanel";
 import GeneratedImageResult from "./GeneratedImageResult";
 import "./RunPanel.css";
 
 type Props = {
+  productionImagePreparation?: ProductionImageUiScope;
   projectId: string;
   assets: Asset[];
   constraints: ConstraintSnapshot[];
@@ -48,6 +50,17 @@ const AUDIT_LABEL: Record<string, string> = {
 };
 
 export default function RunPanel(props: Props) {
+  // Explicit production UI never mounts the legacy aggregate/mock controller.
+  // In particular it cannot list execution keys/leases or run legacy actions.
+  if (props.productionImagePreparation) return <aside className="run-panel" aria-label="任务与预算" onPointerDown={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+    <header><div><span>独立生产合同 · 真实执行关闭</span><strong>任务与预算</strong></div><button aria-label="关闭任务面板" onClick={props.onClose}>×</button></header>
+    <ProductionImagePreparationPanel key={`${props.productionImagePreparation.tenantId}:${props.productionImagePreparation.mode}:${props.projectId}`}
+      scope={props.productionImagePreparation} projectId={props.projectId} assets={props.assets} constraints={props.constraints} missingOriginalAssetIds={props.missingOriginalAssetIds} disabled={false} />
+  </aside>;
+  return <LocalRunPanel {...props} />;
+}
+
+function LocalRunPanel(props: Props) {
   const { projectId, missingOriginalAssetIds } = props;
   // The App's async asset/constraint reload can briefly retain the previous
   // project's arrays. Never register those under the newly mounted project.
