@@ -345,6 +345,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   }
   // Internal raw storage ONLY, default closed. Does not prove actual task,
   // attempt, permissions, transport invocation, asset authorization or billing.
+  supportsProductionImageResponses(): boolean { return this.productionResponseStorageEnabled; }
   loadProductionImageResponse(tenantId: string, projectId: string, mode: ProductionImageRawResponse["mode"], jobId: string): { record: ProductionImageRawResponse; body: Buffer } | null {
     if (!this.productionResponseStorageEnabled) throw new Error("生产原包存储默认关闭");
     if (!["production", "production-contract-fixture"].includes(mode)) throw new Error("生产原包命名空间无效");

@@ -24,10 +24,10 @@ export function connection(extra: Partial<ImageProviderConnection> = {}): ImageP
       maxTotalInputBytes: 100 * 1024 * 1024, sizes: { allowAuto: true, presets: [{ width: 1024, height: 1024 }] }, qualities: ["auto"], backgrounds: ["auto"], inputFidelities: [],
       supportsOutputCompression: false, mask: { mode: "none", polarity: "unsupported" }, evidence: { state: "declared" } }], ...extra });
 }
-export function setupImageTask(options: { path?: string; policy?: boolean; quota?: number; format?: "png" | "jpeg"; kernel?: Partial<RunKernelOptions> } = {}) {
+export function setupImageTask(options: { path?: string; policy?: boolean; quota?: number; format?: "png" | "jpeg"; kernel?: Partial<RunKernelOptions>; productionResponses?: true } = {}) {
   const directory = options.path ? undefined : mkdtempSync(join(tmpdir(), "canvas-image-lease-"));
   const path = options.path ?? join(directory!, "state.sqlite");
-  const store = new SqliteRunKernelStateStore(path);
+  const store = new SqliteRunKernelStateStore(path, { productionResponseStorageEnabled: options.productionResponses });
   if (!store.loadCatalog()) store.transaction(() => store.saveCatalog({ schemaVersion: 1, projects: [{ projectId: "project-a", assets: [], constraints: [{
     id: "constraint-a", projectId: "project-a", lockedPaths: [], editableRegions: [], brandRules: { style: "人工冻结构图" },
     outputSpec: { width: 1024, height: 1024, format: options.format ?? "png" }, createdAt: at,

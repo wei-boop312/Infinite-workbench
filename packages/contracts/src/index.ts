@@ -624,6 +624,9 @@ export const RunAuditEventSchema = z.object({
     "image-fixture-attempted",
     "image-fixture-returned",
     "image-fixture-interrupted",
+    "production-image-attempted",
+    "production-image-returned",
+    "production-image-interrupted",
     "image-artifact-verified",
     "image-artifact-rejected",
     "job-succeeded",
@@ -821,6 +824,19 @@ export const ProductionImageRawResponseSchema = z.object({
     || r.outcome.billing.state !== "unknown" || !["absent", "invalid", "pending-validation"].includes(r.outcome.artifactStatus)) ctx.addIssue({ code: "custom", message: "原始生产响应不能声明已验证资产或费用" });
 });
 export type ProductionImageRawResponse = z.infer<typeof ProductionImageRawResponseSchema>;
+export const ProductionImageInterruptedSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]), kind: z.literal("interrupted"),
+  attemptId: ProductionEvidenceAttemptId, attemptFingerprint: ProductionEvidenceHash,
+  intentFingerprint: ProductionEvidenceHash, executionFingerprint: ProductionEvidenceHash,
+  interruptedAt: IsoDateSchema, outcome: ImageProviderOutcomeSchema,
+}).strict().superRefine((r, ctx) => {
+  if (!ProductionEvidenceJob.safeParse(r.outcome.jobId).success || r.outcome.providerStatus !== "unknown"
+    || r.outcome.artifactStatus !== "absent" || r.outcome.billing.state !== "unknown" || r.outcome.usage.source !== "unavailable"
+    || !["production-timeout", "production-transport-error", "production-response-invalid", "production-response-save-failed"].includes(r.outcome.failureCode ?? ""))
+    ctx.addIssue({ code: "custom", message: "生产中断必须保留未知费用" });
+});
+export const ProductionImageResultSchema = z.discriminatedUnion("kind", [ProductionImageRawResponseSchema, ProductionImageInterruptedSchema]);
+export type ProductionImageResult = z.infer<typeof ProductionImageResultSchema>;
 
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,
@@ -837,6 +853,10 @@ export const RunKernelStoredBatchSchema = z.object({
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),
   productionImageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  productionImageAttempt: ProductionImageAttemptSchema.optional(),
+  productionImageAttemptFingerprint: ProductionEvidenceHash.optional(),
+  productionImageResult: ProductionImageResultSchema.optional(),
+  productionImageResultFingerprint: ProductionEvidenceHash.optional(),
   imageExecution: ConfirmedImageExecutionSchema.optional(),
   imageDispatchIntent: ImageDispatchIntentSchema.optional(),
   imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),

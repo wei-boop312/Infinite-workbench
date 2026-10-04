@@ -17,6 +17,7 @@ import {
   type ConfirmedProductionImageExecution,
   ProductionImageLeaseEvidenceSchema, type ProductionImageLeaseEvidence,
   type ProductionImageDispatchIntent,
+  type ProductionImageAttempt, type ProductionImageResult,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -40,6 +41,8 @@ import type { RunKernelStateStore } from "./runKernelStore";
 import type { ProductionImageLeasePolicy, ProductionImageLeasePurpose } from "./productionImageLeasePolicy";
 import { assertProductionConfirmation, productionConfirmationKey } from "./productionImageConfirmationIntegrity";
 import { assertProductionDispatchIntent } from "./productionImageDispatchIntentIntegrity";
+import { assertProductionImageAttempt } from "./productionImageResponse";
+import { assertProductionImageResult } from "./productionImageResultIntegrity";
 import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
 export type RunPrincipal = {
@@ -124,6 +127,10 @@ type StoredBatch = {
   productionImageLeases?: ProductionImageLeaseEvidence[];
   productionImageDispatchIntent?: ProductionImageDispatchIntent;
   productionImageDispatchIntentFingerprint?: string;
+  productionImageAttempt?: ProductionImageAttempt;
+  productionImageAttemptFingerprint?: string;
+  productionImageResult?: ProductionImageResult;
+  productionImageResultFingerprint?: string;
   imageExecution?: ConfirmedImageExecution;
   imageDispatchIntent?: ImageDispatchIntent;
   imageDispatchIntentFingerprint?: string;
@@ -146,6 +153,12 @@ export interface ProductionImageStartPolicy {
   authorizeScope(principal: RunPrincipal, projectId: string): boolean;
   validateStart(principal: RunPrincipal, execution: ConfirmedProductionImageExecution, lease: ProductionImageLeaseEvidence, intent: ProductionImageDispatchIntent): boolean;
 }
+export interface ProductionImageResponsePolicy {
+  usesStateStore(store: unknown): boolean;
+  authorizeScope(principal: RunPrincipal, projectId: string): boolean;
+  validateAttempt(p: RunPrincipal, e: ConfirmedProductionImageExecution, l: ProductionImageLeaseEvidence, i: ProductionImageDispatchIntent, a: ProductionImageAttempt): boolean;
+  validateResult(p: RunPrincipal, e: ConfirmedProductionImageExecution, l: ProductionImageLeaseEvidence, i: ProductionImageDispatchIntent, a: ProductionImageAttempt, r: ProductionImageResult): boolean;
+}
 
 export type RunKernelOptions = {
   authorizer: RunAuthorizer;
@@ -160,6 +173,7 @@ export type RunKernelOptions = {
   validateProductionImageConfirmation?: (principal: RunPrincipal, execution: ConfirmedProductionImageExecution) => boolean;
   productionImageLeasePolicy?: ProductionImageLeasePolicy;
   productionImageStartPolicy?: ProductionImageStartPolicy;
+  productionImageResponsePolicy?: ProductionImageResponsePolicy;
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
   validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent, additionalMetadataBytes?: number) => undefined;
@@ -730,6 +744,67 @@ export class InMemoryRunKernel implements RunKernelPort {
     this.productionPolicyTrue(() => this.options.productionImageStartPolicy!.validateStart(p, current.execution, current.lease, current.intent!));
     if (this.clock() < Date.parse(current.intent.recordedAt) || this.clock() >= Date.parse(current.lease.expiresAt)
       || this.clock() >= Date.parse(current.execution.protocol.request.quote.expiresAt)) throw new RunKernelError(409, "production_image_start_expired", "写后核验跨过有效期限");
+  }
+
+  assertProductionImageResponseScope(p: RunPrincipal, project: string): void {
+    const policy = this.options.productionImageResponsePolicy;
+    if (!policy) throw new RunKernelError(503, "production_image_response_not_configured", "生产尝试及响应政策默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(p, project));
+  }
+
+  inspectProductionImageAttempt(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest) {
+    this.assertProductionImageResponseScope(p, project);
+    const history = this.inspectProductionImageStart(p, project, batch, job, input), stored = this.requireBatch(p, batch);
+    return { ...history, attempt: stored.productionImageAttempt ? structuredClone(stored.productionImageAttempt) : undefined,
+      result: stored.productionImageResult ? structuredClone(stored.productionImageResult) : undefined };
+  }
+
+  beginProductionImageAttempt(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest, incoming: ProductionImageAttempt) {
+    const current = this.inspectProductionImageAttempt(p, project, batch, job, input);
+    if (!current.intent || current.attempt || current.aggregate.jobs[0].status !== "running") throw new RunKernelError(409, "production_image_attempt_not_live", "只允许首次启动的活续接");
+    const hash = imageSnapshotFingerprint(incoming), a = assertProductionImageAttempt(incoming, hash, current.execution, current.lease, current.intent).attempt;
+    if (a.attemptedAt !== new Date(this.clock()).toISOString()) throw new RunKernelError(409, "production_image_attempt_clock_invalid", "尝试必须匹配实际事务时间");
+    const stored = this.requireBatch(p, batch), event = { ...this.audit(stored.aggregate.batch, p.actorId, "production-image-attempted",
+      { jobId: job, attemptId: a.id, attemptFingerprint: hash, intentFingerprint: a.intentFingerprint, transport: a.transport }), createdAt: a.attemptedAt };
+    this.assertProductionImageTask(p, project, batch, "start", Buffer.byteLength(JSON.stringify(a)) + Buffer.byteLength(JSON.stringify(event)) + 70);
+    this.productionPolicyTrue(() => this.options.productionImageResponsePolicy!.validateAttempt(p, current.execution, current.lease, current.intent!, a));
+    stored.productionImageAttempt = a; stored.productionImageAttemptFingerprint = hash; stored.aggregate.audit.push(event);
+    this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
+  }
+
+  assertProductionImageAttemptCurrent(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest): void {
+    const current = this.inspectProductionImageAttempt(p, project, batch, job, input);
+    if (!current.attempt || current.result || current.aggregate.jobs[0].status !== "running") throw new RunKernelError(409, "production_image_attempt_not_live", "尝试不再具有活续接");
+    this.assertProductionImageTask(p, project, batch, "start");
+    this.productionPolicyTrue(() => this.options.productionImageResponsePolicy!.validateAttempt(p, current.execution, current.lease, current.intent!, current.attempt!));
+    if (this.clock() < Date.parse(current.attempt.attemptedAt) || this.clock() >= Date.parse(current.lease.expiresAt)
+      || this.clock() >= Date.parse(current.execution.protocol.request.quote.expiresAt)
+      || this.clock() >= Date.parse(current.aggregate.jobs[0].startedAt!) + this.jobTimeoutMs) throw new RunKernelError(409, "production_image_attempt_expired", "尝试续接已过期");
+  }
+
+  recordProductionImageResult(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest, incoming: ProductionImageResult) {
+    const current = this.inspectProductionImageAttempt(p, project, batch, job, input);
+    if (!current.attempt || !current.intent) throw new RunKernelError(409, "production_image_attempt_missing", "响应缺少实际尝试");
+    const hash = imageSnapshotFingerprint(incoming), r = assertProductionImageResult(incoming, hash, current.execution, current.attempt);
+    if (current.result) {
+      if (imageSnapshotFingerprint(current.result) !== hash) throw new RunKernelError(409, "production_image_result_conflict", "原响应不可覆盖");
+      return current.aggregate;
+    }
+    const at = r.kind === "returned" ? r.receivedAt : r.interruptedAt;
+    if (at !== new Date(this.clock()).toISOString()) throw new RunKernelError(409, "production_image_response_clock_invalid", "响应必须匹配实际保存时间");
+    const stored = this.requireBatch(p, batch), event = { ...this.audit(stored.aggregate.batch, p.actorId, r.kind === "returned" ? "production-image-returned" : "production-image-interrupted",
+      { jobId: job, attemptId: r.attemptId, resultFingerprint: hash, kind: r.kind }), createdAt: at };
+    this.assertProductionImageTask(p, project, batch, "history", Buffer.byteLength(JSON.stringify(r)) + Buffer.byteLength(JSON.stringify(event)) + 70);
+    this.productionPolicyTrue(() => this.options.productionImageResponsePolicy!.validateResult(p, current.execution, current.lease, current.intent!, current.attempt!, r));
+    if (stored.aggregate.jobs[0].status === "running") this.productionUnknown(stored, p, r.kind === "returned" ? "production-response-returned" : r.outcome.failureCode!);
+    stored.productionImageResult = r; stored.productionImageResultFingerprint = hash; stored.aggregate.audit.push(event);
+    this.refreshBatchStatus(stored); this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
+  }
+
+  assertProductionImageResponseCommit(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest): void {
+    const c = this.inspectProductionImageAttempt(p, project, batch, job, input);
+    if (!c.attempt || !c.result || c.aggregate.jobs[0].status !== "billing_unknown") throw new RunKernelError(409, "production_image_result_missing", "响应未实际保存");
+    this.productionPolicyTrue(() => this.options.productionImageResponsePolicy!.validateResult(p, c.execution, c.lease, c.intent!, c.attempt!, c.result!));
   }
 
   private productionUnknown(stored: StoredBatch, p: RunPrincipal, reason: string): boolean {
@@ -1489,6 +1564,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         productionImageLeases: serialized.productionImageLeases,
         productionImageDispatchIntent: serialized.productionImageDispatchIntent,
         productionImageDispatchIntentFingerprint: serialized.productionImageDispatchIntentFingerprint,
+        productionImageAttempt: serialized.productionImageAttempt, productionImageAttemptFingerprint: serialized.productionImageAttemptFingerprint,
+        productionImageResult: serialized.productionImageResult, productionImageResultFingerprint: serialized.productionImageResultFingerprint,
         imageExecution: serialized.imageExecution,
         imageDispatchIntent: serialized.imageDispatchIntent,
         imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
@@ -1577,6 +1654,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         ...(stored.productionImageLeases ? { productionImageLeases: stored.productionImageLeases } : {}),
         ...(stored.productionImageDispatchIntent ? { productionImageDispatchIntent: stored.productionImageDispatchIntent } : {}),
         ...(stored.productionImageDispatchIntentFingerprint ? { productionImageDispatchIntentFingerprint: stored.productionImageDispatchIntentFingerprint } : {}),
+        ...(stored.productionImageAttempt ? { productionImageAttempt: stored.productionImageAttempt, productionImageAttemptFingerprint: stored.productionImageAttemptFingerprint } : {}),
+        ...(stored.productionImageResult ? { productionImageResult: stored.productionImageResult, productionImageResultFingerprint: stored.productionImageResultFingerprint } : {}),
         ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
         ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
         ...(stored.imageFixtureAttempt ? { imageFixtureAttempt: stored.imageFixtureAttempt, imageFixtureAttemptFingerprint: stored.imageFixtureAttemptFingerprint } : {}),
@@ -1604,12 +1683,12 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
+        if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);
-      } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint) {
+      } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint) {
         throw new Error("生产租约缺少独立生产确认");
       } else {
         if (batch.imageMode) throw new Error("生产任务缺少独立完整确认");
@@ -1775,7 +1854,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       || !["queued", "cancelled", "running", "billing_unknown"].includes(b.status)
       || (!!intent !== dispatched) || (!!stored.productionImageDispatchIntentFingerprint !== dispatched)
       || (intent ? j.startedAt !== intent.recordedAt : j.startedAt !== undefined)
-      || (b.status === "billing_unknown" ? !["production-lease-expired-after-intent", "production-job-timeout-after-intent", "production-recovered-after-restart"].includes(j.failureCode ?? "") : j.failureCode !== undefined)
+      || (b.status === "billing_unknown" ? !["production-lease-expired-after-intent", "production-job-timeout-after-intent", "production-recovered-after-restart", "production-response-returned", "production-timeout", "production-transport-error", "production-response-invalid", "production-response-save-failed"].includes(j.failureCode ?? "") : j.failureCode !== undefined)
       || (["queued", "running"].includes(b.status) ? j.finishedAt !== undefined
         : !j.finishedAt || Date.parse(j.finishedAt) < Date.parse(j.startedAt ?? e.confirmedAt))
       || (b.status === "cancelled" ? stored.jobReservations.size !== 0 : stored.jobReservations.size !== 1 || stored.jobReservations.get(j.id) !== q.maxCostMinor)) throw new Error("生产任务确认或关闭执行状态不一致");
@@ -1838,11 +1917,33 @@ export class InMemoryRunKernel implements RunKernelPort {
         intentFingerprint: stored.productionImageDispatchIntentFingerprint!, reason: j.failureCode }))) throw new Error("生产未知费用证据不一致");
     if (b.status === "billing_unknown" && (j.failureCode === "production-lease-expired-after-intent" ? Date.parse(j.finishedAt!) < Date.parse(j.leaseExpiresAt!)
       : j.failureCode === "production-job-timeout-after-intent" && !this.options.restoreValidationOnly ? Date.parse(j.finishedAt!) < Date.parse(j.startedAt!) + this.jobTimeoutMs : false)) throw new Error("生产未知恢复早于终止期限");
+    const attempts = audit.filter(a => a.eventType === "production-image-attempted"), results = audit.filter(a => ["production-image-returned", "production-image-interrupted"].includes(a.eventType));
+    const attempt = stored.productionImageAttempt, result = stored.productionImageResult;
+    if (!!attempt !== !!stored.productionImageAttemptFingerprint || !!result !== !!stored.productionImageResultFingerprint
+      || (attempt && !intent) || (result && (!attempt || b.status !== "billing_unknown"))
+      || attempts.length !== (attempt ? 1 : 0) || results.length !== (result ? 1 : 0)) throw new Error("生产尝试响应缺少完整任务绑定");
+    if (attempt) {
+      assertProductionImageAttempt(attempt, stored.productionImageAttemptFingerprint!, e, history.at(-1), intent);
+      const event = attempts[0];
+      if (event.actorId !== attempt.actorId || event.createdAt !== attempt.attemptedAt || imageSnapshotFingerprint(event.metadata) !== imageSnapshotFingerprint({ jobId: j.id,
+        attemptId: attempt.id, attemptFingerprint: stored.productionImageAttemptFingerprint!, intentFingerprint: attempt.intentFingerprint, transport: attempt.transport })
+        || (j.finishedAt && Date.parse(j.finishedAt) < Date.parse(attempt.attemptedAt))) throw new Error("生产尝试审计不一致");
+    }
+    if (result) {
+      assertProductionImageResult(result, stored.productionImageResultFingerprint!, e, attempt!);
+      const at = result.kind === "returned" ? result.receivedAt : result.interruptedAt, event = results[0];
+      if (event.actorId !== attempt!.actorId || event.createdAt !== at || Date.parse(at) < Date.parse(j.finishedAt!)
+        || event.eventType !== (result.kind === "returned" ? "production-image-returned" : "production-image-interrupted")
+        || imageSnapshotFingerprint(event.metadata) !== imageSnapshotFingerprint({ jobId: j.id, attemptId: result.attemptId, resultFingerprint: stored.productionImageResultFingerprint!, kind: result.kind })) throw new Error("生产响应审计不一致");
+    }
+    if (["production-response-returned", "production-timeout", "production-transport-error", "production-response-invalid", "production-response-save-failed"].includes(j.failureCode ?? "")
+      && (!result || j.finishedAt !== (result.kind === "returned" ? result.receivedAt : result.interruptedAt)
+        || j.failureCode !== (result.kind === "returned" ? "production-response-returned" : result.outcome.failureCode))) throw new Error("生产未知响应结论不一致");
     const cancelled = audit.filter((a) => a.eventType === "batch-cancelled"), released = audit.filter((a) => a.eventType === "budget-released");
     if (cancelled.length !== (b.status === "cancelled" ? 1 : 0) || released.length !== (releaseNeeded ? 1 : 0)
       || cancelled.some((a) => a.createdAt !== j.finishedAt || a.metadata.previousStatus !== "queued")
       || released.some((a) => a.createdAt !== j.finishedAt || a.metadata.releasedMinor !== String(q.maxCostMinor))
-      || audit.length !== 4 + cancelled.length + released.length + leaseEvents.length + expiries.length + starts.length + unknowns.length || new Set(audit.map((a) => a.id)).size !== audit.length
+      || audit.length !== 4 + cancelled.length + released.length + leaseEvents.length + expiries.length + starts.length + unknowns.length + attempts.length + results.length || new Set(audit.map((a) => a.id)).size !== audit.length
       || audit.some((a) => a.tenantId !== b.tenantId || a.projectId !== b.projectId || a.batchId !== b.id)) throw new Error("生产取消审计不一致");
   }
 

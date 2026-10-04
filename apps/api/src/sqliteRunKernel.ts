@@ -1,8 +1,9 @@
 import type { IncomingMessage } from "node:http";
-import { GeneratedImageRecordSchema, ImageFixtureResultSchema, type GeneratedImageRecord, type ImageFixtureResult } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ProductionImageResultSchema, type GeneratedImageRecord, type ImageFixtureResult, type ProductionImageResult } from "@canvas/contracts";
 import { imageSnapshotFingerprint } from "./imageProviderContract";
 import { assetMetadataFingerprint } from "./verifiedAssets";
 import { assertImageArtifactRecord } from "./imageArtifactIntegrity";
+import { assertProductionImageRawResponse } from "./productionImageResponse";
 import { InMemoryRunKernel, RunKernelError, type ProjectBudgetConfig, type RunKernelOptions, type RunKernelPort, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
@@ -36,6 +37,35 @@ export class SqliteRunKernel implements RunKernelPort {
       (result, kernel) => { if (result.started) kernel.assertProductionImageStartCommit(p, project, batch, job, input);
         else kernel.inspectProductionImageStart(p, project, batch, job, input); });
   };
+  inspectProductionImageAttempt: InMemoryRunKernel["inspectProductionImageAttempt"] = (p, project, batch, job, input) => {
+    this.productionResponseScope(p, project);
+    return this.productionLeaseCommand(p, project, batch, "history", k => k.inspectProductionImageAttempt(p, project, batch, job, input));
+  };
+  beginProductionImageAttempt: InMemoryRunKernel["beginProductionImageAttempt"] = (p, project, batch, job, input, attempt) => {
+    this.productionResponseScope(p, project);
+    return this.productionLeaseCommand(p, project, batch, "history", k => k.beginProductionImageAttempt(p, project, batch, job, input, attempt),
+      (_r, k) => k.assertProductionImageAttemptCurrent(p, project, batch, job, input));
+  };
+  assertProductionImageAttemptCurrent: InMemoryRunKernel["assertProductionImageAttemptCurrent"] = (p, project, batch, job, input) => {
+    this.productionResponseScope(p, project);
+    return this.productionLeaseCommand(p, project, batch, "history", k => k.assertProductionImageAttemptCurrent(p, project, batch, job, input));
+  };
+  recordProductionImageResult(p: RunPrincipal, project: string, batch: string, job: string,
+    input: Parameters<InMemoryRunKernel["recordProductionImageResult"]>[4], incoming: ProductionImageResult, body?: Buffer) {
+    this.productionResponseScope(p, project);
+    const result = ProductionImageResultSchema.parse(incoming);
+    if (result.kind === "returned" && !Buffer.isBuffer(body)) throw new RunKernelError(409, "production_image_response_body_required", "响应必须与原始正文共同保存");
+    return this.productionLeaseCommand(p, project, batch, "history", k => {
+      const current = k.inspectProductionImageAttempt(p, project, batch, job, input);
+      if (result.kind === "returned") {
+        const verified = assertProductionImageRawResponse(result, current.execution, current.lease, current.intent, current.attempt, body!);
+        verified.candidate?.body.fill(0);
+      }
+      const aggregate = k.recordProductionImageResult(p, project, batch, job, input, result);
+      if (result.kind === "returned") this.options.stateStore.saveProductionImageResponse(result, body!);
+      return aggregate;
+    }, (_r, k) => k.assertProductionImageResponseCommit(p, project, batch, job, input));
+  }
   claimImageBatch: InMemoryRunKernel["claimImageBatch"] = (...args) => this.run((kernel) => kernel.claimImageBatch(...args));
   startImageJob: InMemoryRunKernel["startImageJob"] = (...args) => this.run((kernel) => kernel.startImageJob(...args));
   inspectImageLease: InMemoryRunKernel["inspectImageLease"] = (...args) => this.run((kernel) => kernel.inspectImageLease(...args));
@@ -86,6 +116,17 @@ export class SqliteRunKernel implements RunKernelPort {
   retryJob: RunKernelPort["retryJob"] = (...args) => this.run((kernel) => kernel.retryJob(...args));
   cancelBatch: RunKernelPort["cancelBatch"] = (...args) => this.run((kernel) => kernel.cancelBatch(...args));
   getBudget: RunKernelPort["getBudget"] = (...args) => this.run((kernel) => kernel.getBudget(...args));
+
+  private productionResponseScope(p: RunPrincipal, project: string): void {
+    const policy = this.options.productionImageResponsePolicy;
+    if (!policy || !this.options.stateStore.supportsProductionImageResponses()) throw new RunKernelError(503, "production_image_response_not_configured", "生产尝试及原包默认关闭");
+    for (const check of [() => policy.usesStateStore(this.options.stateStore), () => policy.authorizeScope(p, project)]) {
+      let value: unknown;
+      try { value = check(); } catch { throw new RunKernelError(503, "production_image_response_unavailable", "生产响应政策不可用"); }
+      if (value && (typeof value === "object" || typeof value === "function") && "then" in value) void Promise.resolve(value).catch(() => undefined);
+      if (value !== true) throw new RunKernelError(403, "production_image_response_not_configured", "生产响应须同库同步政策");
+    }
+  }
 
   private productionStartScope(p: RunPrincipal, project: string): void {
     const policy = this.options.productionImageStartPolicy;
@@ -140,6 +181,16 @@ export class SqliteRunKernel implements RunKernelPort {
             const e = stored.productionImageExecution;
             const preparation = this.options.stateStore.loadProductionImagePreparation(batch.tenantId, batch.projectId, e.mode, e.preparation.id);
             if (!preparation || imageSnapshotFingerprint(preparation) !== imageSnapshotFingerprint(e.preparation)) throw new Error("生产任务原准备缺失或不一致");
+            if (this.options.stateStore.supportsProductionImageResponses() || stored.productionImageAttempt || stored.productionImageResult) {
+              const raw = this.options.stateStore.loadProductionImageResponse(batch.tenantId, batch.projectId, e.mode, e.protocol.request.jobId);
+              try {
+                if (stored.productionImageResult?.kind === "returned") {
+                  if (!raw || imageSnapshotFingerprint(raw.record) !== stored.productionImageResultFingerprint) throw new Error("生产任务原包缺失或不一致");
+                  const parsed = assertProductionImageRawResponse(raw.record, e, stored.productionImageLeases?.at(-1), stored.productionImageDispatchIntent, stored.productionImageAttempt, raw.body);
+                  parsed.candidate?.body.fill(0);
+                } else if (raw) throw new Error("孤立原包不能成为生产响应");
+              } finally { raw?.body.fill(0); }
+            }
           }
           if (!stored.imageFixtureAttempt && !result) continue;
           const response = this.options.stateStore.loadImageFixtureResponse(batch.tenantId, batch.projectId, stored.aggregate.jobs[0].id);
