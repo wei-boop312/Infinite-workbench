@@ -463,7 +463,7 @@ export const RunJobSchema = z.object({
   startedAt: IsoDateSchema.optional(),
   finishedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
-}).strict().refine((job) => job.imageMode ? job.executorKind === "provider" && ["queued", "cancelled"].includes(job.status) : job.estimatedCostMinor !== null,
+}).strict().refine((job) => job.imageMode ? job.executorKind === "provider" && ["queued", "leased", "cancelled"].includes(job.status) : job.estimatedCostMinor !== null,
   { message: "生产任务命名空间/未知估价或关闭闸门不一致" });
 
 export const ProviderConnectionSchema = z.object({
@@ -763,6 +763,15 @@ export const RunJobClaimResultSchema = z.object({
   retryAfterMs: z.number().int().positive().optional(),
 }).strict();
 
+// Internal immutable history, not a send permit or a caller confirmation flag.
+export const ProductionImageLeaseEvidenceSchema = RunJobLeaseSchema.extend({
+  schemaVersion: z.literal(1),
+  mode: z.enum(["production", "production-contract-fixture"]),
+  actorId: IdSchema,
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict().refine((lease) => Date.parse(lease.expiresAt) > Date.parse(lease.leasedAt), { message: "生产租约期限无效" });
+export type ProductionImageLeaseEvidence = z.infer<typeof ProductionImageLeaseEvidenceSchema>;
+
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,
   projectId: IdSchema,
@@ -775,6 +784,7 @@ export const RunKernelBudgetStateSchema = z.object({
 export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
+  productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   imageExecution: ConfirmedImageExecutionSchema.optional(),
   imageDispatchIntent: ImageDispatchIntentSchema.optional(),
   imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),

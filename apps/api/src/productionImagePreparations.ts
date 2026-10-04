@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 export interface ImagePriceContext {
   scope: ProductionImagePriceScope; connection: ImageProviderConnection;
   selection: CreateImagePreparation; requestDraft: ProductionImageRequestDraft; constraint: ConstraintSnapshot;
-  requestedAt: string; validationAt?: string; purpose?: "prepare" | "confirm";
+  requestedAt: string; validationAt?: string; purpose?: "prepare" | "confirm" | "lease";
 }
 interface PricePort {
   // Trusted server ports, not caller-supplied scripts or a sandbox.

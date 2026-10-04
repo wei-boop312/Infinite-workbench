@@ -15,6 +15,7 @@ import {
   type ImageDispatchIntent,
   type ConfirmedImageExecution,
   type ConfirmedProductionImageExecution,
+  ProductionImageLeaseEvidenceSchema, type ProductionImageLeaseEvidence,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -35,6 +36,7 @@ import {
   type RunKernelSnapshot,
 } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
+import type { ProductionImageLeasePolicy, ProductionImageLeasePurpose } from "./productionImageLeasePolicy";
 import { assertProductionConfirmation, productionConfirmationKey } from "./productionImageConfirmationIntegrity";
 import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
@@ -117,6 +119,7 @@ type BudgetState = ProjectBudgetConfig & {
 type StoredBatch = {
   aggregate: RunBatchAggregate;
   productionImageExecution?: ConfirmedProductionImageExecution;
+  productionImageLeases?: ProductionImageLeaseEvidence[];
   imageExecution?: ConfirmedImageExecution;
   imageDispatchIntent?: ImageDispatchIntent;
   imageDispatchIntentFingerprint?: string;
@@ -145,6 +148,7 @@ export type RunKernelOptions = {
   validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
   // Service-owned ephemeral confirmation proof; default closed. Not send authority.
   validateProductionImageConfirmation?: (principal: RunPrincipal, execution: ConfirmedProductionImageExecution) => boolean;
+  productionImageLeasePolicy?: ProductionImageLeasePolicy;
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
   validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent, additionalMetadataBytes?: number) => undefined;
@@ -603,14 +607,76 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.claimValidatedBatch(principal, batchId, ClaimRunJobsRequestSchema.parse(request), true);
   }
 
-  private claimValidatedBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest, image: boolean): RunJobClaimResult {
+  // INTERNAL, separate from mock/local leases and from confirmation pending proof.
+  assertProductionImageTask(principal: RunPrincipal, projectId: string, batchId: string, purpose: ProductionImageLeasePurpose, extraBytes = 0): ConfirmedProductionImageExecution {
+    const { e } = this.productionImageTask(principal, projectId, batchId);
+    this.productionPolicyTrue(() => this.options.productionImageLeasePolicy!.validate(principal, structuredClone(e), purpose, extraBytes));
+    return structuredClone(e);
+  }
+
+  private productionImageTask(principal: RunPrincipal, projectId: string, batchId: string) {
+    const policy = this.options.productionImageLeasePolicy;
+    if (!policy) throw new RunKernelError(503, "production_image_lease_not_configured", "生产租约默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(principal, projectId));
+    const stored = this.requireBatch(principal, batchId), e = stored.productionImageExecution;
+    if (!e || e.preparation.projectId !== projectId) throw new RunKernelError(409, "production_image_lease_mode_mismatch", "批次不属于指定生产范围");
+    return { stored, e };
+  }
+
+  private productionPolicyTrue(callback: () => unknown): void {
+    let value: unknown;
+    try { value = callback(); } catch (error) { if (error instanceof RunKernelError) throw error; throw new RunKernelError(503, "production_image_lease_policy_unavailable", "生产租约政策不可用"); }
+    if (value && (typeof value === "object" || typeof value === "function") && "then" in value) void Promise.resolve(value).catch(() => undefined);
+    if (value !== true) throw new RunKernelError(403, "production_image_lease_permission_denied", "生产租约政策必须同步明确允许");
+  }
+
+  claimProductionImageBatch(principal: RunPrincipal, projectId: string, batchId: string, input: ClaimRunJobsRequest): RunJobClaimResult {
+    this.assertProductionImageTask(principal, projectId, batchId, "claim");
+    return this.claimValidatedBatch(principal, batchId, ClaimRunJobsRequestSchema.parse(input), "production");
+  }
+
+  inspectProductionImageLease(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: ExecuteRunJobRequest) {
+    const { stored } = this.productionImageTask(principal, projectId, batchId), lease = ExecuteRunJobRequestSchema.parse(input);
+    const job = stored.aggregate.jobs.find((j) => j.id === jobId);
+    const evidence = stored.productionImageLeases?.at(-1);
+    if (!job || job.status !== "leased" || job.leaseId !== lease.leaseId || job.leaseOwnerId !== lease.workerId
+      || !evidence || evidence.actorId !== principal.actorId || evidence.leaseId !== lease.leaseId || evidence.workerId !== lease.workerId) {
+      throw new RunKernelError(409, "production_image_lease_mismatch", "生产租约任务、执行器或实际领取人不匹配");
+    }
+    if (!job.leaseExpiresAt || this.clock() < Date.parse(job.leasedAt!) || this.clock() >= Date.parse(job.leaseExpiresAt)) throw new RunKernelError(409, "production_image_lease_expired", "生产租约已到期");
+    const execution = this.assertProductionImageTask(principal, projectId, batchId, "inspect");
+    if (!job.leaseExpiresAt || this.clock() < Date.parse(job.leasedAt!) || this.clock() >= Date.parse(job.leaseExpiresAt)) throw new RunKernelError(409, "production_image_lease_expired", "生产租约已到期");
+    return { aggregate: this.copy(stored.aggregate), execution, lease: ProductionImageLeaseEvidenceSchema.parse(evidence) };
+  }
+
+  reconcileProductionImageBatch(principal: RunPrincipal, projectId: string, batchId: string): RunBatchAggregate {
+    this.assertProductionImageTask(principal, projectId, batchId, "reconcile");
+    const stored = this.requireBatch(principal, batchId);
+    const changed = this.recoverProductionImageLease(principal, stored);
+    this.assertProductionImageTask(principal, projectId, batchId, "reconcile");
+    this.assertStateConsistent(); if (changed) this.persist();
+    return this.copy(stored.aggregate);
+  }
+
+  private recoverProductionImageLease(principal: RunPrincipal, stored: StoredBatch): boolean {
+    const job = stored.aggregate.jobs[0];
+    if (job.status !== "leased" || !job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) > this.clock()) return false;
+    const event = this.audit(stored.aggregate.batch, principal.actorId, "job-lease-expired", { jobId: job.id, leaseId: job.leaseId!, action: "requeued-before-start" });
+    this.assertProductionImageTask(principal, stored.aggregate.batch.projectId, stored.aggregate.batch.id, "reconcile", Buffer.byteLength(JSON.stringify(event)) + 1);
+    if (this.clock() < Date.parse(event.createdAt)) throw new RunKernelError(409, "production_image_lease_clock_invalid", "恢复核验期间时钟倒退");
+    const { leaseId: _id, leaseOwnerId: _worker, leasedAt: _at, leaseExpiresAt: _expires, ...unleased } = job;
+    this.replaceJob(stored.aggregate, { ...unleased, status: "queued" }); stored.aggregate.audit.push(event);
+    return true;
+  }
+
+  private claimValidatedBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest, image: boolean | "production"): RunJobClaimResult {
     const stored = this.requireBatch(principal, batchId);
     this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
-    if (image) this.requireImageExecution(stored);
+    if (image === true) this.requireImageExecution(stored);
     if (stored.aggregate.batch.status === "billing_unknown") {
       throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止继续调度");
     }
-    const recoveredExpired = this.recoverExpiredLeases("system-lease-reaper");
+    const recoveredExpired = image === "production" ? this.recoverProductionImageLease(principal, stored) : this.recoverExpiredLeases("system-lease-reaper");
     const aggregate = stored.aggregate;
     if (aggregate.batch.status === "billing_unknown") {
       if (recoveredExpired) this.persist();
@@ -624,7 +690,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       return { aggregate: this.copy(aggregate), leases: [] };
     }
 
-    if (image) this.validateImageTask(principal, stored);
+    if (image === "production") this.assertProductionImageTask(principal, aggregate.batch.projectId, batchId, "claim");
+    else if (image) this.validateImageTask(principal, stored);
     else this.validateBatchInputs(aggregate.batch);
 
     const projectKey = scopedProjectKey(aggregate.batch.tenantId, aggregate.batch.projectId);
@@ -672,22 +739,32 @@ export class InMemoryRunKernel implements RunKernelPort {
         leasedAt,
         leaseExpiresAt: expiresAt,
       };
+      const event = this.audit(aggregate.batch, principal.actorId, "job-leased", {
+        jobId: leased.id, leaseId, workerId: request.workerId, adapterId: leased.adapterId,
+        ...(image === "production" ? { mode: stored.productionImageExecution!.mode, executionFingerprint: stored.requestFingerprint, expiresAt } : {}),
+      });
+      if (image === "production") {
+        const history = stored.productionImageLeases ?? [];
+        const evidence = ProductionImageLeaseEvidenceSchema.parse({ schemaVersion: 1, mode: stored.productionImageExecution!.mode,
+          actorId: principal.actorId, executionFingerprint: stored.requestFingerprint, jobId: leased.id, batchId, leaseId, workerId: request.workerId, leasedAt, expiresAt });
+        const updated = [...history, evidence];
+        if (updated.length > 512 || Buffer.byteLength(JSON.stringify(updated)) > 512 * 1024) throw new RunKernelError(413, "production_image_lease_history_full", "不删除生产租约历史腾空间");
+        event.createdAt = leasedAt;
+        this.assertProductionImageTask(principal, aggregate.batch.projectId, batchId, "claim", Buffer.byteLength(JSON.stringify(evidence)) + Buffer.byteLength(JSON.stringify(event)) + 4);
+        if (this.clock() < now || this.clock() >= now + this.leaseDurationMs) throw new RunKernelError(409, "production_image_lease_expired", "最终核验跨过租约期限");
+        stored.productionImageLeases = updated;
+      }
       this.replaceJob(aggregate, leased);
       leases.push({ jobId: leased.id, batchId, leaseId, workerId: request.workerId, leasedAt, expiresAt });
-      aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "job-leased", {
-        jobId: leased.id,
-        leaseId,
-        workerId: request.workerId,
-        adapterId: leased.adapterId,
-      }));
+      aggregate.audit.push(event);
     }
-    if (leases.length > 0) {
+    if (leases.length > 0 && image !== "production") {
       aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "batch-dispatched", {
         count: String(leases.length),
         workerId: request.workerId,
       }));
     }
-    if (throttledBy) {
+    if (throttledBy && image !== "production") {
       aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "dispatch-throttled", {
         reason: throttledBy,
         retryAfterMs: String(retryAfterMs),
@@ -696,7 +773,12 @@ export class InMemoryRunKernel implements RunKernelPort {
     }
     this.refreshBatchStatus(stored);
     stored.aggregate = RunBatchAggregateSchema.parse(stored.aggregate);
-    if (leases.length > 0 || throttledBy || recoveredExpired) this.persist();
+    if (image === "production") {
+      this.assertProductionImageTask(principal, aggregate.batch.projectId, batchId, "claim");
+      if (leases.some((l) => this.clock() < Date.parse(l.leasedAt) || this.clock() >= Date.parse(l.expiresAt))) throw new RunKernelError(409, "production_image_lease_expired", "生产租约在提交前到期");
+      this.assertStateConsistent();
+    }
+    if (leases.length > 0 || (throttledBy && image !== "production") || recoveredExpired) this.persist();
     return {
       aggregate: this.copy(stored.aggregate),
       leases,
@@ -1323,6 +1405,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       const stored: StoredBatch = {
         aggregate,
         productionImageExecution: serialized.productionImageExecution,
+        productionImageLeases: serialized.productionImageLeases,
         imageExecution: serialized.imageExecution,
         imageDispatchIntent: serialized.imageDispatchIntent,
         imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
@@ -1404,6 +1487,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       batches: [...this.batches.values()].map((stored) => ({
         aggregate: this.copy(stored.aggregate),
         ...(stored.productionImageExecution ? { productionImageExecution: stored.productionImageExecution } : {}),
+        ...(stored.productionImageLeases ? { productionImageLeases: stored.productionImageLeases } : {}),
         ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
         ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
         ...(stored.imageFixtureAttempt ? { imageFixtureAttempt: stored.imageFixtureAttempt, imageFixtureAttemptFingerprint: stored.imageFixtureAttemptFingerprint } : {}),
@@ -1431,11 +1515,13 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (batch.imageMode || stored.productionImageExecution || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
+        if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);
+      } else if (stored.productionImageLeases) {
+        throw new Error("生产租约缺少独立生产确认");
       } else {
         if (batch.imageMode) throw new Error("生产任务缺少独立完整确认");
         const execution = stored.imageExecution;
@@ -1591,9 +1677,10 @@ export class InMemoryRunKernel implements RunKernelPort {
       || b.createdAt !== e.confirmedAt || b.expectedOutputs !== 1 || b.estimatedCostMinor !== estimate || b.maxCostMinor !== q.maxCostMinor
       || b.currency !== q.currency || jobs.length !== 1 || !j || j.id !== r.jobId || j.imageMode !== e.mode || j.batchId !== b.id
       || j.idempotencyKey !== r.idempotencyKey || j.executorKind !== "provider" || j.adapterId !== r.adapterId || j.estimatedCostMinor !== estimate
-      || j.outputIndex !== 0 || j.attempt !== 1 || j.createdAt !== e.confirmedAt || j.outputAssetIds.length || j.status !== b.status
+      || j.outputIndex !== 0 || j.attempt !== 1 || j.createdAt !== e.confirmedAt || j.outputAssetIds.length
+      || (b.status === "queued" ? !["queued", "leased"].includes(j.status) : j.status !== b.status)
       || JSON.stringify(b.inputAssetIds) !== JSON.stringify(ids) || JSON.stringify(j.inputAssetIds) !== JSON.stringify(ids)
-      || [j.providerRequestId, j.retryOf, j.leaseId, j.leaseOwnerId, j.leasedAt, j.leaseExpiresAt, j.startedAt, j.actualCostMinor, j.failureCode,
+      || [j.providerRequestId, j.retryOf, j.startedAt, j.actualCostMinor, j.failureCode,
         j.billingResolutionId, j.billingResolvedAt, j.billingResolvedBy, j.billingEvidenceRef].some((v) => v !== undefined)
       || (b.status === "queued" ? j.finishedAt !== undefined || stored.jobReservations.get(j.id) !== q.maxCostMinor
         : b.status !== "cancelled" || !j.finishedAt || Date.parse(j.finishedAt) < Date.parse(e.confirmedAt) || stored.jobReservations.size !== 0)) throw new Error("生产任务确认或关闭执行状态不一致");
@@ -1613,11 +1700,37 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (events.length !== 1 || events[0].actorId !== e.confirmedBy || imageSnapshotFingerprint(events[0].metadata) !== imageSnapshotFingerprint(metadata)
         || Date.parse(events[0].createdAt) < Date.parse(e.confirmedAt) || Date.parse(events[0].createdAt) >= Date.parse(q.expiresAt)) throw new Error("生产确认审计不一致");
     }
+    const history = stored.productionImageLeases ?? [], leaseEvents = audit.filter((a) => a.eventType === "job-leased"), expiries = audit.filter((a) => a.eventType === "job-lease-expired");
+    if (Buffer.byteLength(JSON.stringify(history)) > 512 * 1024 || leaseEvents.length !== history.length
+      || new Set(history.map((l) => l.leaseId)).size !== history.length) throw new Error("生产租约历史不一致");
+    let previousEnd = Date.parse(e.confirmedAt), expectedExpiries = 0;
+    for (const [index, lease] of history.entries()) {
+      const event = leaseEvents[index], expiry = expiries.find((a) => a.metadata.leaseId === lease.leaseId);
+      const metadata = { jobId: j.id, leaseId: lease.leaseId, workerId: lease.workerId, adapterId: j.adapterId, mode: e.mode, executionFingerprint: stored.requestFingerprint, expiresAt: lease.expiresAt };
+      if (lease.mode !== e.mode || lease.executionFingerprint !== stored.requestFingerprint || lease.batchId !== b.id || lease.jobId !== j.id
+        || Date.parse(lease.leasedAt) < previousEnd || Date.parse(lease.leasedAt) >= Date.parse(q.expiresAt)
+        || Date.parse(lease.expiresAt) - Date.parse(lease.leasedAt) < 1_000
+        || (!this.options.restoreValidationOnly && Date.parse(lease.expiresAt) - Date.parse(lease.leasedAt) !== this.leaseDurationMs)
+        || event.actorId !== lease.actorId || event.createdAt !== lease.leasedAt || imageSnapshotFingerprint(event.metadata) !== imageSnapshotFingerprint(metadata)) throw new Error("生产租约与确认/领取审计不一致");
+      if (expiry) {
+        expectedExpiries++;
+        if (Date.parse(expiry.createdAt) < Date.parse(lease.expiresAt) || imageSnapshotFingerprint(expiry.metadata) !== imageSnapshotFingerprint({ jobId: j.id, leaseId: lease.leaseId, action: "requeued-before-start" })) throw new Error("生产租约到期证据不一致");
+        previousEnd = Date.parse(expiry.createdAt);
+      } else {
+        if (index !== history.length - 1 || !["leased", "cancelled"].includes(j.status) || j.leaseId !== lease.leaseId || j.leaseOwnerId !== lease.workerId
+          || j.leasedAt !== lease.leasedAt || j.leaseExpiresAt !== lease.expiresAt || (j.finishedAt && Date.parse(j.finishedAt) < Date.parse(lease.leasedAt))) throw new Error("生产活租约缺少实际绑定");
+      }
+    }
+    if (expectedExpiries !== expiries.length || (j.status === "leased" && (!history.length || expiries.some((a) => a.metadata.leaseId === j.leaseId)))
+      || (j.status === "queued" && [j.leaseId, j.leaseOwnerId, j.leasedAt, j.leaseExpiresAt].some((v) => v !== undefined))
+      || (!history.length && [j.leaseId, j.leaseOwnerId, j.leasedAt, j.leaseExpiresAt].some((v) => v !== undefined))) throw new Error("生产租约状态不一致");
+    if (history.length && expiries.some((a) => a.metadata.leaseId === history.at(-1)!.leaseId)
+      && [j.leaseId, j.leaseOwnerId, j.leasedAt, j.leaseExpiresAt].some((v) => v !== undefined)) throw new Error("已到期生产租约不能残留活绑定");
     const cancelled = audit.filter((a) => a.eventType === "batch-cancelled"), released = audit.filter((a) => a.eventType === "budget-released");
     if (cancelled.length !== (b.status === "cancelled" ? 1 : 0) || released.length !== (releaseNeeded ? 1 : 0)
       || cancelled.some((a) => a.createdAt !== j.finishedAt || a.metadata.previousStatus !== "queued")
       || released.some((a) => a.createdAt !== j.finishedAt || a.metadata.releasedMinor !== String(q.maxCostMinor))
-      || audit.length !== 4 + cancelled.length + released.length || new Set(audit.map((a) => a.id)).size !== audit.length
+      || audit.length !== 4 + cancelled.length + released.length + leaseEvents.length + expiries.length || new Set(audit.map((a) => a.id)).size !== audit.length
       || audit.some((a) => a.tenantId !== b.tenantId || a.projectId !== b.projectId || a.batchId !== b.id)) throw new Error("生产取消审计不一致");
   }
 
@@ -1625,6 +1738,9 @@ export class InMemoryRunKernel implements RunKernelPort {
     const now = this.clock();
     let recovered = false;
     for (const stored of this.batches.values()) {
+      // Production expiry is an explicit, independently authorized command.
+      // Restore/old mock/local paths must not mutate its leases implicitly.
+      if (stored.productionImageExecution) continue;
       let batchChanged = false;
       for (const job of this.latestJobs(stored.aggregate.jobs)) {
         if (!["leased", "running"].includes(job.status) || !job.leaseExpiresAt) continue;

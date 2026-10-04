@@ -18,6 +18,13 @@ export class SqliteRunKernel implements RunKernelPort {
   createBatch: RunKernelPort["createBatch"] = (...args) => this.run((kernel) => kernel.createBatch(...args));
   stageConfirmedImageBatch: InMemoryRunKernel["stageConfirmedImageBatch"] = (...args) => this.run((kernel) => kernel.stageConfirmedImageBatch(...args));
   stageConfirmedProductionImageBatch: InMemoryRunKernel["stageConfirmedProductionImageBatch"] = (...args) => this.run((kernel) => kernel.stageConfirmedProductionImageBatch(...args));
+  claimProductionImageBatch: InMemoryRunKernel["claimProductionImageBatch"] = (p, project, batch, input) => this.productionLeaseCommand(p, project, batch, "claim", (kernel) => {
+    return kernel.claimProductionImageBatch(p, project, batch, input);
+  }, (result, kernel) => { for (const lease of result.leases) kernel.inspectProductionImageLease(p, project, batch, lease.jobId, { workerId: lease.workerId, leaseId: lease.leaseId }); });
+  inspectProductionImageLease: InMemoryRunKernel["inspectProductionImageLease"] = (p, project, batch, job, input) => this.productionLeaseCommand(p, project, batch, "inspect",
+    (kernel) => kernel.inspectProductionImageLease(p, project, batch, job, input), (_result, kernel) => { kernel.inspectProductionImageLease(p, project, batch, job, input); });
+  reconcileProductionImageBatch: InMemoryRunKernel["reconcileProductionImageBatch"] = (p, project, batch) => this.productionLeaseCommand(p, project, batch, "reconcile",
+    (kernel) => kernel.reconcileProductionImageBatch(p, project, batch));
   claimImageBatch: InMemoryRunKernel["claimImageBatch"] = (...args) => this.run((kernel) => kernel.claimImageBatch(...args));
   startImageJob: InMemoryRunKernel["startImageJob"] = (...args) => this.run((kernel) => kernel.startImageJob(...args));
   inspectImageLease: InMemoryRunKernel["inspectImageLease"] = (...args) => this.run((kernel) => kernel.inspectImageLease(...args));
@@ -68,6 +75,27 @@ export class SqliteRunKernel implements RunKernelPort {
   retryJob: RunKernelPort["retryJob"] = (...args) => this.run((kernel) => kernel.retryJob(...args));
   cancelBatch: RunKernelPort["cancelBatch"] = (...args) => this.run((kernel) => kernel.cancelBatch(...args));
   getBudget: RunKernelPort["getBudget"] = (...args) => this.run((kernel) => kernel.getBudget(...args));
+
+  private productionLeaseCommand<T>(p: RunPrincipal, project: string, batch: string, purpose: "claim" | "inspect" | "reconcile",
+    action: (kernel: InMemoryRunKernel) => T, after?: (result: T, kernel: InMemoryRunKernel) => void): T {
+    const policy = this.options.productionImageLeasePolicy;
+    if (!policy) throw new RunKernelError(503, "production_image_lease_not_configured", "生产租约须显式配置同一事务存储");
+    try {
+      const sameStore: unknown = policy.usesStateStore(this.options.stateStore);
+      if (sameStore && (typeof sameStore === "object" || typeof sameStore === "function") && "then" in sameStore) void Promise.resolve(sameStore).catch(() => undefined);
+      if (sameStore !== true) throw new RunKernelError(503, "production_image_lease_not_configured", "生产租约须显式配置同一事务存储");
+      const allowed: unknown = policy.authorizeScope(p, project);
+      if (allowed && (typeof allowed === "object" || typeof allowed === "function") && "then" in allowed) void Promise.resolve(allowed).catch(() => undefined);
+      if (allowed !== true) throw new RunKernelError(403, "production_image_lease_permission_denied", "生产租约范围未获授权");
+      return this.options.stateStore.transaction(() => {
+        const result = this.run(action);
+        // This runs after the actual SQL write, so faults/revocation/expiry in a
+        // save hook roll back the whole outer transaction, not just an in-memory copy.
+        this.run((kernel) => { kernel.assertProductionImageTask(p, project, batch, purpose); after?.(result, kernel); });
+        return result;
+      });
+    } catch (error) { if (error instanceof RunKernelError) throw error; throw new RunKernelError(503, "production_image_lease_unavailable", "生产租约存储或政策不可用"); }
+  }
 
   private run<T>(action: (kernel: InMemoryRunKernel) => T): T {
     try {

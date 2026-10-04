@@ -16,10 +16,10 @@ function reject(code: string): never { throw new RunKernelError(422, code, "å›¾ç
 export function validateLocalImageAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest) {
   return validateAssetPolicy(store, ImageExecutionRequestSchema.parse(request));
 }
-export function validateProductionImageAssetPolicy(store: SqliteRunKernelStateStore, request: ProductionImageExecutionRequest) {
-  return validateAssetPolicy(store, ProductionImageExecutionRequestSchema.parse(request));
+export function validateProductionImageAssetPolicy(store: SqliteRunKernelStateStore, request: ProductionImageExecutionRequest, guard?: () => void) {
+  return validateAssetPolicy(store, ProductionImageExecutionRequestSchema.parse(request), guard);
 }
-function validateAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest | ProductionImageExecutionRequest) {
+function validateAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest | ProductionImageExecutionRequest, guard?: () => void) {
   const catalog = store.loadCatalog();
   const project = catalog?.projects.find((item) => item.projectId === request.projectId);
   const constraint = project?.constraints.find((item) => item.id === request.constraintSnapshotId);
@@ -34,7 +34,9 @@ function validateAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExe
     || (request.operation === "edit" && request.mask && !masks.includes(request.mask.assetId))) reject("image_output_constraint_mask_changed");
   const refs = request.operation === "edit" ? [...request.inputs, ...(request.mask ? [request.mask] : [])] : [];
   const receipts = refs.map((ref) => {
+    guard?.();
     const receipt = store.loadVerifiedImage(request.tenantId, request.projectId, ref.assetId);
+    guard?.();
     const registered = project.assets.find((asset) => asset.id === ref.assetId);
     if (!receipt || !registered || receipt.registeredMetadataSha256 !== assetMetadataFingerprint(registered)) reject("image_input_not_verified");
     return receipt;
