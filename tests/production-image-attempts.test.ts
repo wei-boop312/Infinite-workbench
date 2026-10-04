@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ConfirmedProductionImageExecution, type ImageProviderConnection } from "../packages/contracts/src/index";
 import { ImageProductionPreparationHarness, type ImagePriceContext } from "../apps/api/src/productionImagePreparations";
 import { createProductionImageLeaseFixturePolicy, type ProductionImageLeasePolicy } from "../apps/api/src/productionImageLeasePolicy";
@@ -12,12 +12,135 @@ import { imageTaskMetadataBytes } from "../apps/api/src/imageTaskMetadata";
 import { InMemoryRunKernel, type RunKernelOptions } from "../apps/api/src/runKernel";
 import * as protocolApi from "../apps/api/src/productionImageProtocol";
 import { principal, connection, png, setupImageTask, sha } from "./helpers/image-task-fixture";
+import { ownedProductionNetwork } from "./helpers/production-network-fixture";
+import { createServer, request as httpsRequest } from "node:https";
+import { ownedTestCertificate, ownedTestKey } from "./helpers/owned-tls-fixture";
+import { once } from "node:events";
+import type { Socket } from "node:net";
 
 const owned: ReturnType<typeof setupImageTask>[] = [], opened: SqliteRunKernelStateStore[] = [];
-afterEach(() => { vi.restoreAllMocks(); for (const s of opened.splice(0).reverse()) s.close(); for (const f of owned.splice(0).reverse()) f.cleanup(); });
+const networks: Awaited<ReturnType<typeof ownedProductionNetwork>>[] = [];
+afterEach(async () => { await new Promise(resolve => setImmediate(resolve)); vi.restoreAllMocks(); for (const n of networks.splice(0)) n.cleanup(); for (const s of opened.splice(0).reverse()) s.close(); for (const f of owned.splice(0).reverse()) f.cleanup(); });
 const withDb = (path: string, action: (db: DatabaseSync) => void) => { const db = new DatabaseSync(path); try { action(db); } finally { db.close(); } };
+
+
+describe("6D5 实际尝试绑定凭证和原生网络，只有零费用独立本地驱动", () => {
+  describe.each((["openai", "openai-compatible", "google"] as const).flatMap(protocol => [true, false].flatMap(manual => [true, false].map(edit => [protocol, manual, edit] as const))))(
+    "%s manual=%s edit=%s", (protocol, manual, edit) => {
+    let t: Awaited<ReturnType<typeof live>>;
+    // Preparation/confirmation are fixture setup, separate from the bounded
+    // live execution; both keep the unchanged default test/hook deadlines.
+    beforeEach(async () => { t = await live({ protocol, manual, edit, network: true }); });
+    it("不伪填估价并保存当次原包", async () => {
+      const n = t.network!, budget = t.f.kernel.getBudget(principal, "project-a");
+      n.hooks.write = () => { expect(t.saved().productionImageAttempt?.state).toBe("attempted"); expect(t.saved().productionImageResult).toBeUndefined(); };
+      const result = await t.execute(), saved = t.saved(), capture = n.captures[0], headers = capture.headers as Record<string, string>;
+      expect(result.aggregate.batch.status).toBe("billing_unknown"); expect(saved.productionImageResult?.kind).toBe("returned");
+      expect(saved.productionImageAttempt?.transport).toBe("contract-fixture"); expect(saved.aggregate.jobs[0].estimatedCostMinor).toBe(manual ? null : 25);
+      expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1); expect(n.options.credentials.rootKeys.withRootKey).toHaveBeenCalledTimes(1);
+      expect(n.options.credentialVersion).toHaveBeenCalledWith({ tenantId: principal.tenantId, projectId: "project-a", actorId: principal.actorId,
+        connectionId: t.config.id, connectionRevision: t.config.revision, credentialRef: t.config.credentialRef,
+        requestFingerprint: saved.productionImageAttempt!.requestFingerprint, payloadChecksumSha256: saved.productionImageAttempt!.payloadChecksumSha256 });
+      expect(headers[protocol === "openai" ? "authorization" : protocol === "google" ? "x-goog-api-key" : "x-api-key"]).toBe((protocol === "openai" ? "Bearer " : "") + n.secret.toString());
+      expect(headers["content-length"]).toBe(String(capture.sentBody!.length)); expect(sha(capture.sentBody!)).toBe(saved.productionImageAttempt?.payloadChecksumSha256);
+      expect(capture.rejectUnauthorized).toBe(true); expect(capture.servername).toBe(new URL(t.config.baseUrl).hostname);
+      expect(JSON.stringify(result)).not.toContain(n.secret.toString()); expect(JSON.stringify(result)).not.toContain(t.config.credentialRef);
+      expect(t.f.kernel.getBudget(principal, "project-a").reservedMinor).toBe(budget.reservedMinor);
+      const reads = vi.mocked(n.options.credentials.rootKeys.withRootKey).mock.calls.length;
+      expect((await t.execute()).started).toBe(false); expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1);
+      expect(n.options.credentials.rootKeys.withRootKey).toHaveBeenCalledTimes(reads);
+    });
+  });
+  it("生产原生、合同网络和旧假端口不可互相改标，默认关闭在私有读取前", async () => {
+    const t = await live({ network: true }), read = vi.spyOn(t.f.store, "load");
+    await expect(t.reconstruction.executeNative(...t.args)).rejects.toThrow();
+    await expect(t.reconstruction.executeFixture(...t.args)).rejects.toThrow();
+    await expect(new ProductionImageTaskReconstruction().executeNative(...t.args)).rejects.toThrow();
+    expect(() => new ProductionImageTaskReconstruction(t.construction)).toThrow();
+    expect(() => new ImageProductionReconstructionHarness({ ...t.construction, credentialNetwork: { ...t.network!.options, localDrivers: undefined } })).toThrow();
+    expect(() => new ImageProductionReconstructionHarness({ ...t.construction, credentialNetwork: { ...t.network!.options, sendingEnabled: false } } as never)).toThrow();
+    expect(() => new ImageProductionReconstructionHarness({ ...t.construction, fixtureTransport: { kind: "contract-fixture", realExecutionEnabled: false, send: t.send } })).toThrow();
+    expect(read).not.toHaveBeenCalled(); expect(t.network!.options.localDrivers!.createResolver).not.toHaveBeenCalled();
+  });
+  it.each(["run:read", "run:execute", "provider:read", "asset:read"])("%s 撤权不读取密文根或DNS", async permission => {
+    const t = await live({ network: true }); t.deny(permission); await expect(t.execute()).rejects.toThrow();
+    expect(t.network!.options.credentials.rootKeys.withRootKey).not.toHaveBeenCalled(); expect(t.network!.options.localDrivers!.createResolver).not.toHaveBeenCalled();
+    expect(t.saved().productionImageAttempt).toBeUndefined();
+  });
+  it.each(["missing", "version", "promise", "version-rejected", "rejected", "root-permission", "root-time"])("%s 不能在凭证消费前后绕过活尝试", async variant => {
+    const t = await live({ network: true }), n = t.network!;
+    if (variant === "version") vi.mocked(n.options.credentialVersion).mockReturnValue(2);
+    if (variant === "promise") vi.mocked(n.options.credentialVersion).mockReturnValue(Promise.resolve(1) as never);
+    if (variant === "version-rejected") vi.mocked(n.options.credentialVersion).mockReturnValue(Promise.reject(new Error("private-secret")) as never);
+    if (variant === "rejected") vi.mocked(n.options.credentials.authorize).mockReturnValue(Promise.reject(new Error("private-secret")) as never);
+    if (variant === "missing") await n.credentials.revoke({ ...n.context, expectedVersion: 1 }, new AbortController().signal);
+    if (variant === "root-permission") n.hooks.root = () => t.revoke();
+    if (variant === "root-time") n.hooks.root = () => t.f.advance(60_000);
+    n.captures.length = 0;
+    const result = await t.execute().catch(() => undefined); expect(n.options.localDrivers!.createResolver).not.toHaveBeenCalled();
+    expect(t.saved().productionImageAttempt?.state).toBe("attempted"); expect(t.f.store.load()!.budgets[0].reservedMinor).toBe(40);
+    if (result) expect(result.aggregate.batch.status).toBe("billing_unknown");
+  });
+  it.each(["task", "price", "lease", "rotate", "revoke", "connection", "input", "constraint"])("TLS写入前%s漂移，没有POST到达", async variant => {
+    const t = await live({ network: true, edit: variant === "input" }), n = t.network!;
+    n.hooks.tls = async () => {
+      if (variant === "task") t.revoke(); else if (variant === "price") t.pricePort.verify.mockReturnValue(false);
+      else if (variant === "lease") t.f.advance(30_000);
+      else if (variant === "rotate") await n.credentials.rotate({ ...n.context, expectedVersion: 1 }, n.secret, new AbortController().signal);
+      else if (variant === "revoke") await n.credentials.revoke({ ...n.context, expectedVersion: 1 }, new AbortController().signal);
+      else if (variant === "connection") t.f.register({ ...t.config, revision: 2 });
+      else { const c = t.f.store.loadCatalog()!;
+        if (variant === "input") c.projects[0].assets[0].originalName = "drift.png"; else c.projects[0].constraints[0].brandRules.style = "drift";
+        t.f.store.transaction(() => t.f.store.saveCatalog(c)); }
+    };
+    await t.execute().catch(() => undefined); expect(n.captures).toHaveLength(1); expect(n.captures[0].sentBody).toBeUndefined();
+    expect(t.saved().productionImageResult?.kind).not.toBe("returned"); expect(t.f.store.load()!.budgets[0].reservedMinor).toBe(40);
+  });
+  it.each(["false", "promise", "rejected"])("网络同步政策 %s 不把凭证消费当作HTTPS许可", async variant => {
+    const t = await live({ network: true }), n = t.network!;
+    vi.mocked(n.options.network.authorize).mockReturnValue(variant === "false" ? false : (variant === "promise" ? Promise.resolve(true) : Promise.reject(new Error("private-secret"))) as never);
+    await t.execute(); expect(n.options.localDrivers!.createResolver).not.toHaveBeenCalled(); expect(n.captures).toHaveLength(0);
+    expect(t.saved().productionImageResult?.kind).toBe("interrupted"); expect(t.saved().aggregate.jobs[0].failureCode).toBe("production-transport-error");
+    expect(t.f.store.load()!.budgets[0].reservedMinor).toBe(40);
+  });
+  it("已写入后报价到期/目录停用的当次响应保留，不把迟到当新发送", async () => {
+    const t = await live({ network: true }), n = t.network!;
+    n.hooks.write = () => { t.f.advance(60_000); t.f.register({ ...t.config, revision: 2, enabled: false }); };
+    expect((await t.execute()).aggregate.batch.status).toBe("billing_unknown"); expect(t.saved().productionImageResult?.kind).toBe("returned");
+    expect((await t.execute()).started).toBe(false); expect(n.captures).toHaveLength(1);
+  });
+  it("响应收到后凭证消费最终政策拒绝仍保留原包，但不再发或消费", async () => {
+    const t = await live({ network: true }), n = t.network!;
+    vi.mocked(n.options.credentials.authorize).mockImplementation(() => !n.captures.some(c => c.sentBody));
+    expect((await t.execute()).aggregate.batch.status).toBe("billing_unknown"); expect(t.saved().productionImageResult?.kind).toBe("returned");
+    expect(n.captures).toHaveLength(1); expect((await t.execute()).started).toBe(false);
+  });
+  it.each(["valid", "ca", "hostname", "before-write-revoke", "redirect"])("真实自有TLS服务 %s，独立local-driver不放松生产政策", async variant => {
+    const t = await live({ network: true }), n = t.network!, peers: Socket[] = [], seen: Buffer[] = [];
+    const server = createServer({ cert: ownedTestCertificate, key: ownedTestKey }, (req, res) => {
+      const chunks: Buffer[] = []; req.on("data", data => chunks.push(data)); req.on("end", () => { seen.push(Buffer.concat(chunks));
+        if (variant === "redirect") { res.writeHead(302, { Location: "https://another.invalid/" }); res.end(); }
+        else { res.writeHead(200, { "Content-Type": "application/json", "Content-Length": t.response.body.length }); res.end(t.response.body); }
+      });
+    });
+    server.on("connection", s => peers.push(s)); server.listen(0, "127.0.0.1"); await once(server, "listening");
+    const port = (server.address() as { port: number }).port;
+    n.options.localDrivers!.request = vi.fn((original, callback) => {
+      expect(original.hostname).toBe("owned.fixture.invalid"); expect(original.servername).toBe("owned.fixture.invalid"); expect(original.rejectUnauthorized).toBe(true);
+      const req = httpsRequest({ ...original, port, ...(variant === "ca" ? {} : { ca: ownedTestCertificate }),
+        ...(variant === "hostname" ? { servername: "wrong.fixture.invalid" } : {}), lookup: (_host, _options, done) => done(null, "127.0.0.1", 4) }, callback);
+      if (variant === "before-write-revoke") req.on("socket", socket => socket.prependListener("secureConnect", () => t.revoke())); return req;
+    });
+    try {
+      const result = await t.execute().catch(() => undefined);
+      if (variant === "valid") { expect(t.saved().productionImageResult?.kind).toBe("returned"); expect(seen).toHaveLength(1); expect(sha(seen[0])).toBe(t.saved().productionImageAttempt!.payloadChecksumSha256); }
+      else { expect(t.saved().productionImageResult?.kind).not.toBe("returned"); expect(seen).toHaveLength(variant === "redirect" ? 1 : 0); }
+      if (result) expect(result.aggregate.batch.status).toBe("billing_unknown"); expect(t.f.store.load()!.budgets[0].reservedMinor).toBe(40);
+    } finally { for (const s of peers) s.destroy(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+});
 const pause = () => new Promise<void>(resolve => setTimeout(resolve, 10));
-async function live(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; cap?: number; timeout?: number; jobTimeout?: number; enabled?: boolean; raw?: boolean } = {}) {
+async function live(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; cap?: number; timeout?: number; jobTimeout?: number; enabled?: boolean; raw?: boolean; network?: boolean } = {}) {
   let service: ImageProductionPreparationHarness, policy: ProductionImageLeasePolicy, reconstruction: ImageProductionReconstructionHarness;
   let allowed = true;
   const denied = new Set<string>();
@@ -35,7 +158,7 @@ async function live(options: { protocol?: ImageProviderConnection["protocol"]; m
       validateResult: (p, e, l, i, a, r) => reconstruction?.responsePolicy.validateResult(p, e, l, i, a, r) ?? false } };
   const f = setupImageTask({ productionResponses: options.raw === false ? undefined : true, format: options.protocol === "google" ? "jpeg" : "png", kernel: kernelOptions }); owned.push(f);
   const model = connection().models[0], protocol = options.protocol ?? "openai";
-  const config = connection({ protocol,
+  const config = connection({ protocol, ...(options.network ? { baseUrl: "https://owned.fixture.invalid/v1" } : {}),
     ...(protocol === "openai-compatible" ? { compatibility: { version: "owned-compat", editEncoding: "json-images", responseEncoding: "images-b64-json-v1",
       auth: { scheme: "header", headerName: "x-api-key" }, endpoints: { generate: "/images/generations", edit: "/images/edits" }, extraParameters: [] } } : {}),
     ...(protocol === "google" ? { baseUrl: "https://generativelanguage.googleapis.com", models: [{ ...model, maxInputImages: 14, outputFormats: ["jpeg"] }],
@@ -55,9 +178,11 @@ async function live(options: { protocol?: ImageProviderConnection["protocol"]; m
     : { created: 1, data: [{ b64_json: image.toString("base64") }] };
   const response = { status: 200, contentType: "application/json", requestId: "owned-request-id", body: Buffer.from(JSON.stringify(json)) };
   const send = vi.fn<ProductionFixtureTransport["send"]>(async () => response);
+  const network = options.network ? await ownedProductionNetwork(config, f.clock, response) : undefined;
+  if (network) networks.push(network);
   const construction = { reconstructionEnabled: true as const, startEnabled: true as const, leasePolicy: gate, stateStore: f.store,
     tenantId: principal.tenantId, runKernel: f.kernel, clock: f.clock, responseHandlingEnabled: options.enabled === false ? undefined : true as const,
-    fixtureTransport: { kind: "contract-fixture" as const, realExecutionEnabled: false as const, send }, timeoutMs: options.timeout ?? 5_000 };
+    ...(network ? { credentialNetwork: network.options } : { fixtureTransport: { kind: "contract-fixture" as const, realExecutionEnabled: false as const, send } }), timeoutMs: options.timeout ?? 5_000 };
   reconstruction = new ImageProductionReconstructionHarness(construction);
   const prepared = service.createPreparation(principal, { projectId: "project-a", idempotencyKey: "owned-action", connectionId: config.id, connectionRevision: 1,
     model: model.model, capabilityVersion: model.version, constraintSnapshotId: "constraint-a", protection: "none", operation: options.edit ? "edit" : "generate",
@@ -66,11 +191,11 @@ async function live(options: { protocol?: ImageProviderConnection["protocol"]; m
   const batch = (await service.confirmPreparation(principal, "project-a", prepared.id, productionExpected(preparation))).aggregate;
   const l = f.kernel.claimProductionImageBatch(principal, "project-a", batch.batch.id, { workerId: "owned-worker", maxJobs: 1 }).leases[0];
   const args = [principal, "project-a", batch.batch.id, l.jobId, { workerId: l.workerId, leaseId: l.leaseId }] as const;
-  const execute = (signal?: AbortSignal) => reconstruction.executeFixture(...args, signal);
+  const execute = (signal?: AbortSignal) => network ? reconstruction.executeNetworkFixture(...args, signal) : reconstruction.executeFixture(...args, signal);
   const saved = () => f.store.load()!.batches[0];
   const restart = () => { const store = new SqliteRunKernelStateStore(f.path, { productionResponseStorageEnabled: true }); opened.push(store);
     const kernel = new SqliteRunKernel({ ...kernelOptions, stateStore: store, authorizer: auth, budgets: f.store.load()!.budgets, clock: f.clock }); return { store, kernel }; };
-  return { f, saved, execute, reconstruction, construction, kernelOptions, pricePort, send, response, args, config, auth,
+  return { f, saved, execute, reconstruction, construction, kernelOptions, pricePort, send, response, args, config, auth, network,
     revoke: () => { allowed = false; }, allow: () => { allowed = true; }, deny: (p: string) => denied.add(p), restart };
 }
 

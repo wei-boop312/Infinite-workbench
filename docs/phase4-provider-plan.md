@@ -1,5 +1,18 @@
 # 阶段 4 多供应商图片 API 接入计划
 
+## 最新交接：6D5已本地验收（覆盖下方旧时点描述）
+
+6D5默认关闭的实际凭证guard/固定地址HTTPS接线已本地验收，入口docs/production-image-native-execution.md；完整pnpm check：1328项单元/集成（46文件）、101项Chrome、6构建通过，新增42项接线回归、1项独立SQLite结算竞争回归及1Chrome。20:50（上海）周已用97%/剩余3%，高于0%停止线，原自动续做ACTIVE。真实供应商、生产公网网络/保险库验收、权威产物/真实费用/生产确认UI及阶段4整体未完成，日常真实执行关闭。
+ProductionImageTaskReconstruction.executeNative只接受显式sendingEnabled、6C凭证/根端口/同步政策/指定版本、6B原生网络精确目标/同步政策和同库响应/租约/启动政策；默认私有读取前关闭。独立executeNetworkFixture只用production-contract-fixture+local-driver/realfalse，生产禁止注入自有CA/回环request驱动，旧fixtureTransport不能混用。不能事后拿started/B1/schema生成许可，只有实际首次重建/同库attempt活续接；原实际确认/准备/job/key/batch/领取人worker/lease/意图、权限/连接能力修订/权威原图蒙版约束/原价格verify/预算及原wireSHA长度Content-Type转换仍联合核验，manual估价null不补0/上限进入legacy。
+指定凭证版本绑定实际租户项目操作者/连接修订/引用/request与payloadSHA；根读取前后、消费前后和HTTPS before-dns/connect/before-write复查实际attempt/有效期限/当前政策及credential assertCurrent，轮换撤销旧guard失败。只恢复原端点和鉴权，完整三协议wire匹配；全A/AAAA/固定lookup地址族、原Host/SNI/证书校验、私有无代理无复用Agent/禁止重定向重试/有界取消保持。完成当次原包后转历史权限核验，报价租约到期/目录停用及消费最终政策变化不抹当次已收到原包，不新消费或重发。原包/任务/审计/unknown/max预留同库事务仍保留，秘密和原网络临时Buffer尽力清除但不保证JS/native字符串擦除。
+生产入口没有日常配置、HTTP或钥匙读取器，本轮没有实际Native公网调用。仅自有随机根秘密/独立内存ICRD1/临时任务SQLitev7、假oracle/假DNS记录和实际自有回环TLS服务验证；不冒充真实单价、公网DNS/SSRF/路由防火墙或生产保险库验收。任务库和凭证库不是跨库全局ACID，可信端口非沙箱，撤权不能追回已发请求/证明零扣费或释放unknown预留。16MiB/512KiB元数据、64MiB原图、32MiB原包/512MiB项目、20MiB输出/8192/1600万像素/两槽及auto/4096平方/pixel-exact/product.pixels拒绝保持，旧mock商品锁/单位假价/配置指纹/用户记录不变。没有用户钥匙/环境/保险库读取、生产根/真实凭证价格导入、供应商DNS网络付费、账号/外部消息/部署推送或重启5173。
+
+下一步6D6权威生产产物底座（冻结路线图原项），不重复6A–6D5或本地闭环。先读production-image-native-execution/attempts/responses、generated-image-ingestion/image-task-artifacts/generated-asset-readback及完整确认/意图/租约/价格文档、phase4-provider-plan/automatic-progress和outputs最新验收。候选pending-validation不能当合格图片或5A许可；从同一实际任务SQLite恢复完整确认/准备/原运行租约/领取人/意图/attempt/returned原包与实际字节SHA，当前严格权限/原权威输入约束/预算必须核验。独立生产known/unknown合同与谱系，不能把null补0/上限或把local-fixture记录改名进入legacy生成记录。完整有界解码/尺寸MIME格式/输出约束和锁区政策通过后，产物BLOB/收据/谱系/目录/实际任务绑定须同一实例事务原子提交和恢复，写后撤权故障容量回滚，不覆盖历史、重发或释放unknown max预留；生产默认关闭且只自有假oracle/原包/临时存储零费用测试。好图坏图和保存失败与真实费用分开，原响应不可覆写；生产费用与确认UI及原专项随后按冻结计划，不套用旧mock/local已知费用自动成功/核账。真实供应商/模型/金额/根/凭证及最低成本真实请求仍需另获用户明确授权，不代选付费模型价格。MCP阶段6/视频7。
+
+本轮失败记录：首API编译发现返回值可能undefined，已显式拒绝修复。首新增112项中4失败为3处撤权后测试仍调用受保护预算读取、1处目录夹具调用不存在接口，修正自有夹具，不放松权限或迟到响应保存政策；随后113项通过，补同步政策/权威输入回归后相关260项通过。首完整1327中1项新组合超5秒，缓存同一已提交快照仍在第二完整1327出现该项和旧多进程领取+结算超时；将确认夹具准备置于beforeEach、把领取和结算竞争拆独立用例，保留全部断言和原默认5秒/生产执行时限，不调全局超时或靠重试吞错。新增持久化领取断言字段workerId错配修为实际leaseOwnerId，相关133项通过；最终完整1328/101/6全通过，Chrome源码全程冻结。Zod/NO_COLOR非致命警告保留，不改依赖。用量20:20为93%/7%、20:26为94%/6%、20:36为95%/5%、20:45为96%/4%、20:50为97%/3%；全账号共享/取整及定期检查不能承诺零误差，未重置/购买/换模型。
+
+下方6D4B/此前入口与边界为历史验收时点，不覆盖当前6D5交接。
+
 日期：2026-10-04（上海）。状态：**里程碑1–5本地闭环、6A–6C安全底座、6D1/6D2准备确认、6D3租约重建意图及6D4A+B尝试原响应本地底座已验收；真实供应商、生产网络接通、权威产物真实费用与阶段4整体未完成，真实执行关闭**。阶段3本机零费用基线d1c0246。
 
 接入顺序遵循冻结路线图：一个官方图片 API → 一个 OpenAI 兼容中转协议 → 一个非 OpenAI 协议。画布不直接访问这些服务，全部由统一任务、预算、权限与资产层承接。

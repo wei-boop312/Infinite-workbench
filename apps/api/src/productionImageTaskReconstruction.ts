@@ -12,6 +12,7 @@ import { assertProductionDispatchIntent } from "./productionImageDispatchIntentI
 import { assertProductionImageAttempt, parseProductionImageResponse, productionImageUnknownOutcome } from "./productionImageResponse";
 import { assertProductionImageResult } from "./productionImageResultIntegrity";
 import { MAX_IMAGE_PROTOCOL_RESPONSE_BYTES, type ImageProtocolResponse } from "./imageProtocolResponse";
+import { ProductionImageCredentialNetwork, type ProductionImageCredentialNetworkOptions } from "./productionImageCredentialNetwork";
 
 export type ProductionFixtureTransport = { kind: "contract-fixture"; realExecutionEnabled: false;
   send(input: { wire: Awaited<ReturnType<typeof prepareProductionImageProtocol>>["wire"]; signal: AbortSignal; assertCurrent(): void }): Promise<ImageProtocolResponse> };
@@ -19,7 +20,8 @@ export type ProductionFixtureTransport = { kind: "contract-fixture"; realExecuti
 type Options = { reconstructionEnabled: true; tenantId: string; stateStore: SqliteRunKernelStateStore;
   runKernel: Pick<SqliteRunKernel, "usesStateStore" | "inspectProductionImageLease"> & Partial<Pick<SqliteRunKernel, "inspectProductionImageStart" | "startProductionImageJob" | "inspectProductionImageAttempt" | "beginProductionImageAttempt" | "assertProductionImageAttemptCurrent" | "recordProductionImageResult">>;
   startEnabled?: true; leasePolicy?: ProductionImageLeasePolicy; clock?: () => number;
-  responseHandlingEnabled?: true; fixtureTransport?: ProductionFixtureTransport; timeoutMs?: number };
+  responseHandlingEnabled?: true; fixtureTransport?: ProductionFixtureTransport; timeoutMs?: number;
+  credentialNetwork?: ProductionImageCredentialNetworkOptions };
 let activeRebuilds = 0;
 function reject(code: string, status = 409): never { throw new RunKernelError(status, code, "生产负载重建未通过核验，未启动或发送请求"); }
 const publicCodes = new Set(["production_image_reconstruction_not_configured", "production_image_reconstruction_permission_denied",
@@ -40,7 +42,14 @@ class ReconstructionCore {
   private readonly attempts = new Map<string, string>();
   private readonly attemptSignals = new Map<string, AbortSignal>();
   private readonly results = new Map<string, string>();
-  constructor(private readonly mode: ConfirmedProductionImageExecution["mode"], options?: Options) { this.options = options ? { ...options } : undefined; }
+  private readonly credentialNetwork?: ProductionImageCredentialNetwork;
+  constructor(private readonly mode: ConfirmedProductionImageExecution["mode"], options?: Options) {
+    this.options = options ? { ...options } : undefined;
+    if (options?.credentialNetwork) {
+      if (options.fixtureTransport) reject("production_image_response_not_configured", 503);
+      this.credentialNetwork = new ProductionImageCredentialNetwork(mode, options.credentialNetwork);
+    }
+  }
   // A separate kernel start policy. The pending proof exists ONLY during this
   // instance's matched wire continuation, never in a B1 result or HTTP input.
   readonly usesStateStore = (store: unknown): boolean => {
@@ -63,8 +72,8 @@ class ReconstructionCore {
   readonly responsePolicy: ProductionImageResponsePolicy = {
     usesStateStore: store => {
       const o = this.options;
-      return !!o && o.responseHandlingEnabled === true && this.mode === "production-contract-fixture"
-        && o.fixtureTransport?.kind === "contract-fixture" && o.fixtureTransport.realExecutionEnabled === false
+      return !!o && o.responseHandlingEnabled === true && (!!this.credentialNetwork || this.mode === "production-contract-fixture"
+        && o.fixtureTransport?.kind === "contract-fixture" && o.fixtureTransport.realExecutionEnabled === false)
         && o.stateStore.supportsProductionImageResponses() && this.usesStateStore(store);
     },
     authorizeScope: (p, project) => !!this.options && this.responsePolicy.usesStateStore(this.options.stateStore) && this.authorizeScope(p, project),
@@ -86,9 +95,21 @@ class ReconstructionCore {
   start(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, signal?: AbortSignal) {
     return this.rebuild(principal, projectId, batchId, jobId, input, signal, true).then((result) => result.start!);
   }
-  // Independent zero-cost contract harness only. Production/native wiring is
-  // deliberately absent; a later caller cannot turn a B2 started result into a permit.
+  // All three entry points use the private FIRST live reconstruction only;
+  // a later caller cannot turn a B2 started result into a permit.
   async executeFixture(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, signal?: AbortSignal) {
+    if (this.mode !== "production-contract-fixture" || this.credentialNetwork) reject("production_image_response_not_configured", 503);
+    return this.executeLive(principal, projectId, batchId, jobId, input, signal);
+  }
+  async executeNative(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, signal?: AbortSignal) {
+    if (this.mode !== "production" || !this.credentialNetwork) reject("production_image_response_not_configured", 503);
+    return this.executeLive(principal, projectId, batchId, jobId, input, signal);
+  }
+  async executeNetworkFixture(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, signal?: AbortSignal) {
+    if (this.mode !== "production-contract-fixture" || !this.credentialNetwork) reject("production_image_response_not_configured", 503);
+    return this.executeLive(principal, projectId, batchId, jobId, input, signal);
+  }
+  private async executeLive(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, signal?: AbortSignal) {
     const o = this.options, timeout = o?.timeoutMs ?? 5_000;
     if (!o || !this.responsePolicy.usesStateStore(o.stateStore) || !o.runKernel.inspectProductionImageAttempt || !o.runKernel.beginProductionImageAttempt
       || !o.runKernel.assertProductionImageAttemptCurrent || !o.runKernel.recordProductionImageResult || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000) reject("production_image_response_not_configured", 503);
@@ -188,7 +209,7 @@ class ReconstructionCore {
       if (committed) {
         if (execute && committed.started) {
           continued = true;
-          const aggregate = await this.continueFixture(p, projectId, batchId, jobId, leaseInput, e, initial.lease, committed.intent, prepared.wire, signal!, resource);
+          const aggregate = await this.continueAttempt(p, projectId, batchId, jobId, leaseInput, e, initial.lease, committed.intent, prepared.wire, signal!, resource);
           return { start: { ...committed, aggregate, executionAuthorized: false as const, realExecutionEnabled: false as const } };
         }
         return { start: { ...committed, executionAuthorized: false as const, realExecutionEnabled: false as const } };
@@ -221,7 +242,7 @@ class ReconstructionCore {
     }
   }
 
-  private async continueFixture(p: RunPrincipal, project: string, batch: string, job: string, leaseInput: { workerId: string; leaseId: string },
+  private async continueAttempt(p: RunPrincipal, project: string, batch: string, job: string, leaseInput: { workerId: string; leaseId: string },
     e: ConfirmedProductionImageExecution, l: ProductionImageLeaseEvidence, i: ProductionImageDispatchIntent,
     wire: Awaited<ReturnType<typeof prepareProductionImageProtocol>>["wire"], signal: AbortSignal, resource: { pending?: Promise<unknown> }) {
     const o = this.options!;
@@ -232,7 +253,7 @@ class ReconstructionCore {
     const { body: _body, ...metadata } = wire, metadataFingerprint = imageSnapshotFingerprint(metadata);
     const a: ProductionImageAttempt = { schemaVersion: 1, mode: e.mode, state: "attempted", id: `production-image-attempt:${randomUUID()}`,
       tenantId: p.tenantId, projectId: project, jobId: job, batchId: e.batchId, actorId: p.actorId, workerId: l.workerId, leaseId: l.leaseId,
-      transport: "contract-fixture", intentFingerprint: imageSnapshotFingerprint(i), executionFingerprint: imageSnapshotFingerprint(e), leaseFingerprint: imageSnapshotFingerprint(l),
+      transport: e.mode === "production" ? "native-https" : "contract-fixture", intentFingerprint: imageSnapshotFingerprint(i), executionFingerprint: imageSnapshotFingerprint(e), leaseFingerprint: imageSnapshotFingerprint(l),
       requestFingerprint: e.protocol.requestFingerprint, payloadChecksumSha256: e.protocol.payloadChecksumSha256, attemptedAt: at() };
     const hash = imageSnapshotFingerprint(a), identity = `${p.tenantId}\u0000${p.actorId}`;
     this.attempts.set(hash, identity);
@@ -260,9 +281,17 @@ class ReconstructionCore {
       let response: ImageProtocolResponse;
       try {
         assertCurrent(); invoked = true;
-        // This trusted callback is NOT a sandbox/network implementation. No
-        // credentials are provided. A pending uncooperative callback keeps its slot.
-        const operation = Promise.resolve().then(() => { assertCurrent(); return o.fixtureTransport!.send({ wire, signal, assertCurrent }); });
+        // The legacy fixture receives no credentials. The separate controlled
+        // transport consumes them internally; neither is a script sandbox.
+        // An uncooperative operation keeps the original bounded slot.
+        const assertHistory = () => {
+          if (!open || signal.aborted) reject("production_image_reconstruction_cancelled");
+          const current = o.runKernel.inspectProductionImageAttempt!(p, project, batch, job, leaseInput);
+          if (!current.attempt || imageSnapshotFingerprint(current.attempt) !== hash || current.result) reject("production_image_reconstruction_context_changed");
+        };
+        const operation = Promise.resolve().then(() => { assertCurrent(); return this.credentialNetwork
+          ? this.credentialNetwork.send(e, wire, p.actorId, signal, assertCurrent, assertHistory)
+          : o.fixtureTransport!.send({ wire, signal, assertCurrent }); });
         resource.pending = operation.then(() => undefined, () => undefined);
         void resource.pending.then(() => { resource.pending = undefined; });
         const cancelled = new Promise<never>((_resolve, rejectAbort) => { abortListener = () => rejectAbort(new Error("cancelled"));
@@ -277,6 +306,7 @@ class ReconstructionCore {
         raw = Buffer.from(response.body);
         parsed = parseProductionImageResponse(e, l, i, a, { ...response, body: raw }, at());
       } catch { return interrupted("production-response-invalid"); }
+      finally { if (this.credentialNetwork && Buffer.isBuffer(response?.body)) response.body.fill(0); }
       try { return commit(parsed.record, raw); }
       catch { return interrupted("production-response-save-failed"); }
       finally { parsed.candidate?.body.fill(0); }

@@ -1,5 +1,7 @@
 # 6D4A 独立生产响应解析与有界原包存储
 
+最新集成：6D5已本地验收，见 [production-image-native-execution.md](production-image-native-execution.md)。实际首次任务续接已能通过默认关闭的内部配置联合6C凭证guard与6B原生HTTPS；本文件传输/存储原语仍不独立授权任务。production拒绝local-driver，零费用验收只有独立合同命名空间/自有驱动，未启用供应商网络或读取用户秘密。下方为原验收时点，旧“无生产接线/下一步6D5”仅历史；当前下一步为权威生产产物，真实供应商/公网/保险库/费用/UI未验收。
+
 日期：2026-10-04（上海）。本文件记录6D4A时点边界；最新6D4B实际活续接/尝试与原响应任务事务已本地验收，6D4A+B本地底座完成，见[production-image-attempts.md](production-image-attempts.md)。真实供应商/生产Worker网络接通/权威产物与真实费用及阶段4整体仍未完成，真实执行关闭。下文“尚未写入实际任务”等为6D4A原验收时点，不覆盖最新6D4B状态。
 
 ## 已完成的边界

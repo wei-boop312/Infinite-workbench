@@ -106,14 +106,24 @@ describe("本机 SQLite 任务事务", () => {
     expect(list.find((batch) => batch.jobs.length === 0)?.audit.filter((event) => event.eventType === "confirmation-rejected")).toHaveLength(2);
   });
 
-  it("多个进程领取租约，每个输出只能有一个执行器，结算也不能重复", async () => {
+  it("多个进程领取租约，每个输出只能有一个执行器", async () => {
     const { path, kernel } = setup(); const draft = kernel.createBatch(principal, request); confirm(kernel, draft.batch.id);
     const claims = await race(path, Array.from({ length: 4 }, (_, index) => ({ mode: "claim", batchId: draft.batch.id, workerId: `worker-${index}` })));
     expect(claims.every((item) => item.ok)).toBe(true);
     const leases = claims.flatMap((item) => (item.result as RunJobClaimResult).leases);
     expect(leases).toHaveLength(2);
     expect(new Set(leases.map((lease) => lease.jobId)).size).toBe(2);
-    const lease = leases[0];
+    const persisted = kernel.getBatch(principal, draft.batch.id);
+    for (const lease of leases) expect(persisted.jobs.find(job => job.id === lease.jobId))
+      .toMatchObject({ status: "leased", leaseOwnerId: lease.workerId, leaseId: lease.leaseId });
+    expect(kernel.getBudget(principal, "project-a")).toMatchObject({ spentMinor: 0, reservedMinor: 80 });
+  });
+
+  it("多个进程执行同一持久化租约，结算不能重复", async () => {
+    // Independent task fixture: keep the duplicate-execution race and every
+    // settlement assertion without six child startups in one timed test.
+    const { path, kernel } = setup(); const draft = kernel.createBatch(principal, request); confirm(kernel, draft.batch.id);
+    const lease = kernel.claimBatch(principal, draft.batch.id, { workerId: "worker", maxJobs: 1 }).leases[0];
     const command = { mode: "execute", jobId: lease.jobId, leaseId: lease.leaseId, workerId: lease.workerId };
     const runs = await race(path, [command, command]);
     expect(runs.filter((item) => item.ok)).toHaveLength(1);
