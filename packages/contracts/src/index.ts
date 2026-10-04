@@ -1,4 +1,5 @@
 import { z } from "zod";
+export { LockedImagePixelDraftSchema, type LockedImagePixelDraft } from "./lockedImagePixels.ts";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
 import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImagePublicPricingSchema, ProductionImageTaskIdentitySchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
 import { ProductionImageBillingRecordSchema, ProductionImageBillingSummarySchema } from "./productionImageBilling.ts";

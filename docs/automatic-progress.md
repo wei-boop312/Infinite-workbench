@@ -1,6 +1,18 @@
 # 自动推进与用量停止规则
 
-## 最新验收：6D9C独立生产原图受控回画布，下一步原专项
+## 最新验收：原锁区专项A纯完整像素核验，实际保护链仍关闭
+
+2026-10-05 04:51（上海）冻结phase4-provider-plan原第6项专项盘点发现真实原缺口：硬像素锁区此前只有拒绝闸门，原协议与5A文档留待真实资产回流阶段实现。本次仅补[locked-image-pixel-validation.md](locked-image-pixel-validation.md)纯原语，完整盘点见[phase4-special-acceptance-audit.md](phase4-special-acceptance-audit.md)，不重复6A–6D9/local闭环或新增产品目标。第二完整pnpm check：1897项单元/集成（55文件）、190项Chrome、6构建全部通过，新增56项/1Chrome；相关278项及API/修复后Web构建通过。
+
+verifyLockedImagePixels首await前冻结完整约束/源图蒙版关系与原字节，读前容量/维度、注册元信息/原SHA/区域唯一蒙版绑定核验；共用原完整解码两槽，固定EXIF方向/sRGB/RGBA8，只有alpha255白色编辑，其余含半透明边缘完全锁定，四通道任何差异拒绝，不缩放/重编码/合成或放宽有损差异。这是规范RGBA8比较，不是原编码/ICC/高位深样本一致保证，不能证明语义/品牌规则。独立pixel-verified-uncommitted/checked-not-applied草稿全许可旗标false，schema/SHA/客户端对象不是当前实际任务/权限/入库证明。默认5秒最多30秒/两检查槽/单调时钟与绝对取消，非合作native迟到仍占槽并尽力清零自有副本，不是生产沙箱/跨进程闸门/可靠JS-native擦除。
+
+本次不读SQL/价格/预算或网络，不存资产/任务/费用，不接HTTP/UI，所有实际pixel-exact/product.pixels仍拒绝。SQLite v8/ICRD1/IDB v4、原元数据/原图/原包/输出上限、商品锁/假单价/幂等/配置指纹/用户记录和unknown-null/max预留不变。新增Chrome仅两个未开放路径GET/POST404、预算不变与真实执行false，不冒充生产锁区UI/供应商。首新夹具缺原必填mask.polarity导致相关277/278，补自有unsupported后全通过；首完整1897项通过但Web新合同导出缺.ts失败，Chrome未运行，按既有子模块规范修复后第二完整全通过。原断言/默认时限/依赖/非致命警告保持，Chrome期间源码全程冻结。
+
+04:51实际codex10080分钟周窗口已用46%/剩余54%，原automation ACTIVE，停止线已用>=50%或周不可读，账号共享取整/周期检查不承诺零误差。下一步仍原锁区专项的完整实际任务/权威输入约束/产物事务/不可变历史恢复与缓存回流接线设计及有限零费用验收，不能直接改enum或把纯草稿塞进旧protectionApplied=none。实际保护链未验收前继续拒绝；真实供应商接受/公网/保险库/真实价格账单/生产会话另需具体用户授权，阶段4及完整项目未完成，不跳过阶段4推进MCP阶段6/视频7。只自有图片/假来源/临时存储/4173，未读用户钥匙/环境/保险库、建生产根/导入真实凭证价格账单/供应商DNS网络付费/账号外发推送部署或主动重启5173。
+
+以下6D9C及更早下一步仅历史，不覆盖上述当前结果和边界。
+
+## 历史验收：6D9C独立生产原图受控回画布
 
 2026-10-05 04:11（上海）6D9C独立生产原图受控回画布已本地验收，入口[production-generated-result-canvas.md](production-generated-result-canvas.md)。最终第二完整pnpm check：1841项单元/集成（54文件）、189项Chrome、6构建全部通过，新增41项/29Chrome；相关105项及2项实际核账Chrome定向通过。原回读/缓存/回流有限A+B+C本地底座完成，不重复6A–6D9/local闭环，不新增最终目标。真实供应商/公网/保险库/真实价格费用/生产会话与原专项、阶段4及完整项目未完成，日常真实执行关闭。
 

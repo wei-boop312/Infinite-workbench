@@ -48,9 +48,17 @@ export function rejectStaticImageAnimation(body: Buffer, mime: string): void {
 // Shared source/output decoder; original bytes are NOT rewritten. This is local
 // in-process verification, not the production isolated malicious-file sandbox.
 export async function decodeStaticImage(body: Buffer, mime: string): Promise<{ width: number; height: number; hasAlpha: boolean; hasTransparency: boolean }> {
+  const decoded = await decodeStaticImagePixels(body, mime);
+  try { return { width: decoded.width, height: decoded.height, hasAlpha: decoded.hasAlpha, hasTransparency: decoded.hasTransparency }; }
+  finally { decoded.pixels.fill(0); }
+}
+
+// Internal owned RGBA8 buffer. Callers MUST clear it, including late results.
+// Canonical decoded equality is not encoded-byte/ICC/high-bit-depth equality.
+export async function decodeStaticImagePixels(body: Buffer, mime: string): Promise<{ width: number; height: number; hasAlpha: boolean; hasTransparency: boolean; pixels: Buffer }> {
   if (imageMagicMime(body) !== mime) reject("verified_asset_mime_mismatch", "图片魔数与文件类型不一致");
   rejectStaticImageAnimation(body, mime);
-  return withStaticImageDecodeSlot(async () => { try {
+  return withStaticImageDecodeSlot(async () => { let pixels: Buffer | undefined; try {
     const image = sharp(body, { failOn: "warning", limitInputPixels: MAX_STATIC_IMAGE_PIXELS, sequentialRead: true });
     const metadata = await image.metadata();
     const expectedFormat = mime === "image/avif" ? "heif" : mime.slice(6);
@@ -58,7 +66,8 @@ export async function decodeStaticImage(body: Buffer, mime: string): Promise<{ w
     if ((metadata.pages ?? 1) > 1) reject("verified_asset_animated", "动态图暂不支持图片任务，请先选择静态帧");
     if (!metadata.width || !metadata.height || metadata.width > MAX_STATIC_IMAGE_EDGE || metadata.height > MAX_STATIC_IMAGE_EDGE
       || metadata.width * metadata.height > MAX_STATIC_IMAGE_PIXELS) reject("verified_asset_dimensions_exceeded", "图片像素或边长超出校验上限");
-    const decoded = await image.autoOrient().toColourspace("srgb").ensureAlpha().raw().timeout({ seconds: 5 }).toBuffer({ resolveWithObject: true });
+    const decoded = await image.autoOrient().toColourspace("srgb").ensureAlpha().raw({ depth: "uchar" }).timeout({ seconds: 5 }).toBuffer({ resolveWithObject: true });
+    pixels = decoded.data;
     const { width, height, channels } = decoded.info;
     if (channels !== 4 || decoded.data.byteLength !== width * height * 4) reject("verified_asset_decode_failed", "图片像素数据不完整");
     let hasTransparency = false;
@@ -67,8 +76,9 @@ export async function decodeStaticImage(body: Buffer, mime: string): Promise<{ w
         if (decoded.data[index] < 255) { hasTransparency = true; break; }
       }
     }
-    return { width, height, hasAlpha: metadata.hasAlpha, hasTransparency };
+    return { width, height, hasAlpha: metadata.hasAlpha, hasTransparency, pixels };
   } catch (error) {
+    pixels?.fill(0);
     if (error instanceof RunKernelError) throw error;
     return reject("verified_asset_decode_failed", "无法完整解码图片，拒绝伪造或截断文件");
   } });

@@ -139,6 +139,19 @@ test("生产图片解码草稿不开放产物提交/原图路由或改变未知�
   expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
 });
 
+test("纯锁区像素草稿没有HTTP核验/提交入口，不改变预算与真实闸门", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["locked-image-pixels/verify", "locked-image-pixels/commit"]) {
+    expect((await page.request.get(`${base}/${suffix}`, { headers })).status()).toBe(404);
+    expect((await page.request.post(`${base}/${suffix}`, { headers, data: { validation: "pixel-verified-uncommitted", protection: "pixel-exact", executionAuthorized: true, artifactCommitted: true } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+});
+
 test("生产同库产物底座没有HTTP提交/谱系/下载入口，保留真实闸门", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
