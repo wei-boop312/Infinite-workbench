@@ -165,6 +165,19 @@ test("生产核账快照和未结算草稿没有HTTP结算/超额入口，保留
   expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
 });
 
+test("独立生产结算和第二人审批仍无日常HTTP入口，不借草稿或审批标签改预算", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["production-image-billing/settlements", "production-image-billing/decisions", "production-image-billing/settlements/fake"]) {
+    expect((await page.request.get(`${base}/${suffix}`, { headers })).status()).toBe(404);
+    expect((await page.request.post(`${base}/${suffix}`, { headers, data: { status: "settled", actualCostMinor: 0, approved: true, decidedBy: "other", settlementCommitted: true } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+});
+
 test("生产未知估价/纯协议摘要不能代替本地确认或解锁发送", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();

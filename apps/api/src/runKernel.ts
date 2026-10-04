@@ -19,6 +19,7 @@ import {
   type ProductionImageDispatchIntent,
   type ProductionImageAttempt, type ProductionImageResult,
   type ProductionImageArtifact,
+  ProductionImageBillingRecordSchema, type ProductionImageBillingRecord,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -45,6 +46,7 @@ import { assertProductionDispatchIntent } from "./productionImageDispatchIntentI
 import { assertProductionImageAttempt } from "./productionImageResponse";
 import { assertProductionImageResult } from "./productionImageResultIntegrity";
 import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
+import { assertProductionBillingState, productionBillingSummary, productionBillingSnapshot } from "./productionImageBillingIntegrity";
 import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
 export type RunPrincipal = {
@@ -135,6 +137,8 @@ type StoredBatch = {
   productionImageResultFingerprint?: string;
   productionImageArtifact?: ProductionImageArtifact;
   productionImageArtifactFingerprint?: string;
+  productionImageBilling?: ProductionImageBillingRecord[];
+  productionImageBillingFingerprint?: string;
   imageExecution?: ConfirmedImageExecution;
   imageDispatchIntent?: ImageDispatchIntent;
   imageDispatchIntentFingerprint?: string;
@@ -182,6 +186,11 @@ export type RunKernelOptions = {
     usesStateStore(store: unknown): boolean;
     authorizeScope(p: RunPrincipal, project: string): boolean;
     validateCommit(p: RunPrincipal, record: ProductionImageArtifact): boolean;
+  };
+  productionImageBillingPolicy?: {
+    usesStateStore(store: unknown): boolean;
+    authorizeScope(p: RunPrincipal, project: string, approval: boolean): boolean;
+    validateCommit(p: RunPrincipal, record: ProductionImageBillingRecord): boolean;
   };
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
@@ -1462,6 +1471,50 @@ export class InMemoryRunKernel implements RunKernelPort {
     });
   }
 
+  commitProductionImageBilling(p: RunPrincipal, incoming: ProductionImageBillingRecord): RunBatchAggregate {
+    const record = ProductionImageBillingRecordSchema.parse(incoming), s = record.snapshot, stored = this.batches.get(s.batchId), policy = this.options.productionImageBillingPolicy;
+    if (!policy) throw new RunKernelError(503, "production_image_billing_not_configured", "生产核账提交默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(p, s.projectId, !!record.decision));
+    if (!stored || stored.aggregate.batch.tenantId !== p.tenantId || s.tenantId !== p.tenantId || stored.aggregate.batch.projectId !== s.projectId
+      || !stored.productionImageExecution || stored.aggregate.jobs[0].id !== s.jobId) throw new RunKernelError(409, "production_image_billing_task_changed", "核账实际任务不一致");
+    const history = stored.productionImageBilling ?? [], old = history.find(r => r.request.reviewId === record.request.reviewId);
+    const serialized = { ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] };
+    const baseline = history.length ? assertProductionBillingState(serialized) : serialized;
+    if (imageSnapshotFingerprint(productionBillingSnapshot(baseline)) !== record.snapshotFingerprint
+      || imageSnapshotFingerprint(s) !== record.snapshotFingerprint) throw new RunKernelError(409, "production_image_billing_task_changed", "完整原核账期待不一致");
+    if (old) {
+      if (!record.decision || old.status !== "pending" || record.decision.request.expectedRecordFingerprint !== imageSnapshotFingerprint(old)
+        || imageSnapshotFingerprint({ ...record, status: "pending", decision: undefined }) !== imageSnapshotFingerprint(old)) throw new RunKernelError(409, "production_image_billing_conflict", "核账或审批不可覆写");
+    } else if (record.decision || history.length >= 16 || (history.length && history.at(-1)!.status !== "rejected")
+      || stored.aggregate.jobs[0].status !== "billing_unknown") throw new RunKernelError(409, "production_image_billing_conflict", "核账已结算或仍待独立审批");
+    if (p.actorId !== (record.decision?.decidedBy ?? record.reviewedBy)) throw new RunKernelError(403, "production_image_billing_permission_denied", "核账操作者不一致");
+    const amount = record.request.actualCostMinor, job = stored.aggregate.jobs[0], batch = stored.aggregate.batch, at = record.decision?.decidedAt ?? record.reviewedAt;
+    const budget = this.requireBudget(batch.tenantId, batch.projectId);
+    if (record.status === "settled" && amount - s.reservedMinor > budget.limitMinor - budget.reservedMinor - budget.spentMinor)
+      throw new RunKernelError(409, "production_image_billing_budget_exceeded", "项目预算不足，原预留与待审批记录保持");
+    this.productionPolicyTrue(() => policy.validateCommit(p, structuredClone(record)));
+    const records = old ? history.map(r => r === old ? record : r) : [...history, record];
+    stored.productionImageBilling = records; stored.productionImageBillingFingerprint = imageSnapshotFingerprint(records);
+    stored.aggregate.productionBilling = productionBillingSummary(records);
+    const event = (type: RunAuditEvent["eventType"], metadata: Record<string, string>) => ({ ...this.audit(batch, p.actorId, type, metadata), createdAt: at });
+    if (!old) stored.aggregate.audit.push(event("production-billing-reviewed", { jobId: job.id, reviewId: record.request.reviewId, recordFingerprint: imageSnapshotFingerprint(record) }));
+    else stored.aggregate.audit.push(event(record.decision!.request.decision === "approve" ? "production-billing-approved" : "production-billing-rejected",
+      { jobId: job.id, reviewId: record.request.reviewId, decisionId: record.decision!.request.decisionId, recordFingerprint: imageSnapshotFingerprint(record) }));
+    if (record.status === "settled") {
+      const resolutionId = record.decision?.request.decisionId ?? record.request.reviewId;
+      budget.reservedMinor -= s.reservedMinor; budget.spentMinor += amount; stored.reservedMinor = 0; stored.actualMinor = amount; stored.jobReservations.clear();
+      this.replaceJob(stored.aggregate, { ...job, status: stored.productionImageArtifact ? "succeeded" : "failed", actualCostMinor: amount,
+        failureCode: stored.productionImageArtifact ? undefined : "production-billing-settled-no-artifact", billingResolutionId: resolutionId,
+        billingResolvedBy: p.actorId, billingResolvedAt: at, billingEvidenceRef: record.request.evidence.evidenceRef });
+      batch.maxCostMinor = Math.max(s.maxCostMinor, amount); batch.status = stored.productionImageArtifact ? "succeeded" : "failed";
+      stored.aggregate.ledger.push({ id: `ledger-${randomUUID()}`, tenantId: p.tenantId, projectId: batch.projectId, batchId: batch.id, jobId: job.id,
+        imageMode: record.mode, currency: s.currency, estimatedMinor: job.estimatedCostMinor, reservedMinor: 0, actualMinor: amount, settlement: amount ? "settled" : "released", createdAt: at });
+      stored.aggregate.audit.push(event("production-billing-settled", { jobId: job.id, resolutionId, recordFingerprint: imageSnapshotFingerprint(record),
+        actualMinor: String(amount), releasedMinor: String(Math.max(0, s.reservedMinor - amount)), additionalMinor: String(Math.max(0, amount - s.reservedMinor)) }));
+    }
+    this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
+  }
+
   private finalizeBilling(stored: StoredBatch, job: RunJob, principal: RunPrincipal, request: ResolveBillingUnknownRequest): RunBatchAggregate {
     const batch = stored.aggregate.batch;
     const actualCostMinor = request.resolution === "charged" ? request.actualCostMinor : 0;
@@ -1603,6 +1656,7 @@ export class InMemoryRunKernel implements RunKernelPort {
         productionImageAttempt: serialized.productionImageAttempt, productionImageAttemptFingerprint: serialized.productionImageAttemptFingerprint,
         productionImageResult: serialized.productionImageResult, productionImageResultFingerprint: serialized.productionImageResultFingerprint,
         productionImageArtifact: serialized.productionImageArtifact, productionImageArtifactFingerprint: serialized.productionImageArtifactFingerprint,
+        productionImageBilling: serialized.productionImageBilling, productionImageBillingFingerprint: serialized.productionImageBillingFingerprint,
         imageExecution: serialized.imageExecution,
         imageDispatchIntent: serialized.imageDispatchIntent,
         imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
@@ -1694,6 +1748,7 @@ export class InMemoryRunKernel implements RunKernelPort {
         ...(stored.productionImageAttempt ? { productionImageAttempt: stored.productionImageAttempt, productionImageAttemptFingerprint: stored.productionImageAttemptFingerprint } : {}),
         ...(stored.productionImageResult ? { productionImageResult: stored.productionImageResult, productionImageResultFingerprint: stored.productionImageResultFingerprint } : {}),
         ...(stored.productionImageArtifact ? { productionImageArtifact: stored.productionImageArtifact, productionImageArtifactFingerprint: stored.productionImageArtifactFingerprint } : {}),
+        ...(stored.productionImageBilling ? { productionImageBilling: stored.productionImageBilling, productionImageBillingFingerprint: stored.productionImageBillingFingerprint } : {}),
         ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
         ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
         ...(stored.imageFixtureAttempt ? { imageFixtureAttempt: stored.imageFixtureAttempt, imageFixtureAttemptFingerprint: stored.imageFixtureAttemptFingerprint } : {}),
@@ -1723,10 +1778,11 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (batch.tool === "product-retouch") {
         if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
+          || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);
-      } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint) {
+      } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling) {
         throw new Error("生产租约缺少独立生产确认");
       } else {
         if (batch.imageMode) throw new Error("生产任务缺少独立完整确认");
@@ -1832,13 +1888,13 @@ export class InMemoryRunKernel implements RunKernelPort {
           job.billingEvidenceRef,
         ].filter((value) => value !== undefined).length;
         if ((billingResolutionFieldCount !== 0 && billingResolutionFieldCount !== 4)
-          || (billingResolutionFieldCount === 4 && job.status !== "failed" && !(job.status === "succeeded" && stored.imageTaskArtifact))) {
+          || (billingResolutionFieldCount === 4 && job.status !== "failed" && !(job.status === "succeeded" && (stored.imageTaskArtifact || stored.productionImageArtifact)))) {
           throw new Error("任务内核快照中的计费核账状态不完整");
         }
         if (billingResolutionFieldCount === 4) {
           const resolutionEvent = stored.aggregate.audit.find((event) => event.metadata.jobId === job.id
             && event.metadata.resolutionId === job.billingResolutionId
-            && ["billing-resolved-charged", "billing-resolved-not-charged"].includes(event.eventType));
+            && ["billing-resolved-charged", "billing-resolved-not-charged", "production-billing-settled"].includes(event.eventType));
           if (!resolutionEvent) throw new Error("任务内核快照缺少计费核账审计");
         }
       }
@@ -1868,6 +1924,12 @@ export class InMemoryRunKernel implements RunKernelPort {
   }
 
   private assertProductionState(stored: StoredBatch): void {
+    if (stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling) {
+      const serialized = { ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] };
+      const base = assertProductionBillingState(serialized);
+      this.assertProductionState({ ...base, jobReservations: new Map(base.jobReservations), jobScenarios: new Map(base.jobScenarios) });
+      return;
+    }
     const e = assertProductionConfirmation(stored.productionImageExecution), r = e.protocol.request, q = r.quote;
     const { batch: b, jobs, ledger, audit, billingOverages } = stored.aggregate, j = jobs[0];
     const intent = stored.productionImageDispatchIntent, dispatched = b.status === "running" || b.status === "billing_unknown";

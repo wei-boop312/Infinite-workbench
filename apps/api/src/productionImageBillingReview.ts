@@ -12,6 +12,7 @@ import { assertProductionImageArtifact } from "./productionImageArtifactIntegrit
 import { assetMetadataFingerprint } from "./assetMetadata";
 import { validateProductionImageAssetPolicy } from "./imageAssetPolicy";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
+import { productionBillingBaseline, productionBillingSnapshot } from "./productionImageBillingIntegrity";
 
 export type ProductionBillingSourceContext = {
   principal: RunPrincipal; snapshot: ProductionImageBillingSnapshot; snapshotFingerprint: string;
@@ -63,7 +64,8 @@ class ReviewCore {
     const o = this.options!; guard(); const snapshot = o.stateStore.load(); guard();
     if (!snapshot) reject("production_image_billing_review_task_missing");
     o.runKernel.validateProductionBillingSnapshot(snapshot);
-    const stored = snapshot.batches.find(s => s.aggregate.batch.id === batch && s.aggregate.batch.tenantId === p.tenantId && s.aggregate.batch.projectId === project);
+    const actual = snapshot.batches.find(s => s.aggregate.batch.id === batch && s.aggregate.batch.tenantId === p.tenantId && s.aggregate.batch.projectId === project);
+    const stored = actual ? productionBillingBaseline(actual) : undefined;
     const e = stored?.productionImageExecution, j = stored?.aggregate.jobs[0], lease = stored?.productionImageLeases?.at(-1), intent = stored?.productionImageDispatchIntent;
     if (!stored || !e || e.mode !== this.mode || !j || j.id !== job || j.status !== "billing_unknown" || !lease || !intent
       || !j.finishedAt || !j.failureCode) reject("production_image_billing_review_task_not_unknown");
@@ -102,20 +104,10 @@ class ReviewCore {
     guard(); validateProductionImageAssetPolicy(o.stateStore, e.protocol.request, () => { guard(); }); guard();
     const last = stored.productionImageArtifact?.committedAt ?? (stored.productionImageResult?.kind === "returned" ? stored.productionImageResult.receivedAt
       : stored.productionImageResult?.kind === "interrupted" ? stored.productionImageResult.interruptedAt : j.finishedAt);
-    if (guard() < Math.max(Date.parse(last), Date.parse(j.finishedAt))) reject("production_image_billing_review_clock_invalid");
-    const view = ProductionImageBillingSnapshotSchema.parse({ schemaVersion: 1, mode: this.mode, billing: "unknown", settlementAuthorized: false,
-      executionAuthorized: false, realExecutionEnabled: false, tenantId: p.tenantId, projectId: project, batchId: batch, jobId: job,
-      taskEvidenceFingerprint: fp(stored), executionFingerprint: fp(e), preparationFingerprint: e.preparation.snapshotFingerprint,
-      requestFingerprint: e.protocol.requestFingerprint, payloadChecksumSha256: e.protocol.payloadChecksumSha256,
-      transformedInputsFingerprint: fp(e.protocol.transformedInputs), constraintChecksumSha256: e.protocol.request.constraintChecksumSha256,
-      leaseFingerprint: fp(lease), leaseId: lease.leaseId, workerId: lease.workerId, originalActorId: lease.actorId,
-      intentFingerprint: fp(intent), attemptFingerprint: stored.productionImageAttemptFingerprint ?? null,
-      resultFingerprint: stored.productionImageResultFingerprint ?? null, artifactFingerprint: stored.productionImageArtifactFingerprint ?? null,
-      outputAssetIds: j.outputAssetIds, unknownAt: j.finishedAt, unknownReason: j.failureCode,
-      currency: j.imageMode ? stored.aggregate.batch.currency : "", reservedMinor: stored.reservedMinor, maxCostMinor: e.protocol.request.quote.maxCostMinor,
-      estimate: j.estimatedCostMinor === null ? { state: "unknown" } : { state: "known", estimatedCostMinor: j.estimatedCostMinor } });
+    if (guard() < Math.max(Date.parse(last), Date.parse(j.finishedAt), ...(actual?.productionImageBilling ?? []).map(r => Date.parse(r.decision?.decidedAt ?? r.reviewedAt)))) reject("production_image_billing_review_clock_invalid");
+    const view = ProductionImageBillingSnapshotSchema.parse(productionBillingSnapshot(stored));
     if (Buffer.byteLength(JSON.stringify(view)) > 512 * 1024) reject("production_image_billing_review_metadata_full", 413);
-    guard(); if (fp(o.stateStore.load()?.batches.find(s => s.aggregate.batch.id === batch)) !== fp(stored)) reject("production_image_billing_review_task_changed"); guard();
+    guard(); if (fp(o.stateStore.load()?.batches.find(s => s.aggregate.batch.id === batch)) !== fp(actual)) reject("production_image_billing_review_task_changed"); guard();
     return view;
   }
   verify(p: RunPrincipal, project: string, batch: string, job: string, incoming: ReviewProductionImageBilling): ProductionImageBillingReview {

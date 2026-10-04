@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
 import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
+import { ProductionImageBillingRecordSchema, ProductionImageBillingSummarySchema } from "./productionImageBilling.ts";
 
 export * from "./imageProviders.ts";
 export * from "./productionImagePricing.ts";
@@ -428,7 +429,7 @@ export const RunBatchSchema = z.object({
   confirmedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
 }).strict().superRefine((batch, context) => {
-  if ((batch.imageMode && (batch.tool === "product-retouch" || !["queued", "cancelled", "running", "billing_unknown"].includes(batch.status)))
+  if ((batch.imageMode && (batch.tool === "product-retouch" || !["queued", "cancelled", "running", "billing_unknown", "succeeded", "failed"].includes(batch.status)))
     || (!batch.imageMode && batch.estimatedCostMinor === null)) context.addIssue({ code: "custom", message: "旧任务不能使用生产命名空间/未知估价，生产执行尚未启用" });
   if (batch.tool === "product-retouch" ? (!batch.mockScenario || !batch.inputAssetIds.length || batch.inputAssetIds.length > 20)
     : (batch.mockScenario !== undefined || batch.expectedOutputs !== 1 || (batch.tool === "image-generate" ? batch.inputAssetIds.length !== 0 : batch.inputAssetIds.length === 0))) {
@@ -464,7 +465,7 @@ export const RunJobSchema = z.object({
   startedAt: IsoDateSchema.optional(),
   finishedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
-}).strict().refine((job) => job.imageMode ? job.executorKind === "provider" && ["queued", "leased", "cancelled", "running", "billing_unknown"].includes(job.status) : job.estimatedCostMinor !== null,
+}).strict().refine((job) => job.imageMode ? job.executorKind === "provider" && ["queued", "leased", "cancelled", "running", "billing_unknown", "succeeded", "failed"].includes(job.status) : job.estimatedCostMinor !== null,
   { message: "生产任务命名空间/未知估价或关闭闸门不一致" });
 
 export const ProviderConnectionSchema = z.object({
@@ -500,7 +501,7 @@ export const CostLedgerSchema = z.object({
   actualMinor: z.number().int().nonnegative().optional(),
   settlement: z.enum(["estimated", "reserved", "settled", "released", "unknown"]),
   createdAt: IsoDateSchema,
-}).strict().refine((entry) => entry.imageMode ? ["reserved", "released", "unknown"].includes(entry.settlement) : entry.estimatedMinor !== null,
+}).strict().refine((entry) => entry.imageMode ? ["reserved", "released", "unknown", "settled"].includes(entry.settlement) : entry.estimatedMinor !== null,
   { message: "旧账本不能使用未知估价，生产计费未启用" });
 
 export const CreateRunBatchRequestSchema = z.object({
@@ -629,6 +630,10 @@ export const RunAuditEventSchema = z.object({
     "production-image-returned",
     "production-image-interrupted",
     "production-image-artifact-verified",
+    "production-billing-reviewed",
+    "production-billing-approved",
+    "production-billing-rejected",
+    "production-billing-settled",
     "image-artifact-verified",
     "image-artifact-rejected",
     "job-succeeded",
@@ -667,6 +672,7 @@ export const RunBatchAggregateSchema = z.object({
   ledger: z.array(CostLedgerSchema),
   audit: z.array(RunAuditEventSchema),
   billingOverages: z.array(BillingOverageSchema).default([]),
+  productionBilling: z.array(ProductionImageBillingSummarySchema).max(16).optional(),
 }).strict().refine((a) => a.jobs.every((j) => j.imageMode === a.batch.imageMode) && a.ledger.every((l) => l.imageMode === a.batch.imageMode),
   { message: "聚合的生产命名空间不一致" });
 
@@ -898,6 +904,8 @@ export const RunKernelStoredBatchSchema = z.object({
   productionImageResultFingerprint: ProductionEvidenceHash.optional(),
   productionImageArtifact: ProductionImageArtifactSchema.optional(),
   productionImageArtifactFingerprint: ProductionEvidenceHash.optional(),
+  productionImageBilling: z.array(ProductionImageBillingRecordSchema).min(1).max(16).optional(),
+  productionImageBillingFingerprint: ProductionEvidenceHash.optional(),
   imageExecution: ConfirmedImageExecutionSchema.optional(),
   imageDispatchIntent: ImageDispatchIntentSchema.optional(),
   imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),

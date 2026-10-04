@@ -5,7 +5,7 @@ import { assetMetadataFingerprint } from "./verifiedAssets";
 import { assertImageArtifactRecord } from "./imageArtifactIntegrity";
 import { assertProductionImageRawResponse } from "./productionImageResponse";
 import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
-import { type ProductionImageArtifact } from "@canvas/contracts";
+import { type ProductionImageArtifact, type ProductionImageBillingRecord } from "@canvas/contracts";
 import { InMemoryRunKernel, RunKernelError, type ProjectBudgetConfig, type RunKernelOptions, type RunKernelPort, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
@@ -15,6 +15,21 @@ type Options = Omit<RunKernelOptions, "stateStore" | "recoverRunningJobsOnRestor
 export class SqliteRunKernel implements RunKernelPort {
   constructor(private readonly options: Options) { this.run(() => undefined); }
   usesStateStore(store: SqliteRunKernelStateStore): boolean { return this.options.stateStore === store; }
+
+  commitProductionImageBilling(p: RunPrincipal, record: ProductionImageBillingRecord) {
+    const policy = this.options.productionImageBillingPolicy;
+    if (!policy) throw new RunKernelError(503, "production_image_billing_not_configured", "生产核账默认关闭");
+    const check = () => {
+      this.strictArtifactPolicy(() => policy.usesStateStore(this.options.stateStore));
+      this.strictArtifactPolicy(() => policy.authorizeScope(p, record.snapshot.projectId, !!record.decision));
+      this.strictArtifactPolicy(() => policy.validateCommit(p, structuredClone(record)));
+    };
+    check();
+    return this.options.stateStore.transaction(() => {
+      const result = this.run(k => k.commitProductionImageBilling(p, record));
+      this.run(() => undefined); check(); return result;
+    });
+  }
 
   // Pure validation of a snapshot already loaded by an independently scoped
   // internal service. No SQL reads, writes, lease recovery or task permission.

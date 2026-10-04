@@ -61,3 +61,41 @@ export const ProductionImageBillingReviewSchema = z.object({
     ctx.addIssue({ code: "custom", message: "生产费用核验草稿与原人工期待不一致" });
 });
 export type ProductionImageBillingReview = z.infer<typeof ProductionImageBillingReviewSchema>;
+
+export const DecideProductionImageBillingSchema = z.object({
+  decisionId: Reference, expectedRecordFingerprint: Hash, expectedSnapshotFingerprint: Hash,
+  expectedCurrency: z.string().regex(/^[A-Z]{3}$/), expectedReservedMinor: Money, expectedActualCostMinor: Money,
+  decision: z.enum(["approve", "reject"]), evidenceRef: Reference, note: z.string().min(1).max(240),
+}).strict();
+export type DecideProductionImageBilling = z.infer<typeof DecideProductionImageBillingSchema>;
+
+// Persisted human conclusion, separate from the uncommitted A review and from
+// the provider response/price. Only a current actual task transaction commits it.
+export const ProductionImageBillingRecordSchema = z.object({
+  schemaVersion: z.literal(1), mode: Mode, snapshot: ProductionImageBillingSnapshotSchema, snapshotFingerprint: Hash,
+  request: ReviewProductionImageBillingSchema, reviewedBy: Id, reviewedAt: DateTime,
+  sourceKind: z.enum(["server-billing", "contract-fixture"]),
+  status: z.enum(["pending", "rejected", "settled"]),
+  decision: z.object({ request: DecideProductionImageBillingSchema, decidedBy: Id, decidedAt: DateTime }).strict().optional(),
+  executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),
+}).strict().superRefine((v, ctx) => {
+  const over = v.request.actualCostMinor > v.snapshot.reservedMinor;
+  if (v.mode !== v.snapshot.mode || (v.mode === "production" ? v.sourceKind !== "server-billing" : v.sourceKind !== "contract-fixture")
+    || v.request.expectedSnapshotFingerprint !== v.snapshotFingerprint || v.request.expectedCurrency !== v.snapshot.currency
+    || v.request.expectedReservedMinor !== v.snapshot.reservedMinor || v.request.expectedMaxCostMinor !== v.snapshot.maxCostMinor
+    || Date.parse(v.reviewedAt) < Math.max(Date.parse(v.snapshot.unknownAt), Date.parse(v.request.evidence.observedAt))
+    || Date.parse(v.request.evidence.observedAt) < Date.parse(v.snapshot.unknownAt)
+    || (!over && (v.status !== "settled" || v.decision)) || (over && (v.status === "pending" ? !!v.decision : !v.decision))
+    || (v.decision && (v.decision.decidedBy === v.reviewedBy || Date.parse(v.decision.decidedAt) < Date.parse(v.reviewedAt)
+      || v.decision.request.expectedSnapshotFingerprint !== v.snapshotFingerprint || v.decision.request.expectedCurrency !== v.snapshot.currency
+      || v.decision.request.expectedReservedMinor !== v.snapshot.reservedMinor || v.decision.request.expectedActualCostMinor !== v.request.actualCostMinor
+      || v.status !== (v.decision.request.decision === "approve" ? "settled" : "rejected"))))
+    ctx.addIssue({ code: "custom", message: "生产核账结论、原期待或独立审批关系不一致" });
+});
+export type ProductionImageBillingRecord = z.infer<typeof ProductionImageBillingRecordSchema>;
+
+export const ProductionImageBillingSummarySchema = z.object({
+  reviewId: Reference, status: z.enum(["pending", "rejected", "settled"]), currency: z.string().regex(/^[A-Z]{3}$/),
+  originalMaxCostMinor: Money, actualCostMinor: Money, reviewedBy: Id, reviewedAt: DateTime,
+  decisionId: Reference.optional(), decidedBy: Id.optional(), decidedAt: DateTime.optional(),
+}).strict();
