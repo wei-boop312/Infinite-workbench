@@ -4,7 +4,7 @@
 
 接入顺序遵循冻结路线图：一个官方图片 API → 一个 OpenAI 兼容中转协议 → 一个非 OpenAI 协议。画布不直接访问这些服务，全部由统一任务、预算、权限与资产层承接。
 
-最新交接：**5B5A 实际绑定任务只读谱系及 5B5B 缓存原图受控回画布已本地验收，里程碑 5 的本地假响应闭环完成**，见 `generated-asset-lineage.md`、`generated-result-canvas.md`；最新 487 项单元/集成（37 文件）、90 项 Chrome、6 个工作区构建通过。下文保留此前边界与实施入口作为历史。历史上周剩余到 50% 时暂停；用户于 2026-10-04 重新授权，当前停止线为周剩余不高于 20%，原自动续做 ACTIVE。当前周剩余 46%，下一步为**里程碑 6 专项验收与真实执行前安全准备**；真实供应商及阶段 4 整体仍未完成。
+最新交接：**里程碑 5 本地假响应闭环和 6A 凭证/出站安全合同已本地验收**，见 `generated-result-canvas.md`、`image-egress-contract.md`；最新完整 561 项单元/集成（38 文件）、91 项 Chrome、6 个工作区构建通过。下文保留此前边界与实施入口作为历史。历史上周剩余到 50% 时暂停；用户于 2026-10-04 重新授权，当前停止线为周剩余不高于 20%，原自动续做 ACTIVE，08:55周剩余43%。下一步为**6B 默认关闭的原生 DNS/固定地址 HTTPS 客户端及本地验收**；6A 无实际 DNS/HTTPS/凭证读取，不等于生产网络/SSRF、真实供应商或阶段 4 整体通过。
 
 ## 官方资料核对带来的设计边界
 
@@ -38,7 +38,7 @@ OpenAI 的 Image API 提供生成和编辑端点；Responses 还可以通过图�
 
 ## 下一次实施入口
 
-当前入口（覆盖下方历史入口）：先查 `generated-result-canvas.md` 和 outputs 最新验收，再进行既定里程碑 6：核对本地完整链路及尚缺的生产网络/凭证边界，建立默认关闭的受控凭证端口、URL/DNS/重定向及有界传输合同和本地假响应回归；不把纯规则/假 DNS 或 HTTP 夹具冒充生产网络/SSRF验收。仍不读取私人密钥、启用付费或开放日常生成。随后安全生产发送与可信报价/费用整合按原计划分步验收，真实最低成本请求须另获用户明确供应商/模型/金额及凭证配置授权。MCP/视频仍在阶段 6/7，不扩大冻结目标。
+当前入口（覆盖下方历史入口）：先读 `image-egress-contract.md`、`generated-result-canvas.md` 和 outputs 最新验收，6A 端口/规则和本地假 DNS/传输已完成，不重复实现。继续 6B：按 Node 当前官方文档核对原生 DNS/固定地址 HTTPS 行为，从 6A 提取共用纯 URL/IP 政策，保持默认关闭并独立实现实际 lookup/SNI/证书、代理/连接池、重定向/无自动重试、容量/取消/流关闭。只用自有本地驱动/HTTP/TLS 夹具，不为测试放松公网目标政策，不探测供应商或读私人密钥；纯规则/假驱动不是生产网络/SSRF全部验收。contract-fixture 不能改名冒充真实发送，也不能复用旧 local-fixture 确认/任务证据或已知费用自动结算。后续加密凭证底座、生产任务证据和可信报价/费用仍按冻结计划分步验收，真实最低成本请求须另获用户明确供应商/模型/金额及凭证配置授权；日常真实生成继续关闭。MCP/视频仍在阶段 6/7，不扩大冻结目标。
 
 先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，继续**5B5 实际任务结果谱系与已缓存资产回画布**。5B4B 见 `docs/image-confirmation-ui.md`，5B4A 见 `docs/image-preparation-ui.md`；5A 至 5B3B 分别见 `generated-image-ingestion.md`、`image-provider-preparations.md`、`image-task-confirmations.md`、`image-task-leases.md`、`image-fixture-execution.md`、`image-task-artifacts.md`、`generated-asset-readback.md`、`generated-asset-cache.md`，不重复实现。必填 authorizeCommit 已根据实际服务端证据实现本地授权，资产/任务已同库原子绑定；不是生产执行授权。
 

@@ -30,6 +30,22 @@ test("图片供应商处于目录/准备阶段，真实执行闸门在浏览器�
   expect(external).toEqual([]);
 });
 
+test("凭证与出站合同没有浏览器HTTP入口，探测不改变预算或启用真实执行", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const checks = await page.evaluate(async ({ projectId }) => {
+    const headers = { "x-canvas-local": "1" }, root = "/studio-api/v1", base = `${root}/projects/${encodeURIComponent(projectId)}`;
+    const before = await (await fetch(`${base}/budget`, { headers })).json(), statuses: number[] = [];
+    for (const path of [`${base}/image-egress`, `${base}/credentials`, `${root}/image-egress/send`]) {
+      for (const method of ["GET", "POST"]) statuses.push((await fetch(path, { method, headers, redirect: "error", cache: "no-store" })).status);
+    }
+    return { before, after: await (await fetch(`${base}/budget`, { headers })).json(), statuses, health: await (await fetch("/studio-api/health", { headers })).json() };
+  }, { projectId: batch.batch.projectId });
+  expect(checks.statuses).toEqual([404, 404, 404, 404, 404, 404]); expect(checks.after).toEqual(checks.before);
+  expect(checks.health).toMatchObject({ realExecutorsEnabled: false });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
+});
+
 test("浏览器目录不自动添加模型，准备入口拒绝伪报价且不启动任务", async ({ page }) => {
   const external: string[] = [];
   page.on("request", (request) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(request.url())) external.push(request.url()); });
