@@ -25,6 +25,17 @@ export class SqliteRunKernel implements RunKernelPort {
     (kernel) => kernel.inspectProductionImageLease(p, project, batch, job, input), (_result, kernel) => { kernel.inspectProductionImageLease(p, project, batch, job, input); });
   reconcileProductionImageBatch: InMemoryRunKernel["reconcileProductionImageBatch"] = (p, project, batch) => this.productionLeaseCommand(p, project, batch, "reconcile",
     (kernel) => kernel.reconcileProductionImageBatch(p, project, batch));
+  inspectProductionImageStart: InMemoryRunKernel["inspectProductionImageStart"] = (p, project, batch, job, input) => {
+    this.productionStartScope(p, project);
+    return this.productionLeaseCommand(p, project, batch, "history", (kernel) => kernel.inspectProductionImageStart(p, project, batch, job, input),
+      (_result, kernel) => { kernel.inspectProductionImageStart(p, project, batch, job, input); });
+  };
+  startProductionImageJob: InMemoryRunKernel["startProductionImageJob"] = (p, project, batch, job, input, intent) => {
+    this.productionStartScope(p, project);
+    return this.productionLeaseCommand(p, project, batch, "history", (kernel) => kernel.startProductionImageJob(p, project, batch, job, input, intent),
+      (result, kernel) => { if (result.started) kernel.assertProductionImageStartCommit(p, project, batch, job, input);
+        else kernel.inspectProductionImageStart(p, project, batch, job, input); });
+  };
   claimImageBatch: InMemoryRunKernel["claimImageBatch"] = (...args) => this.run((kernel) => kernel.claimImageBatch(...args));
   startImageJob: InMemoryRunKernel["startImageJob"] = (...args) => this.run((kernel) => kernel.startImageJob(...args));
   inspectImageLease: InMemoryRunKernel["inspectImageLease"] = (...args) => this.run((kernel) => kernel.inspectImageLease(...args));
@@ -76,7 +87,18 @@ export class SqliteRunKernel implements RunKernelPort {
   cancelBatch: RunKernelPort["cancelBatch"] = (...args) => this.run((kernel) => kernel.cancelBatch(...args));
   getBudget: RunKernelPort["getBudget"] = (...args) => this.run((kernel) => kernel.getBudget(...args));
 
-  private productionLeaseCommand<T>(p: RunPrincipal, project: string, batch: string, purpose: "claim" | "inspect" | "reconcile",
+  private productionStartScope(p: RunPrincipal, project: string): void {
+    const policy = this.options.productionImageStartPolicy;
+    if (!policy) throw new RunKernelError(503, "production_image_start_not_configured", "生产启动政策默认关闭");
+    for (const check of [() => policy.usesStateStore(this.options.stateStore), () => policy.authorizeScope(p, project)]) {
+      let value: unknown;
+      try { value = check(); } catch (error) { if (error instanceof RunKernelError) throw error; throw new RunKernelError(503, "production_image_start_unavailable", "生产启动政策不可用"); }
+      if (value && (typeof value === "object" || typeof value === "function") && "then" in value) void Promise.resolve(value).catch(() => undefined);
+      if (value !== true) throw new RunKernelError(503, "production_image_start_not_configured", "生产启动须配置同库同步政策");
+    }
+  }
+
+  private productionLeaseCommand<T>(p: RunPrincipal, project: string, batch: string, purpose: "claim" | "inspect" | "reconcile" | "history",
     action: (kernel: InMemoryRunKernel) => T, after?: (result: T, kernel: InMemoryRunKernel) => void): T {
     const policy = this.options.productionImageLeasePolicy;
     if (!policy) throw new RunKernelError(503, "production_image_lease_not_configured", "生产租约须显式配置同一事务存储");

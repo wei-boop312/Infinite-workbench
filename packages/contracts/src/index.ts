@@ -427,7 +427,7 @@ export const RunBatchSchema = z.object({
   confirmedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
 }).strict().superRefine((batch, context) => {
-  if ((batch.imageMode && (batch.tool === "product-retouch" || !["queued", "cancelled"].includes(batch.status)))
+  if ((batch.imageMode && (batch.tool === "product-retouch" || !["queued", "cancelled", "running", "billing_unknown"].includes(batch.status)))
     || (!batch.imageMode && batch.estimatedCostMinor === null)) context.addIssue({ code: "custom", message: "旧任务不能使用生产命名空间/未知估价，生产执行尚未启用" });
   if (batch.tool === "product-retouch" ? (!batch.mockScenario || !batch.inputAssetIds.length || batch.inputAssetIds.length > 20)
     : (batch.mockScenario !== undefined || batch.expectedOutputs !== 1 || (batch.tool === "image-generate" ? batch.inputAssetIds.length !== 0 : batch.inputAssetIds.length === 0))) {
@@ -463,7 +463,7 @@ export const RunJobSchema = z.object({
   startedAt: IsoDateSchema.optional(),
   finishedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
-}).strict().refine((job) => job.imageMode ? job.executorKind === "provider" && ["queued", "leased", "cancelled"].includes(job.status) : job.estimatedCostMinor !== null,
+}).strict().refine((job) => job.imageMode ? job.executorKind === "provider" && ["queued", "leased", "cancelled", "running", "billing_unknown"].includes(job.status) : job.estimatedCostMinor !== null,
   { message: "生产任务命名空间/未知估价或关闭闸门不一致" });
 
 export const ProviderConnectionSchema = z.object({
@@ -499,7 +499,7 @@ export const CostLedgerSchema = z.object({
   actualMinor: z.number().int().nonnegative().optional(),
   settlement: z.enum(["estimated", "reserved", "settled", "released", "unknown"]),
   createdAt: IsoDateSchema,
-}).strict().refine((entry) => entry.imageMode ? ["reserved", "released"].includes(entry.settlement) : entry.estimatedMinor !== null,
+}).strict().refine((entry) => entry.imageMode ? ["reserved", "released", "unknown"].includes(entry.settlement) : entry.estimatedMinor !== null,
   { message: "旧账本不能使用未知估价，生产计费未启用" });
 
 export const CreateRunBatchRequestSchema = z.object({
@@ -803,6 +803,8 @@ export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
+  productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),
+  productionImageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   imageExecution: ConfirmedImageExecutionSchema.optional(),
   imageDispatchIntent: ImageDispatchIntentSchema.optional(),
   imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),

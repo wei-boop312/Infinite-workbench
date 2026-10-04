@@ -36,7 +36,11 @@ async function fixture(page: Page, protocol: ImageProviderConnection["protocol"]
   const server = createApiServer(); // Replaced once the browser's actual project is registered.
   let actualServer = server, origin = "";
   cleanups.push(async () => {
-    release?.(); if (actualServer.listening) await new Promise<void>(resolve => actualServer.close(() => resolve())); store.close();
+    mode = "good"; holdLineage = false; release?.();
+    // Drain the page's pending route.fetch budget/history calls BEFORE closing
+    // their owned HTTP server. Do not silence connection failures with a catch.
+    await page.unrouteAll({ behavior: "wait" });
+    if (actualServer.listening) await new Promise<void>(resolve => actualServer.close(() => resolve())); store.close();
     const target = resolve(directory); if (!target.startsWith(resolve(tmpdir()) + "\\canvas-confirmation-browser-")) throw new Error("unsafe test cleanup");
     rmSync(target, { recursive: true, force: true });
   });

@@ -358,7 +358,8 @@ export default function RunPanel(props: Props) {
             setMessage("生成图片原文件已缓存到项目资产库；未重新生成或改变费用，可从任务结果的独立入口核验回画布。");
           }, false)}>缓存输出 {job.outputIndex + 1} 原图</button>}
           {batch.batch.tool === "product-retouch" && ["failed", "timed_out"].includes(job.status) && <button disabled={busy || batch.batch.status === "billing_unknown"} onClick={() => openDecision("retry", job)}>人工重试输出 {job.outputIndex + 1}</button>}
-          {job.status === "billing_unknown" && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")
+          {job.status === "billing_unknown" && batch.batch.imageMode && <small>生产费用整合尚未开放，未知预留保持冻结；不发送、不自动重试或结算。</small>}
+          {job.status === "billing_unknown" && !batch.batch.imageMode && (batch.billingOverages.some((item) => item.jobId === job.id && item.status === "pending")
             ? <small>超额申请待审批，原预留保持冻结。</small>
             : <button disabled={busy} onClick={() => openDecision("billing", job)}>核对输出 {job.outputIndex + 1} 计费</button>)}
         </article>)}</div>

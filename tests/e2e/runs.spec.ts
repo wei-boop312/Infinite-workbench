@@ -196,7 +196,7 @@ test("图片排队任务合同夹具显示实际预留上限，不暴露旧模�
   await expect(current.getByRole("button", { name: "取消批次" })).toBeEnabled();
 });
 
-for (const jobStatus of ["queued", "leased"] as const) test(`生产任务${jobStatus}合同夹具明确显示估价未知，不把上限当估价或开放旧执行`, async ({ page }) => {
+for (const jobStatus of ["queued", "leased", "running", "billing_unknown"] as const) test(`生产任务${jobStatus}合同夹具明确显示估价未知，不把上限当估价或开放旧执行`, async ({ page }) => {
   // Public view fixture only; actual confirmations/budgets use independent SQLite tests.
   const external: string[] = [];
   page.on("request", (r) => { if (!/^(https?:\/\/(127\.0\.0\.1|localhost)(:|\/)|blob:|data:)/.test(r.url())) external.push(r.url()); });
@@ -206,20 +206,29 @@ for (const jobStatus of ["queued", "leased"] as const) test(`生产任务${jobSt
     const at = "2026-10-04T00:00:00.000Z", mode = "production-contract-fixture";
     const fixture = { batch: { id: "production-image-ui-fixture", tenantId: "local-studio", projectId, imageMode: mode,
       constraintSnapshotId: "image-fixture-constraint", tool: "image-generate", adapterId: "image-fixture-adapter", inputAssetIds: [],
-      idempotencyKey: "production-ui-confirm", status: "queued", expectedOutputs: 1, estimatedCostMinor: null, maxCostMinor: 40,
+      idempotencyKey: "production-ui-confirm", status: ["running", "billing_unknown"].includes(jobStatus) ? jobStatus : "queued", expectedOutputs: 1, estimatedCostMinor: null, maxCostMinor: 40,
       currency: "CNY", confirmedBy: "local-designer", confirmedAt: at, createdAt: at }, jobs: [{ id: "production-ui-job",
       batchId: "production-image-ui-fixture", imageMode: mode, outputIndex: 0, attempt: 1, executorKind: "provider", adapterId: "image-fixture-adapter",
       idempotencyKey: "production-ui-job-key", status: jobStatus, inputAssetIds: [], outputAssetIds: [], estimatedCostMinor: null, createdAt: at,
-      ...(jobStatus === "leased" ? { leaseId: "owned-ui-lease", leaseOwnerId: "owned-ui-worker", leasedAt: at, leaseExpiresAt: "2026-10-04T00:00:30.000Z" } : {}) }],
+      ...(jobStatus !== "queued" ? { leaseId: "owned-ui-lease", leaseOwnerId: "owned-ui-worker", leasedAt: at, leaseExpiresAt: "2026-10-04T00:00:30.000Z" } : {}),
+      ...(["running", "billing_unknown"].includes(jobStatus) ? { startedAt: at } : {}),
+      ...(jobStatus === "billing_unknown" ? { finishedAt: "2026-10-04T00:00:30.000Z", failureCode: "production-lease-expired-after-intent" } : {}) }],
       ledger: [{ id: "production-ui-ledger", tenantId: "local-studio", projectId, batchId: "production-image-ui-fixture", jobId: "production-ui-job",
-        imageMode: mode, currency: "CNY", estimatedMinor: null, reservedMinor: 40, settlement: "reserved", createdAt: at }], audit: [], billingOverages: [] };
+        imageMode: mode, currency: "CNY", estimatedMinor: null, reservedMinor: 40, settlement: "reserved", createdAt: at },
+        ...(jobStatus === "billing_unknown" ? [{ id: "production-ui-unknown", tenantId: "local-studio", projectId, batchId: "production-image-ui-fixture", jobId: "production-ui-job",
+          imageMode: mode, currency: "CNY", estimatedMinor: null, reservedMinor: 40, settlement: "unknown", createdAt: "2026-10-04T00:00:30.000Z" }] : [])], audit: [], billingOverages: [] };
     await route.fulfill({ response, json: [fixture, ...existing] });
   });
   const panel = await prepare(page), current = panel.getByRole("region", { name: "当前批次" });
   await expect(current).toContainText("估价未知"); await expect(current).toContainText("生产图片任务已确认；真实执行尚未开放");
   await expect(current.getByLabel("输出 1 任务")).toContainText("预留 ¥0.40");
-  await expect(current.getByLabel("输出 1 任务")).toContainText(jobStatus === "leased" ? "已领取" : "排队中");
+  await expect(current.getByLabel("输出 1 任务")).toContainText({ queued: "排队中", leased: "已领取", running: "执行中", billing_unknown: "计费待核对" }[jobStatus]);
   for (const name of ["执行排队任务", "确认模拟成本并排队", "人工重试", "结果回到画布", "缓存原图"]) await expect(current.getByRole("button", { name, exact: true })).toHaveCount(0);
+  if (["running", "billing_unknown"].includes(jobStatus)) await expect(current.getByRole("button", { name: "取消批次", exact: true })).toHaveCount(0);
+  if (jobStatus === "billing_unknown") {
+    await expect(current.getByRole("button", { name: "核对输出 1 计费", exact: true })).toHaveCount(0);
+    await expect(current).toContainText("生产费用整合尚未开放，未知预留保持冻结");
+  }
   expect(external).toEqual([]);
   const health = await page.request.get("/studio-api/health", { headers: { "x-canvas-local": "1" } });
   expect(await health.json()).toMatchObject({ realExecutorsEnabled: false });

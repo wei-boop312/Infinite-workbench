@@ -9,7 +9,7 @@ import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 import { RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
 import type { SqliteRunKernelStateStore } from "./sqliteRunKernelStore";
 
-export type ProductionImageLeasePurpose = "claim" | "inspect" | "reconcile";
+export type ProductionImageLeasePurpose = "claim" | "inspect" | "start" | "history" | "reconcile";
 export interface ProductionImageLeasePolicy {
   usesStateStore(store: SqliteRunKernelStateStore): boolean;
   authorizeScope(principal: RunPrincipal, projectId: string): boolean;
@@ -45,15 +45,16 @@ function create(mode: ConfirmedProductionImageExecution["mode"], options?: Base 
         scope(p, incoming.preparation.projectId);
         return o.stateStore.transaction(() => {
           const e = assertProductionConfirmation(incoming), record = e.preparation, request = e.protocol.request;
+          const historic = purpose === "reconcile" || purpose === "history";
           if (e.mode !== mode || request.tenantId !== p.tenantId) reject("production_image_lease_mode_mismatch");
           const readGuard = () => {
             scope(p, request.projectId);
             const now = o.clock?.() ?? Date.now();
             if (!Number.isSafeInteger(now) || now < Date.parse(e.confirmedAt)) reject("production_image_lease_clock_invalid");
-            if (purpose !== "reconcile" && now >= Date.parse(request.quote.expiresAt)) reject("production_image_lease_price_expired");
-            if (purpose === "inspect") {
+            if (!historic && now >= Date.parse(request.quote.expiresAt)) reject("production_image_lease_price_expired");
+            if (purpose === "inspect" || purpose === "start") {
               const actual = o.stateStore.load()?.batches.find((b) => b.aggregate.batch.id === e.batchId), job = actual?.aggregate.jobs[0], lease = actual?.productionImageLeases?.at(-1);
-              if (!actual || actual.requestFingerprint !== imageSnapshotFingerprint(e) || !job || job.id !== request.jobId || job.status !== "leased"
+              if (!actual || actual.requestFingerprint !== imageSnapshotFingerprint(e) || !job || job.id !== request.jobId || !(purpose === "start" ? ["leased", "running"].includes(job.status) : job.status === "leased")
                 || !lease || lease.actorId !== p.actorId || lease.jobId !== job.id || lease.leaseId !== job.leaseId || lease.workerId !== job.leaseOwnerId
                 || lease.leasedAt !== job.leasedAt || lease.expiresAt !== job.leaseExpiresAt || now < Date.parse(lease.leasedAt) || now >= Date.parse(lease.expiresAt)) reject("production_image_lease_expired");
             }
@@ -64,7 +65,7 @@ function create(mode: ConfirmedProductionImageExecution["mode"], options?: Base 
             if (!saved || imageSnapshotFingerprint(saved) !== imageSnapshotFingerprint(record)) reject("production_image_lease_preparation_changed");
             const now = o.clock?.() ?? Date.now();
             if (!Number.isSafeInteger(now) || now < Date.parse(e.confirmedAt)) reject("production_image_lease_clock_invalid");
-            if (purpose !== "reconcile") {
+            if (!historic) {
               const current = o.stateStore.loadImageProviderHistory(p.tenantId, request.projectId).filter((v) => v.connection.id === request.connectionId).at(-1)?.connection;
               if (!current || imageSnapshotFingerprint(current) !== imageSnapshotFingerprint(record.connection)) reject("production_image_lease_connection_changed");
               validateProductionImageProviderRequest(current, request, new Date(now).toISOString());
@@ -84,7 +85,7 @@ function create(mode: ConfirmedProductionImageExecution["mode"], options?: Base 
             validateProductionImageAssetPolicy(o.stateStore, request, readGuard);
           };
           check();
-          if (purpose !== "reconcile") {
+          if (!historic) {
             // The original price scope keeps the original creator, not the worker.
             const context: ImagePriceContext = { scope: record.pricing.scope, connection: record.connection, selection: record.selection,
               requestDraft: record.requestDraft, constraint: record.constraint, requestedAt: record.createdAt,

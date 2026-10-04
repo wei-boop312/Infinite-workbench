@@ -11,6 +11,7 @@ import { ImageProductionReconstructionHarness, ProductionImageTaskReconstruction
 import * as productionProtocol from "../apps/api/src/productionImageProtocol";
 import { validateProductionImageAssetPolicy } from "../apps/api/src/imageAssetPolicy";
 import { assertProductionDispatchIntent } from "../apps/api/src/productionImageDispatchIntentIntegrity";
+import { imageTaskMetadataBytes } from "../apps/api/src/imageTaskMetadata";
 import { RunKernelError } from "../apps/api/src/runKernel";
 import { at, connection, principal, setupImageTask } from "./helpers/image-task-fixture";
 
@@ -19,14 +20,17 @@ afterEach(() => { vi.restoreAllMocks(); for (const f of owned.splice(0).reverse(
 const other = { ...principal, actorId: "other" }, worker = { workerId: "owned-worker", maxJobs: 2 };
 function fixture(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; cap?: number; policy?: boolean;
   editEncoding?: "json-images" | "multipart-image-array" | "multipart-image-single";
-  quota?: number; kernel?: Partial<RunKernelOptions> } = {}) {
-  let allowed: unknown = true, service: ImageProductionPreparationHarness, policy: ProductionImageLeasePolicy;
+  quota?: number; start?: boolean; kernel?: Partial<RunKernelOptions> } = {}) {
+  let allowed: unknown = true, service: ImageProductionPreparationHarness, policy: ProductionImageLeasePolicy, reconstruction: ImageProductionReconstructionHarness;
   const denied = new Set<string>();
   const authorizer = { authenticate: () => principal, allows: (p: typeof principal, project: string, permission: string) =>
     p.tenantId === principal.tenantId && ["writer", "other"].includes(p.actorId) && project === "project-a" && !denied.has(permission) ? allowed as boolean : false };
   const gate: ProductionImageLeasePolicy = { usesStateStore: (s) => policy.usesStateStore(s), authorizeScope: (p, project) => policy.authorizeScope(p, project),
     validate: (p, e, purpose, bytes) => policy.validate(p, e, purpose, bytes) };
   const kernelOptions = { authorizer, validateProductionImageConfirmation: (p: typeof principal, e: ConfirmedProductionImageExecution) => service.authorizeConfirmation(p, e),
+    ...(options.start ? { productionImageStartPolicy: { usesStateStore: (s: unknown) => reconstruction?.usesStateStore(s) ?? false,
+      authorizeScope: (p: typeof principal, project: string) => reconstruction?.authorizeScope(p, project) ?? false,
+      validateStart: (p: typeof principal, e: any, l: any, i: any) => reconstruction?.validateStart(p, e, l, i) ?? false } } : {}),
     ...(options.policy === false ? {} : { productionImageLeasePolicy: gate }), ...options.kernel };
   const f = setupImageTask({ format: options.protocol === "google" ? "jpeg" : "png", kernel: kernelOptions }); owned.push(f);
   const base = connection(), model = base.models[0], protocol = options.protocol ?? "openai";
@@ -48,6 +52,8 @@ function fixture(options: { protocol?: ImageProviderConnection["protocol"]; manu
   policy = createProductionImageLeaseFixturePolicy(policyOptions);
   service = new ImageProductionPreparationHarness({ preparationEnabled: true, tenantId: principal.tenantId, stateStore: f.store,
     authorizer, runAuthorizer: authorizer, assetAuthorizer: authorizer, clock: f.clock, pricePort: pricePort as any, runKernel: f.kernel });
+  reconstruction = new ImageProductionReconstructionHarness({ reconstructionEnabled: true, startEnabled: true, leasePolicy: gate,
+    tenantId: principal.tenantId, stateStore: f.store, runKernel: f.kernel, clock: f.clock });
   const confirm = async (action = "owned-action") => {
     const prepared = service.createPreparation(principal, { projectId: "project-a", idempotencyKey: action, connectionId: config.id, connectionRevision: 1,
       model: model.model, capabilityVersion: model.version, constraintSnapshotId: "constraint-a", protection: "none", operation: options.edit ? "edit" : "generate",
@@ -60,14 +66,26 @@ function fixture(options: { protocol?: ImageProviderConnection["protocol"]; manu
   const reopen = (store: SqliteRunKernelStateStore, overrides: Partial<RunKernelOptions> = {}) => new SqliteRunKernel({ ...kernelOptions, ...overrides,
     stateStore: store, authorizer, clock: f.clock, budgets: [{ tenantId: principal.tenantId, projectId: "project-a", currency: "CNY", limitMinor: 1000 }],
     productionImageLeasePolicy: createProductionImageLeaseFixturePolicy({ ...policyOptions, stateStore: store }) });
-  return { ...f, config, policy, gate, policyOptions, pricePort, confirm, claim, reopen, authorizer,
+  const start = (batch: string, p = principal, input?: { workerId: string; leaseId: string }, signal?: AbortSignal) => {
+    const stored = f.store.load()!.batches.find((b) => b.aggregate.batch.id === batch)!, l = stored.productionImageLeases!.at(-1)!;
+    return reconstruction.start(p, "project-a", batch, stored.aggregate.jobs[0].id, input ?? { workerId: l.workerId, leaseId: l.leaseId }, signal);
+  };
+  const reopenStart = (store: SqliteRunKernelStateStore) => {
+    let service: ImageProductionReconstructionHarness;
+    const leasePolicy = createProductionImageLeaseFixturePolicy({ ...policyOptions, stateStore: store });
+    const kernel = reopen(store, { productionImageStartPolicy: { usesStateStore: (s) => service?.usesStateStore(s) ?? false,
+      authorizeScope: (p, project) => service?.authorizeScope(p, project) ?? false, validateStart: (p, e, l, i) => service?.validateStart(p, e, l, i) ?? false } });
+    service = new ImageProductionReconstructionHarness({ reconstructionEnabled: true, startEnabled: true, leasePolicy, tenantId: principal.tenantId,
+      stateStore: store, runKernel: kernel, clock: f.clock }); return { kernel, reconstruction: service };
+  };
+  return { ...f, config, policy, gate, policyOptions, pricePort, confirm, claim, reopen, reopenStart, start, reconstruction, authorizer,
     deny: (permission: string) => denied.add(permission), allow: (value: unknown) => { allowed = value; } };
 }
 const unchanged = (f: ReturnType<typeof fixture>, action: () => unknown) => {
   const before = f.store.load(); expect(action).toThrow(); expect(f.store.load()).toEqual(before);
 };
 
-describe("6D3B2 意图关系草稿（未接启动或持久化，不构成里程碑验收）", () => {
+describe("6D3B2 独立意图纯历史关系（不是启动授权）", () => {
   async function evidence(options: Parameters<typeof fixture>[0] = { manual: true }) {
     const f = fixture(options), batch = await f.confirm(); f.claim(batch.batch.id);
     const stored = f.store.load()!.batches[0], e = stored.productionImageExecution!, lease = stored.productionImageLeases![0], protocol = e.protocol;
@@ -123,6 +141,206 @@ describe("6D3B2 意图关系草稿（未接启动或持久化，不构成里程�
     expect(() => assertProductionDispatchIntent(changed, imageSnapshotFingerprint(changed), first.e, second.lease)).toThrow();
     const changedExecution = { ...first.intent, executionFingerprint: imageSnapshotFingerprint(second.e) };
     expect(() => assertProductionDispatchIntent(changedExecution, imageSnapshotFingerprint(changedExecution), second.e, first.lease)).toThrow();
+  });
+});
+
+describe("6D3B2 实际重建续接/同库意图/未知预留", () => {
+  async function started(options: Parameters<typeof fixture>[0] = {}) {
+    const f = fixture({ start: true, ...options }), b = await f.confirm(); const l = f.claim(b.batch.id).leases[0];
+    const result = await f.start(b.batch.id); return { f, b, l, result };
+  }
+  it("缺启动政策/服务开关在私有读取前关闭，不把B1摘要变成证明", async () => {
+    const f = fixture(), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], read = vi.spyOn(f.store, "load");
+    await expect(f.reconstruction.start(principal, "project-a", b.batch.id, l.jobId, { leaseId: l.leaseId, workerId: l.workerId })).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled();
+    await expect(new ProductionImageTaskReconstruction().start(principal, "project-a", "fake", "fake", {})).rejects.toThrow();
+  });
+  it.each(["run:read", "run:execute", "provider:read", "asset:read"])("启动前%s撤权不接触私有上下文", async (permission) => {
+    const f = fixture({ start: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0]; f.deny(permission);
+    const read = vi.spyOn(f.store, "load"), raw = vi.spyOn(f.store, "loadVerifiedImageBytes");
+    await expect(f.reconstruction.start(principal, "project-a", b.batch.id, l.jobId, { workerId: l.workerId, leaseId: l.leaseId })).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled(); expect(raw).not.toHaveBeenCalled();
+  });
+  it.each(["openai", "openai-compatible", "google"] as const)("%s实际生成/编辑known/unknown只保存原wire摘要和上限", async (protocol) => {
+    for (const edit of [false, true]) for (const manual of [false, true]) {
+      const { f, result } = await started({ protocol, edit, manual }), s = f.store.load()!.batches[0], e = s.productionImageExecution!;
+      expect(result.started).toBe(true); expect(s.productionImageDispatchIntent).toMatchObject({ mode: e.mode, transport: "not-connected",
+        payloadChecksumSha256: e.protocol.payloadChecksumSha256, contentType: e.protocol.contentType, payloadByteSize: e.protocol.payloadByteSize });
+      expect(s.aggregate.jobs[0].estimatedCostMinor).toBe(manual ? null : 25); expect(s.jobReservations).toEqual([[e.protocol.request.jobId, 40]]);
+      expect(s.aggregate.ledger).toHaveLength(1); expect(f.pricePort.read).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(result.intent)).not.toMatch(/never-called|credentialRef|opaque-never|base64|原人工指令/);
+      expect(s).not.toHaveProperty("imageDispatchIntent"); expect(s).not.toHaveProperty("imageFixtureAttempt");
+    }
+  });
+  it.each(["multipart-image-array", "multipart-image-single"] as const)("%s启动沿用原真实boundary并清除自有负载", async (editEncoding) => {
+    const f = fixture({ start: true, protocol: "openai-compatible", edit: true, editEncoding }), b = await f.confirm(); f.claim(b.batch.id);
+    const original = productionProtocol.prepareProductionImageProtocol; let wire: Buffer | undefined;
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => { const r = await original(...args); wire = r.wire.body; return r; });
+    expect((await f.start(b.batch.id)).intent.contentType).toContain("multipart/form-data; boundary=canvas-"); expect(wire!.every((v) => v === 0)).toBe(true);
+  });
+  it("首次原子保存not-connected意图与running；重复不重建，不发送或结算", async () => {
+    const f = fixture({ start: true, manual: true }), batch = await f.confirm(); f.claim(batch.batch.id);
+    f.advance(1); const first = await f.start(batch.batch.id);
+    expect(first).toMatchObject({ started: true, executionAuthorized: false, realExecutionEnabled: false,
+      aggregate: { batch: { status: "running", estimatedCostMinor: null }, jobs: [{ status: "running", outputAssetIds: [] }] }, intent: { transport: "not-connected" } });
+    expect(first.intent.reconstructedAt).not.toBe(first.intent.confirmedAt);
+    const before = f.store.load(), spy = vi.spyOn(productionProtocol, "prepareProductionImageProtocol");
+    expect(await f.start(batch.batch.id)).toMatchObject({ started: false, intent: first.intent }); expect(spy).not.toHaveBeenCalled();
+    expect(f.store.load()).toEqual(before); expect(f.kernel.getBudget(principal, "project-a")).toMatchObject({ reservedMinor: 40, spentMinor: 0 });
+    expect(before!.batches[0].aggregate.audit.filter((a) => a.eventType === "job-started")).toHaveLength(1);
+  });
+  it("纯历史意图/完整B1返回摘要无私有活续接，直接内核启动拒绝", async () => {
+    const f = fixture({ start: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], e = f.store.load()!.batches[0].productionImageExecution!;
+    const rebuilt = await f.reconstruction.reconstruct(principal, "project-a", b.batch.id, l.jobId, { workerId: l.workerId, leaseId: l.leaseId });
+    const evidence = f.store.load()!.batches[0].productionImageLeases![0];
+    const i = { schemaVersion: 1, mode: e.mode, transport: "not-connected", id: "production-image-intent:00000000-0000-4000-8000-000000000001",
+      jobId: l.jobId, batchId: b.batch.id, actorId: principal.actorId, workerId: l.workerId, leaseId: l.leaseId,
+      executionFingerprint: rebuilt.executionFingerprint, leaseFingerprint: imageSnapshotFingerprint(evidence), requestFingerprint: rebuilt.requestFingerprint,
+      payloadChecksumSha256: rebuilt.payloadChecksumSha256, payloadByteSize: rebuilt.payloadByteSize, contentType: rebuilt.contentType,
+      transformedInputsFingerprint: imageSnapshotFingerprint(rebuilt.transformedInputs), protocolVersion: rebuilt.protocolVersion,
+      confirmedAt: e.confirmedAt, reconstructedAt: rebuilt.reconstructedAt, recordedAt: rebuilt.validatedAt } as any;
+    expect(f.reconstruction.validateStart(principal, e, evidence, i)).toBe(false);
+    unchanged(f, () => f.kernel.startProductionImageJob(principal, "project-a", b.batch.id, l.jobId, { workerId: l.workerId, leaseId: l.leaseId }, i));
+  });
+  it("并发重建只记录一次启动；第二份恢复同一历史而不结算", async () => {
+    const f = fixture({ start: true, edit: true }), b = await f.confirm(); f.claim(b.batch.id);
+    const results = await Promise.all([f.start(b.batch.id), f.start(b.batch.id)]);
+    expect(results.map((r) => r.started).sort()).toEqual([false, true]); expect(results[0].intent).toEqual(results[1].intent);
+    expect(f.store.load()!.batches[0].aggregate.audit.filter((a) => a.eventType === "job-started")).toHaveLength(1);
+  });
+  it("跨连接/重启历史只读，目录停用报价过期不重建或新启动", async () => {
+    const { f, b, l, result } = await started({ edit: true, manual: true }); f.advance(60_000); f.register(connection({ revision: 2, enabled: false }));
+    const store = new SqliteRunKernelStateStore(f.path);
+    try { const restored = f.reopenStart(store), before = store.load(), prepare = vi.spyOn(productionProtocol, "prepareProductionImageProtocol"); f.pricePort.verify.mockClear();
+      const repeat = await restored.reconstruction.start(principal, "project-a", b.batch.id, l.jobId, { workerId: l.workerId, leaseId: l.leaseId });
+      expect(repeat).toMatchObject({ started: false, intent: result.intent }); expect(prepare).not.toHaveBeenCalled(); expect(f.pricePort.verify).not.toHaveBeenCalled();
+      expect(store.load()).toEqual(before); expect(repeat.aggregate.batch.status).toBe("running");
+    } finally { store.close(); }
+  });
+  it.each(["actor", "worker", "lease"])("已记录历史仍拒绝%s错配，不当新许可", async (kind) => {
+    const { f, b, l } = await started({ edit: true }), before = f.store.load();
+    await expect(f.start(b.batch.id, kind === "actor" ? other : principal, { workerId: kind === "worker" ? "other" : l.workerId,
+      leaseId: kind === "lease" ? "other" : l.leaseId })).rejects.toThrow(); expect(f.store.load()).toEqual(before);
+  });
+  it.each(["revoke", "expiry", "price", "constraint", "connection", "cancel", "abort", "verify"])("归一化await后%s不创建意图、不动未知估价预留", async (kind) => {
+    const f = fixture({ start: true, edit: true, manual: true }), b = await f.confirm(); f.claim(b.batch.id); const controller = new AbortController();
+    const original = productionProtocol.prepareProductionImageProtocol; let wire: Buffer | undefined;
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => {
+      const r = await original(...args); wire = r.wire.body;
+      if (kind === "revoke") f.deny("asset:read"); if (kind === "expiry") f.advance(30_000); if (kind === "price") f.advance(60_000);
+      if (kind === "constraint") f.store.transaction(() => { const c = f.store.loadCatalog()!; c.projects[0].constraints[0].brandRules = { changed: "yes" }; f.store.saveCatalog(c); });
+      if (kind === "connection") f.register(connection({ revision: 2 })); if (kind === "cancel") f.kernel.cancelBatch(principal, b.batch.id);
+      if (kind === "abort") controller.abort(); if (kind === "verify") f.pricePort.verify.mockReturnValue(false); return r;
+    });
+    await expect(f.start(b.batch.id, principal, undefined, controller.signal)).rejects.toThrow();
+    expect(f.store.load()!.batches[0]).not.toHaveProperty("productionImageDispatchIntent");
+    expect(f.store.load()!.batches[0].reservedMinor).toBe(kind === "cancel" ? 0 : 40); expect(wire!.every((v) => v === 0)).toBe(true);
+  });
+  it.each(["fault", "revoke", "expiry", "price", "abort", "verify", "clock"])("实际SQL写后%s回滚意图/任务/审计，原预留不丢", async (kind) => {
+    const f = fixture({ start: true, manual: true }), b = await f.confirm(); f.claim(b.batch.id); const before = f.store.load(), controller = new AbortController();
+    const save = f.store.save.bind(f.store);
+    vi.spyOn(f.store, "save").mockImplementation((s) => { save(s); if (!s.batches[0].productionImageDispatchIntent) return;
+      if (kind === "fault") throw new Error("private-intent-write"); if (kind === "revoke") f.deny("run:execute"); if (kind === "expiry") f.advance(30_000);
+      if (kind === "price") f.advance(60_000); if (kind === "abort") controller.abort(); if (kind === "verify") f.pricePort.verify.mockReturnValue(false); if (kind === "clock") f.advance(-1);
+    });
+    await expect(f.start(b.batch.id, principal, undefined, controller.signal)).rejects.toThrow(); expect(f.store.load()).toEqual(before);
+  });
+  it.each([0, 40])("上限%s运行到期恢复unknown；重复/读取/重启不释放或重发", async (cap) => {
+    const { f, b, l, result } = await started({ manual: true, cap }); f.advance(30_000);
+    const before = f.store.load(); expect(f.kernel.getBatch(principal, b.batch.id).batch.status).toBe("running"); expect(f.store.load()).toEqual(before);
+    const unknown = f.kernel.reconcileProductionImageBatch(principal, "project-a", b.batch.id);
+    expect(unknown).toMatchObject({ batch: { status: "billing_unknown", estimatedCostMinor: null }, jobs: [{ status: "billing_unknown", failureCode: "production-lease-expired-after-intent" }] });
+    expect(unknown.ledger).toHaveLength(2); expect(unknown.ledger[1]).toMatchObject({ settlement: "unknown", reservedMinor: cap, estimatedMinor: null, imageMode: "production-contract-fixture" });
+    expect(f.store.load()!.batches[0].jobReservations).toEqual([[l.jobId, cap]]); expect(f.kernel.getBudget(principal, "project-a")).toMatchObject({ reservedMinor: cap, spentMinor: 0 });
+    const saved = f.store.load(); expect(f.kernel.reconcileProductionImageBatch(principal, "project-a", b.batch.id)).toEqual(unknown);
+    expect(await f.start(b.batch.id)).toMatchObject({ started: false, intent: result.intent }); expect(f.store.load()).toEqual(saved);
+    expect(() => f.kernel.cancelBatch(principal, b.batch.id)).toThrow(); expect(f.store.load()).toEqual(saved);
+  });
+  it("未到租约期限但达到独立任务超时也保留unknown上限", async () => {
+    const { f, b } = await started({ kernel: { jobTimeoutMs: 1000 } }); f.advance(1000);
+    expect(f.kernel.reconcileProductionImageBatch(principal, "project-a", b.batch.id).jobs[0].failureCode).toBe("production-job-timeout-after-intent");
+    expect(f.store.load()!.batches[0].reservedMinor).toBe(40);
+  });
+  it("内存崩溃恢复记录独立unknown，完整历史关系和预算守恒", async () => {
+    const { f, b } = await started({ manual: true }), saved = f.store.load()!; let current = saved;
+    const kernel = new InMemoryRunKernel({ authorizer: f.authorizer, budgets: saved.budgets, clock: f.clock,
+      productionImageLeasePolicy: f.gate, stateStore: { load: () => current, save: (v) => { current = v; } } });
+    expect(kernel.getBatch(principal, b.batch.id).jobs[0].failureCode).toBe("production-recovered-after-restart");
+    expect(current.batches[0].aggregate.ledger[1]).toMatchObject({ imageMode: "production-contract-fixture", estimatedMinor: null, reservedMinor: 40, settlement: "unknown" });
+    expect(() => InMemoryRunKernel.assertSnapshot(current)).not.toThrow(); expect(current.budgets).toEqual(saved.budgets);
+  });
+  it.each(["revoke", "fault"])("unknown恢复写后%s原子回滚仍保留原意图和预留", async (kind) => {
+    const { f, b } = await started(); f.advance(30_000); const save = f.store.save.bind(f.store);
+    vi.spyOn(f.store, "save").mockImplementation((s) => { save(s); if (kind === "revoke") f.deny("asset:read"); else throw new Error("private-unknown-write"); });
+    unchanged(f, () => f.kernel.reconcileProductionImageBatch(principal, "project-a", b.batch.id));
+  });
+  it("生产running占用共用供应商并发；历史恢复不新增领取窗口记录", async () => {
+    const { f, b } = await started({ kernel: { providerLimits: [{ adapterId: "fixture-image-v1", maxConcurrentJobs: 1 }] } });
+    const second = await f.confirm("second"); expect(f.claim(second.batch.id)).toMatchObject({ leases: [], throttledBy: "provider-concurrency" });
+    expect(await f.start(b.batch.id)).toMatchObject({ started: false });
+    expect(f.store.load()!.batches[0].aggregate.audit.filter((a) => a.eventType === "job-leased")).toHaveLength(1);
+  });
+  it("新意图及审计计共享元数据容量，满额拒绝且不删除旧历史", async () => {
+    const f = fixture({ start: true }), b = await f.confirm(); f.claim(b.batch.id); const before = f.store.load();
+    const current = f.store.imageMetadataBytes(principal.tenantId, "project-a") + imageTaskMetadataBytes(before, principal.tenantId, "project-a");
+    const blocked = createProductionImageLeaseFixturePolicy({ ...f.policyOptions, maxMetadataBytes: current + 1 });
+    vi.spyOn(f.gate, "validate").mockImplementation((...args) => blocked.validate(...args));
+    await expect(f.start(b.batch.id)).rejects.toThrow(); expect(f.store.load()).toEqual(before);
+  });
+  it.each(["false", "promise"])("最终同步启动政策%s失败关闭，不把创建确认当启动许可", async (kind) => {
+    const f = fixture({ start: true }), b = await f.confirm(); f.claim(b.batch.id); const before = f.store.load();
+    vi.spyOn(f.reconstruction, "validateStart").mockImplementation(() => kind === "promise" ? Promise.resolve(true) as any : false);
+    await expect(f.start(b.batch.id)).rejects.toThrow(); expect(f.store.load()).toEqual(before);
+  });
+  it.each(["async-rejection", "private-throw"])("存储绑定政策%s失败关闭，不泄漏异常或遗留未处理Promise", async (kind) => {
+    const f = fixture({ start: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], before = f.store.load();
+    vi.spyOn(f.gate, "usesStateStore").mockImplementation(() => {
+      if (kind === "private-throw") throw new Error("PRIVATE-START-PORT"); return Promise.reject(new Error("PRIVATE-START-PORT")) as any;
+    });
+    const read = vi.spyOn(f.store, "load");
+    await expect(f.reconstruction.start(principal, "project-a", b.batch.id, l.jobId, { workerId: l.workerId, leaseId: l.leaseId })).rejects.toThrow("未启动或发送请求");
+    expect(read).not.toHaveBeenCalled(); expect(f.store.load()).toEqual(before);
+  });
+  it("相同路径不同实例启动关闭，生产入口不能给合同夹具改名", async () => {
+    const f = fixture({ start: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], before = f.store.load(), store = new SqliteRunKernelStateStore(f.path);
+    try {
+      const args = { reconstructionEnabled: true as const, startEnabled: true as const, leasePolicy: f.gate, tenantId: principal.tenantId,
+        runKernel: f.kernel, clock: f.clock };
+      await expect(new ImageProductionReconstructionHarness({ ...args, stateStore: store }).start(principal, "project-a", b.batch.id, l.jobId,
+        { workerId: l.workerId, leaseId: l.leaseId })).rejects.toThrow();
+      await expect(new ProductionImageTaskReconstruction({ ...args, stateStore: f.store }).start(principal, "project-a", b.batch.id, l.jobId,
+        { workerId: l.workerId, leaseId: l.leaseId })).rejects.toThrow(); expect(f.store.load()).toEqual(before);
+    } finally { store.close(); }
+  });
+  it.each(["wire", "transform"])("发送前实际%s重建错配不能记录启动", async (kind) => {
+    const f = fixture({ start: true, edit: true }), b = await f.confirm(); f.claim(b.batch.id); const before = f.store.load(), original = productionProtocol.prepareProductionImageProtocol;
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => {
+      const r = await original(...args); if (kind === "wire") r.wire.body[0] ^= 1;
+      else r.snapshot.transformedInputs[0].transmittedChecksumSha256 = "0".repeat(64); return r;
+    });
+    await expect(f.start(b.batch.id)).rejects.toThrow(); expect(f.store.load()).toEqual(before);
+  });
+  it.each(["intent", "fingerprint", "lease", "request", "start-audit", "started-at", "transport", "mode", "unknown-ledger", "unknown-audit", "release"])("部分重算或恢复损坏%s不能制造许可/结算", async (kind) => {
+    const { f, b } = await started({ manual: true }); f.advance(30_000); f.kernel.reconcileProductionImageBatch(principal, "project-a", b.batch.id);
+    const snapshot = f.store.load()!, s = snapshot.batches[0], i = s.productionImageDispatchIntent!;
+    if (kind === "intent") delete s.productionImageDispatchIntent;
+    if (kind === "fingerprint") s.productionImageDispatchIntentFingerprint = "0".repeat(64);
+    if (kind === "lease") i.leaseFingerprint = "0".repeat(64);
+    if (kind === "request") i.payloadChecksumSha256 = "0".repeat(64);
+    if (kind === "transport") (i as any).transport = "sent";
+    if (kind === "mode") i.mode = "production";
+    if (["lease", "request", "transport", "mode"].includes(kind)) s.productionImageDispatchIntentFingerprint = imageSnapshotFingerprint(i);
+    if (kind === "start-audit") s.aggregate.audit = s.aggregate.audit.filter((a) => a.eventType !== "job-started");
+    if (kind === "started-at") s.aggregate.jobs[0].startedAt = new Date(Date.parse(i.recordedAt) + 1).toISOString();
+    if (kind === "unknown-ledger") s.aggregate.ledger[1].reservedMinor = 0;
+    if (kind === "unknown-audit") s.aggregate.audit.find((a) => a.eventType === "billing-unknown")!.metadata.intentFingerprint = "0".repeat(64);
+    if (kind === "release") { s.jobReservations = []; s.reservedMinor = 0; snapshot.budgets[0].reservedMinor = 0; }
+    expect(() => InMemoryRunKernel.assertSnapshot(snapshot)).toThrow();
+  });
+  it.each(["resolveBillingUnknown", "requestBillingOverage", "reviewBillingOverage", "executeLeasedJob", "reconcileBatch", "retryJob"])("unknown生产不套用旧入口%s", async (method) => {
+    const { f, b, l } = await started({ manual: true }); f.advance(30_000); f.kernel.reconcileProductionImageBatch(principal, "project-a", b.batch.id);
+    unchanged(f, () => (f.kernel[method as keyof SqliteRunKernel] as any)(principal, method === "reconcileBatch" ? b.batch.id : l.jobId,
+      { resolutionId: "owned-not-permitted", resolution: "not-charged", expectedReservedMinor: 40, expectedCurrency: "CNY", workerId: l.workerId, leaseId: l.leaseId }));
   });
 });
 
