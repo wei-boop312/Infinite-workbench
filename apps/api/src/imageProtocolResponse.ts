@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ImageExecutionRequestSchema, ImageProviderOutcomeSchema, type ImageExecutionRequest, type ImageProviderOutcome } from "@canvas/contracts";
+import { ImageExecutionRequestSchema, ImageProviderOutcomeSchema, type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderOutcome } from "@canvas/contracts";
 
 export const MAX_IMAGE_PROTOCOL_RESPONSE_BYTES = 32 * 1024 * 1024;
 export const MAX_IMAGE_PROTOCOL_OUTPUT_BYTES = 20 * 1024 * 1024;
@@ -7,7 +7,7 @@ export type ImageProtocolResponse = { status: number; contentType: string; reque
 export type ImageCandidate = { body: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp"; checksumSha256: string };
 export type ParsedImageProtocolResponse = { outcome: ImageProviderOutcome; candidate?: ImageCandidate };
 
-export function imageProtocolOutcome(request: ImageExecutionRequest, fingerprint: string, extra: Partial<ImageProviderOutcome>): ImageProviderOutcome {
+export function imageProtocolOutcome(request: ImageExecutionRequest | ProductionImageExecutionRequest, fingerprint: string, extra: Partial<ImageProviderOutcome>): ImageProviderOutcome {
   return ImageProviderOutcomeSchema.parse({ schemaVersion: 1, tenantId: request.tenantId, projectId: request.projectId, jobId: request.jobId,
     connectionId: request.connectionId, requestFingerprint: fingerprint, providerStatus: "unknown", artifactStatus: "absent", usage: { source: "unavailable" }, billing: { state: "unknown" }, ...extra });
 }

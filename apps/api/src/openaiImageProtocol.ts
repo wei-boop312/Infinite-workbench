@@ -1,9 +1,9 @@
 import { TextDecoder } from "node:util";
 import {
-  ImageExecutionRequestSchema, ImageUsageSchema,
+  ImageExecutionRequestSchema, ProductionImageExecutionRequestSchema, ProductionImageTaskIdentitySchema, ImageProviderConnectionSchema, ImageUsageSchema,
   type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome,
 } from "@canvas/contracts";
-import { ImageProviderContractError, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
+import { ImageProviderContractError, imageSnapshotFingerprint, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
 import { encodeImageJson, imagePayloadSha256, prepareImagePayloadParts, type ImageInputTransform, type TrustedImageBytes } from "./imageRequestPayload";
 export { MAX_IMAGE_PROTOCOL_REQUEST_BYTES } from "./imageRequestPayload";
 export type { TrustedImageBytes } from "./imageRequestPayload";
@@ -48,7 +48,17 @@ const safeInt = (value: unknown): value is number => typeof value === "number" &
 // The response is untrusted. Unknown additive metadata is ignored, but known
 // image/usage fields are checked. URLs are never fetched or treated as artifacts.
 export function parseOpenAiImageResponse(input: ImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse): ParsedImageProtocolResponse {
-  const request = ImageExecutionRequestSchema.parse(input);
+  return parseResponse(ImageExecutionRequestSchema.parse(input), fingerprint, response);
+}
+// Separate validation entrance; never fabricate an estimate for legacy parsing.
+// Syntax and a matching digest are not actual task/send authorization.
+export function parseProductionOpenAiImageResponse(input: ProductionImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse, connection: ImageProviderConnection): ParsedImageProtocolResponse {
+  const request = ProductionImageExecutionRequestSchema.parse(input);
+  ProductionImageTaskIdentitySchema.parse({ jobId: request.jobId, idempotencyKey: request.idempotencyKey });
+  if (imageSnapshotFingerprint({ connection: ImageProviderConnectionSchema.parse(connection), request }) !== fingerprint) reject("production_image_response_request_changed");
+  return parseResponse(request, fingerprint, response);
+}
+function parseResponse(request: ImageExecutionRequest | ProductionImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse): ParsedImageProtocolResponse {
   const extra: Partial<ImageProviderOutcome> = {};
   if (response.requestId && /^[A-Za-z0-9_.:-]{1,160}$/.test(response.requestId)) extra.providerRequestId = response.requestId;
   const failed = (failureCode: string, providerStatus: ImageProviderOutcome["providerStatus"] = "unknown", artifactStatus: ImageProviderOutcome["artifactStatus"] = "absent") => ({ outcome: outcome(request, fingerprint, { ...extra, failureCode, providerStatus, artifactStatus }) });

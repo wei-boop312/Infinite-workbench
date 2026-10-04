@@ -1,6 +1,6 @@
 import { TextDecoder } from "node:util";
-import { ImageExecutionRequestSchema, ImageUsageSchema, type GoogleImageProfile, type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome } from "@canvas/contracts";
-import { ImageProviderContractError, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
+import { ImageExecutionRequestSchema, ProductionImageExecutionRequestSchema, ProductionImageTaskIdentitySchema, ImageProviderConnectionSchema, ImageUsageSchema, type GoogleImageProfile, type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome } from "@canvas/contracts";
+import { ImageProviderContractError, imageSnapshotFingerprint, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
 import { imagePayloadSha256, prepareImagePayloadParts, type ImageInputTransform, type ImagePayloadParts, type TrustedImageBytes } from "./imageRequestPayload";
 import { decodeImageCandidate, imageProtocolOutcome, MAX_IMAGE_PROTOCOL_RESPONSE_BYTES, type ImageProtocolResponse, type ParsedImageProtocolResponse } from "./imageProtocolResponse";
 
@@ -98,7 +98,15 @@ function googleUsage(raw: unknown): ImageProviderOutcome["usage"] | undefined {
 // Native envelope: candidates/content/parts, NOT a synthetic OpenAI data[].
 // Text, thoughts, signatures, errors and URLs never enter an asset or audit body.
 export function parseGoogleImageResponse(input: ImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse): ParsedImageProtocolResponse {
-  const request = ImageExecutionRequestSchema.parse(input);
+  return parseResponse(ImageExecutionRequestSchema.parse(input), fingerprint, response);
+}
+export function parseProductionGoogleImageResponse(input: ProductionImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse, connection: ImageProviderConnection): ParsedImageProtocolResponse {
+  const request = ProductionImageExecutionRequestSchema.parse(input);
+  ProductionImageTaskIdentitySchema.parse({ jobId: request.jobId, idempotencyKey: request.idempotencyKey });
+  if (imageSnapshotFingerprint({ connection: ImageProviderConnectionSchema.parse(connection), request }) !== fingerprint) reject("production_image_response_request_changed");
+  return parseResponse(request, fingerprint, response);
+}
+function parseResponse(request: ImageExecutionRequest | ProductionImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse): ParsedImageProtocolResponse {
   const extra: Partial<ImageProviderOutcome> = {};
   if (requestId(response.requestId)) extra.providerRequestId = response.requestId;
   const failed = (failureCode: string, providerStatus: ImageProviderOutcome["providerStatus"] = "unknown", artifactStatus: ImageProviderOutcome["artifactStatus"] = "absent") => ({ outcome: imageProtocolOutcome(request, fingerprint, { ...extra, failureCode, providerStatus, artifactStatus }) });

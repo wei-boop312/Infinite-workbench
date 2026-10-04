@@ -2,7 +2,7 @@ import type { ImageExecutionRequest, ProductionImageExecutionRequest, ImageProvi
 import { ImageProviderContractError, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
 import { MAX_IMAGE_PROTOCOL_REQUEST_BYTES, encodeImageJson, imagePayloadSha256, prepareImagePayloadParts,
   type ImageInputTransform, type ImagePayloadParts, type TrustedImageBytes } from "./imageRequestPayload";
-import { parseOpenAiImageResponse, type ImageProtocolResponse } from "./openaiImageProtocol";
+import { parseOpenAiImageResponse, parseProductionOpenAiImageResponse, type ImageProtocolResponse } from "./openaiImageProtocol";
 
 function reject(code: string): never { throw new ImageProviderContractError(code); }
 export type CompatibleImagePreparedRequest = {
@@ -76,4 +76,7 @@ export function parseCompatibleImageResponse(input: ImageExecutionRequest, finge
   // Exactly one declared response shape in this milestone. Non-compatible async
   // task/URL/custom billing envelopes need a separate adapter, never a best guess.
   return parseOpenAiImageResponse(input, fingerprint, response);
+}
+export function parseProductionCompatibleImageResponse(input: ProductionImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse, connection: ImageProviderConnection) {
+  return parseProductionOpenAiImageResponse(input, fingerprint, response, connection);
 }

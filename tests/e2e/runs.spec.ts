@@ -80,6 +80,21 @@ test("生产负载重建和派发意图不接浏览器，自报摘要不改变�
   await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
 });
 
+test("生产尝试/原包没有浏览器入口，伪响应不改变预算或开放真实执行", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["production-image-attempts", "production-image-responses", "production-image-responses/fake/content"]) {
+    expect((await page.request.get(`${base}/${suffix}`, { headers })).status()).toBe(404);
+    expect((await page.request.post(`${base}/${suffix}`, { headers, data: { mode: "production", state: "attempted", kind: "returned", confirmed: true,
+      bodyChecksumSha256: "0".repeat(64), outputAssetId: "fake-output", billing: { state: "known", actualCostMinor: 0 } } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+  await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
+});
+
 test("生产未知估价/纯协议摘要不能代替本地确认或解锁发送", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();

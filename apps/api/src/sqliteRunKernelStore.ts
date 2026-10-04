@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ProductionImagePreparationRecordSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ProductionImagePreparationRecord, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
+import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ProductionImagePreparationRecordSchema, ProductionImageRawResponseSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ProductionImageRawResponse, type ProductionImagePreparationRecord, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
+import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
 type StateKind = "runs" | "catalog";
@@ -26,8 +27,10 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   private readonly database: DatabaseSync;
   private depth = 0;
   private closed = false;
+  private readonly productionResponseStorageEnabled: boolean;
 
-  constructor(filePath: string, options: { busyTimeoutMs?: number } = {}) {
+  constructor(filePath: string, options: { busyTimeoutMs?: number; productionResponseStorageEnabled?: true } = {}) {
+    this.productionResponseStorageEnabled = options.productionResponseStorageEnabled === true;
     if (!filePath.trim()) throw new Error("数据库路径不能为空");
     const timeout = options.busyTimeoutMs ?? 1_000;
     if (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 5_000) throw new Error("数据库等待时间无效");
@@ -38,8 +41,9 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
       this.transaction(() => {
         const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version);
-        if (![0, 1, 2, 3, 4, 5, 6].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
-        if (version === 6 && ["production_image_preparations", "production_image_preparation_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产准备表丢失，禁止重新创建");
+        if (![0, 1, 2, 3, 4, 5, 6, 7].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
+        if (version >= 6 && ["production_image_preparations", "production_image_preparation_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产准备表丢失，禁止重新创建");
+        if (version === 7 && ["production_image_responses", "production_image_response_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产原包表丢失，禁止重新创建");
         this.database.exec(`CREATE TABLE IF NOT EXISTS kernel_state (
           kind TEXT PRIMARY KEY CHECK (kind IN ('runs', 'catalog')),
           revision INTEGER NOT NULL CHECK (revision > 0),
@@ -105,7 +109,17 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
           id TEXT NOT NULL, action_key TEXT NOT NULL,
           PRIMARY KEY (tenant_id, project_id, mode, id), UNIQUE (tenant_id, project_id, mode, action_key)
         ) STRICT;
-        PRAGMA user_version = 6`);
+        CREATE TABLE IF NOT EXISTS production_image_responses (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('production', 'production-contract-fixture')),
+          job_id TEXT NOT NULL, response_id TEXT NOT NULL, record TEXT NOT NULL, record_sha256 TEXT NOT NULL, body BLOB NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, mode, job_id), UNIQUE (tenant_id, project_id, mode, response_id)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS production_image_response_presence (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('production', 'production-contract-fixture')),
+          job_id TEXT NOT NULL, response_id TEXT NOT NULL, record_sha256 TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, mode, job_id), UNIQUE (tenant_id, project_id, mode, response_id)
+        ) STRICT;
+        PRAGMA user_version = 7`);
       });
     } catch (error) {
       this.database.close();
@@ -317,14 +331,62 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     return Number(this.database.prepare("SELECT COUNT(*) AS count FROM production_image_preparation_presence WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.count ?? 0);
   }
   imageMetadataBytes(tenantId: string, projectId: string): number {
-    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM generated_images WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_preparations WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
-      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
+    return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM generated_images WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_responses WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
+      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
   }
   imageFixtureResponseBytes(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);
   }
   localImageBinaryBytes(tenantId: string, projectId: string): number {
-    return this.verifiedImageBytes(tenantId, projectId) + this.imageFixtureResponseBytes(tenantId, projectId);
+    return this.verifiedImageBytes(tenantId, projectId) + this.imageFixtureResponseBytes(tenantId, projectId) + this.productionImageResponseBytes(tenantId, projectId);
+  }
+  productionImageResponseBytes(tenantId: string, projectId: string): number {
+    return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM production_image_responses WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);
+  }
+  // Internal raw storage ONLY, default closed. Does not prove actual task,
+  // attempt, permissions, transport invocation, asset authorization or billing.
+  loadProductionImageResponse(tenantId: string, projectId: string, mode: ProductionImageRawResponse["mode"], jobId: string): { record: ProductionImageRawResponse; body: Buffer } | null {
+    if (!this.productionResponseStorageEnabled) throw new Error("生产原包存储默认关闭");
+    if (!["production", "production-contract-fixture"].includes(mode)) throw new Error("生产原包命名空间无效");
+    try {
+      return this.transaction(() => {
+        const row = this.database.prepare("SELECT response_id, record_sha256, length(CAST(record AS BLOB)) AS record_bytes, length(body) AS body_bytes FROM production_image_responses WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(tenantId, projectId, mode, jobId);
+        const marker = this.database.prepare("SELECT response_id, record_sha256 FROM production_image_response_presence WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(tenantId, projectId, mode, jobId);
+        if (!row && !marker) return null;
+        if (!row || !marker || row.response_id !== marker.response_id || row.record_sha256 !== marker.record_sha256
+          || typeof row.record_bytes !== "number" || row.record_bytes > 512 * 1024 || typeof row.body_bytes !== "number" || row.body_bytes > 32 * 1024 * 1024) throw new Error("生产原包证据丢失或超限");
+        const value = this.database.prepare("SELECT record, record_sha256, body FROM production_image_responses WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(tenantId, projectId, mode, jobId)!;
+        const record = ProductionImageRawResponseSchema.parse(this.readImageMetadata(value));
+        if (!(value.body instanceof Uint8Array)) throw new Error("生产原包正文缺失");
+        const body = Buffer.from(value.body), outcome = record.outcome;
+        if (record.id !== row.response_id || record.mode !== mode || outcome.tenantId !== tenantId || outcome.projectId !== projectId || outcome.jobId !== jobId
+          || body.byteLength !== record.bodyByteSize || createHash("sha256").update(body).digest("hex") !== record.bodyChecksumSha256) { body.fill(0); throw new Error("生产原包归属或字节损坏"); }
+        return { record, body };
+      });
+    } catch (error) { throw databaseError(error); }
+  }
+  saveProductionImageResponse(input: ProductionImageRawResponse, body: Buffer, limits: { maxMetadataBytes?: number; maxProjectBytes?: number } = {}): void {
+    if (!this.productionResponseStorageEnabled) throw new Error("生产原包存储默认关闭");
+    if (this.depth === 0) throw new Error("必须在事务中保存生产原包");
+    const record = ProductionImageRawResponseSchema.parse(input), metadata = limits.maxMetadataBytes ?? 16 * 1024 * 1024, binary = limits.maxProjectBytes ?? 512 * 1024 * 1024;
+    if (!Number.isSafeInteger(metadata) || metadata < 0 || metadata > 16 * 1024 * 1024 || !Number.isSafeInteger(binary) || binary < 0 || binary > 512 * 1024 * 1024
+      || !Buffer.isBuffer(body) || body.byteLength !== record.bodyByteSize || createHash("sha256").update(body).digest("hex") !== record.bodyChecksumSha256) throw new Error("生产原包容量或正文不一致");
+    const payload = this.imageMetadataPayload(record), { tenantId, projectId, jobId } = record.outcome;
+    this.transaction(() => {
+      const existing = this.loadProductionImageResponse(tenantId, projectId, record.mode, jobId);
+      if (existing) {
+        try { if (JSON.stringify(existing.record) !== payload || !existing.body.equals(body)) throw new Error("生产原包历史不可覆盖"); }
+        finally { existing.body.fill(0); }
+        return;
+      }
+      if (this.localImageBinaryBytes(tenantId, projectId) + body.byteLength > binary
+        || this.imageMetadataBytes(tenantId, projectId) + imageTaskMetadataBytes(this.load(), tenantId, projectId) + Buffer.byteLength(payload, "utf8") > metadata) throw new Error("生产原包共享容量不足");
+      const hash = createHash("sha256").update(payload).digest("hex");
+      this.database.prepare("INSERT INTO production_image_responses(tenant_id, project_id, mode, job_id, response_id, record, record_sha256, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(tenantId, projectId, record.mode, jobId, record.id, payload, hash, body);
+      this.database.prepare("INSERT INTO production_image_response_presence(tenant_id, project_id, mode, job_id, response_id, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(tenantId, projectId, record.mode, jobId, record.id, hash);
+    });
   }
   loadImageFixtureResponse(tenantId: string, projectId: string, jobId: string): { record: Extract<ImageFixtureResult, { kind: "returned" }>; body: Buffer } | null {
     try {

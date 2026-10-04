@@ -227,12 +227,12 @@ describe("持久化本地图片传输尝试与原始响应（不授权资产）"
     expect(() => f.kernel.recordImageFixtureResult(principal, batch.jobs[0].id, result, Buffer.from("tampered"))).toThrow(expect.objectContaining({ code: "image_fixture_result_conflict" }));
     expect(f.store.load()).toEqual(before); expect(f.store.loadImageFixtureResponse(principal.tenantId, "project-a", batch.jobs[0].id)!.body).toEqual(response().body); held(f);
   });
-  it("v4 增量升级保留原图/准备/确认/未知费用，并拒绝未来 v7", async () => {
+  it("v4 增量升级保留原图/准备/确认/未知费用，并拒绝未来 v8", async () => {
     const a = setup(); a.register(); a.source(); const batch = await a.confirm(), lease = claim(a, batch); await a.leases.prepareStart(principal, batch.jobs[0].id, lease);
     a.advance(31000); expect(a.kernel.reconcileImageBatch(principal, batch.batch.id).jobs[0].status).toBe("billing_unknown"); const before = a.store.load(), catalog = a.store.loadCatalog();
     const db = new DatabaseSync(a.path); db.exec("DROP TABLE image_fixture_responses; DROP TABLE image_fixture_response_presence; PRAGMA user_version = 4"); db.close();
     const b = setup({ path: a.path }); expect(b.store.load()).toEqual(before); expect(b.store.loadCatalog()).toEqual(catalog); expect(b.store.loadVerifiedImage(principal.tenantId, "project-a", "source")).toBeDefined();
-    const version = new DatabaseSync(a.path); expect(version.prepare("PRAGMA user_version").get()!.user_version).toBe(6); version.exec("PRAGMA user_version = 7"); version.close(); held(b);
+    const version = new DatabaseSync(a.path); expect(version.prepare("PRAGMA user_version").get()!.user_version).toBe(7); version.exec("PRAGMA user_version = 8"); version.close(); held(b);
     expect(() => new SqliteRunKernelStateStore(a.path)).toThrow(expect.objectContaining({ code: "run_state_unavailable" }));
   });
   it("严格证据拒绝密钥和真实模式，重新哈希的归属/尝试/响应损坏仍拒绝恢复", async () => {

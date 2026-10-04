@@ -773,7 +773,7 @@ export const ProductionImageLeaseEvidenceSchema = RunJobLeaseSchema.extend({
 export type ProductionImageLeaseEvidence = z.infer<typeof ProductionImageLeaseEvidenceSchema>;
 
 // Private historical evidence only. This shape cannot authorize a start, send,
-// credential read or artifact commit. It is NOT yet a persisted task field.
+// credential read or artifact commit. Actual starts require a private live policy.
 export const ProductionImageDispatchIntentSchema = z.object({
   schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]),
   transport: z.literal("not-connected"),
@@ -789,6 +789,38 @@ export const ProductionImageDispatchIntentSchema = z.object({
 }).strict().refine((intent) => Date.parse(intent.confirmedAt) <= Date.parse(intent.reconstructedAt)
   && Date.parse(intent.reconstructedAt) <= Date.parse(intent.recordedAt), { message: "生产意图时间关系无效" });
 export type ProductionImageDispatchIntent = z.infer<typeof ProductionImageDispatchIntentSchema>;
+
+// Independent evidence shapes. Neither a schema nor lower-level raw storage
+// proves that an attempt was committed for an actual task or invoked a transport.
+const ProductionEvidenceHash = z.string().regex(/^[a-f0-9]{64}$/);
+const ProductionEvidenceJob = z.string().regex(/^production-image-job-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+const ProductionEvidenceAttemptId = z.string().regex(/^production-image-attempt:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+export const ProductionImageAttemptSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]), state: z.literal("attempted"),
+  id: ProductionEvidenceAttemptId,
+  tenantId: IdSchema, projectId: IdSchema, jobId: ProductionEvidenceJob, batchId: ProductionImageBatchIdSchema,
+  actorId: IdSchema, workerId: IdSchema, leaseId: IdSchema,
+  transport: z.enum(["native-https", "contract-fixture"]),
+  intentFingerprint: ProductionEvidenceHash, executionFingerprint: ProductionEvidenceHash, leaseFingerprint: ProductionEvidenceHash,
+  requestFingerprint: ProductionEvidenceHash, payloadChecksumSha256: ProductionEvidenceHash,
+  attemptedAt: IsoDateSchema,
+}).strict().refine((a) => a.transport === (a.mode === "production" ? "native-https" : "contract-fixture"), { message: "生产尝试与传输命名空间不一致" });
+export type ProductionImageAttempt = z.infer<typeof ProductionImageAttemptSchema>;
+export const ProductionImageRawResponseSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]), kind: z.literal("returned"),
+  id: z.string().regex(/^production-image-response:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/),
+  attemptId: ProductionEvidenceAttemptId, attemptFingerprint: ProductionEvidenceHash, intentFingerprint: ProductionEvidenceHash,
+  executionFingerprint: ProductionEvidenceHash, protocol: z.enum(["openai", "openai-compatible", "google"]),
+  outcome: ImageProviderOutcomeSchema,
+  status: z.number().int().min(100).max(599), contentType: z.string().regex(/^[\x20-\x7e]{1,256}$/),
+  requestId: z.string().regex(/^[A-Za-z0-9_.:-]{1,160}$/).optional(),
+  bodyChecksumSha256: ProductionEvidenceHash, bodyByteSize: z.number().int().nonnegative().max(32 * 1024 * 1024),
+  receivedAt: IsoDateSchema,
+}).strict().superRefine((r, ctx) => {
+  if (!ProductionEvidenceJob.safeParse(r.outcome.jobId).success
+    || r.outcome.billing.state !== "unknown" || !["absent", "invalid", "pending-validation"].includes(r.outcome.artifactStatus)) ctx.addIssue({ code: "custom", message: "原始生产响应不能声明已验证资产或费用" });
+});
+export type ProductionImageRawResponse = z.infer<typeof ProductionImageRawResponseSchema>;
 
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,
