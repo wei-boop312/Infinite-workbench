@@ -89,7 +89,7 @@ const ERROR_LABELS: Record<string, string> = {
   generated_asset_unavailable: "结果证据无法完整核验；未重新生成或改变费用。",
 };
 
-export function money(minor: number): string { return `¥${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`; }
+export function money(minor: number | null): string { return minor === null ? "估价未知" : `¥${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`; }
 
 export function parseMoney(value: string): number {
   if (!/^\d+(\.\d{1,2})?$/.test(value.trim())) throw new Error("金额需要是非负数字，最多两位小数。");

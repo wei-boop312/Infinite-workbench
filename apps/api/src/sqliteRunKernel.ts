@@ -17,6 +17,7 @@ export class SqliteRunKernel implements RunKernelPort {
   registerLocalProject(budget: ProjectBudgetConfig): void { this.run((kernel) => kernel.registerLocalProject(budget)); }
   createBatch: RunKernelPort["createBatch"] = (...args) => this.run((kernel) => kernel.createBatch(...args));
   stageConfirmedImageBatch: InMemoryRunKernel["stageConfirmedImageBatch"] = (...args) => this.run((kernel) => kernel.stageConfirmedImageBatch(...args));
+  stageConfirmedProductionImageBatch: InMemoryRunKernel["stageConfirmedProductionImageBatch"] = (...args) => this.run((kernel) => kernel.stageConfirmedProductionImageBatch(...args));
   claimImageBatch: InMemoryRunKernel["claimImageBatch"] = (...args) => this.run((kernel) => kernel.claimImageBatch(...args));
   startImageJob: InMemoryRunKernel["startImageJob"] = (...args) => this.run((kernel) => kernel.startImageJob(...args));
   inspectImageLease: InMemoryRunKernel["inspectImageLease"] = (...args) => this.run((kernel) => kernel.inspectImageLease(...args));
@@ -85,6 +86,11 @@ export class SqliteRunKernel implements RunKernelPort {
         let snapshot = this.options.stateStore.load();
         for (const stored of snapshot?.batches ?? []) {
           const batch = stored.aggregate.batch, result = stored.imageFixtureResult;
+          if (stored.productionImageExecution) {
+            const e = stored.productionImageExecution;
+            const preparation = this.options.stateStore.loadProductionImagePreparation(batch.tenantId, batch.projectId, e.mode, e.preparation.id);
+            if (!preparation || imageSnapshotFingerprint(preparation) !== imageSnapshotFingerprint(e.preparation)) throw new Error("生产任务原准备缺失或不一致");
+          }
           if (!stored.imageFixtureAttempt && !result) continue;
           const response = this.options.stateStore.loadImageFixtureResponse(batch.tenantId, batch.projectId, stored.aggregate.jobs[0].id);
           if (result?.kind === "returned" ? !response || JSON.stringify(response.record) !== JSON.stringify(result) : response !== null) throw new Error("本地响应正文与任务证据不一致");

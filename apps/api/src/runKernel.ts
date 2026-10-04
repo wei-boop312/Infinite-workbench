@@ -14,6 +14,7 @@ import {
   type ImageFixtureAttempt, type ImageFixtureResult,
   type ImageDispatchIntent,
   type ConfirmedImageExecution,
+  type ConfirmedProductionImageExecution,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -34,6 +35,7 @@ import {
   type RunKernelSnapshot,
 } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
+import { assertProductionConfirmation, productionConfirmationKey } from "./productionImageConfirmationIntegrity";
 import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
 export type RunPrincipal = {
@@ -114,6 +116,7 @@ type BudgetState = ProjectBudgetConfig & {
 
 type StoredBatch = {
   aggregate: RunBatchAggregate;
+  productionImageExecution?: ConfirmedProductionImageExecution;
   imageExecution?: ConfirmedImageExecution;
   imageDispatchIntent?: ImageDispatchIntent;
   imageDispatchIntentFingerprint?: string;
@@ -140,6 +143,8 @@ export type RunKernelOptions = {
   // Internal snapshot validation only: no lease recovery, status rewrite or save.
   restoreValidationOnly?: boolean;
   validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
+  // Service-owned ephemeral confirmation proof; default closed. Not send authority.
+  validateProductionImageConfirmation?: (principal: RunPrincipal, execution: ConfirmedProductionImageExecution) => boolean;
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
   validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent, additionalMetadataBytes?: number) => undefined;
@@ -445,6 +450,67 @@ export class InMemoryRunKernel implements RunKernelPort {
     this.assertStateConsistent();
     this.persist();
     return this.copy(aggregate);
+  }
+
+  stageConfirmedProductionImageBatch(principal: RunPrincipal, input: ConfirmedProductionImageExecution): RunBatchAggregate {
+    if (typeof this.options.validateProductionImageConfirmation !== "function") throw new RunKernelError(503, "production_image_confirmation_not_configured", "生产确认政策尚未配置");
+    const e = assertProductionConfirmation(input), r = e.protocol.request, q = r.quote;
+    for (const permission of ["run:create", "run:confirm", "run:read"] as const) {
+      const allowed = this.options.authorizer.allows(principal, r.projectId, permission);
+      if (allowed !== true) {
+        void Promise.resolve(allowed).catch(() => undefined);
+        throw new RunKernelError(403, "production_image_permission_denied", "生产确认权限不足");
+      }
+    }
+    if (principal.tenantId !== r.tenantId || principal.actorId !== e.confirmedBy) throw new RunKernelError(403, "production_image_permission_denied", "生产确认身份不匹配");
+    const fingerprint = imageSnapshotFingerprint(e), idempotencyKey = productionConfirmationKey(e);
+    const indexKey = `${scopedProjectKey(r.tenantId, r.projectId)}\u0000${idempotencyKey}`;
+    const previous = this.idempotencyIndex.get(indexKey);
+    if (previous) {
+      const stored = this.batches.get(previous)!;
+      if (stored.requestFingerprint !== fingerprint) throw new RunKernelError(409, "production_image_confirmation_conflict", "准备单已有不同确认");
+      return this.copy(stored.aggregate);
+    }
+    const policy = () => {
+      const value = this.options.validateProductionImageConfirmation!(principal, structuredClone(e));
+      if (value !== true) {
+        void Promise.resolve(value).catch(() => undefined);
+        throw new RunKernelError(403, "production_image_confirmation_proof_required", "需要实际服务端确认准备证据");
+      }
+    };
+    policy();
+    if (this.batches.has(e.batchId) || [...this.batches.values()].some((item) => item.aggregate.jobs.some((j) => j.id === r.jobId || j.idempotencyKey === r.idempotencyKey))) throw new RunKernelError(409, "production_image_identity_conflict", "生产任务身份冲突");
+    const budget = this.requireBudget(r.tenantId, r.projectId);
+    if (budget.currency !== q.currency) throw new RunKernelError(422, "budget_currency_mismatch", "确认币种与预算不一致");
+    if (budget.limitMinor - budget.spentMinor - budget.reservedMinor < q.maxCostMinor) throw new RunKernelError(422, "project_budget_exceeded", "预算不足以覆盖确认上限");
+    const ids = r.operation === "edit" ? [...r.inputs.map((ref) => ref.assetId), ...(r.mask ? [r.mask.assetId] : [])] : [];
+    const estimate = q.source === "manual-budget" ? null : q.estimatedCostMinor;
+    const batch: RunBatch = { id: e.batchId, tenantId: r.tenantId, projectId: r.projectId, imageMode: e.mode,
+      constraintSnapshotId: r.constraintSnapshotId, tool: r.operation === "edit" ? "image-edit" : "image-generate", adapterId: r.adapterId,
+      inputAssetIds: ids, idempotencyKey, status: "queued", expectedOutputs: 1, estimatedCostMinor: estimate, maxCostMinor: q.maxCostMinor,
+      currency: q.currency, createdAt: e.confirmedAt, confirmedAt: e.confirmedAt, confirmedBy: e.confirmedBy };
+    const job: RunJob = { id: r.jobId, batchId: batch.id, imageMode: e.mode, outputIndex: 0, attempt: 1, executorKind: "provider",
+      adapterId: r.adapterId, idempotencyKey: r.idempotencyKey, status: "queued", inputAssetIds: ids, outputAssetIds: [], estimatedCostMinor: estimate, createdAt: e.confirmedAt };
+    const aggregate = RunBatchAggregateSchema.parse({ batch, jobs: [job], billingOverages: [], ledger: [{
+      id: `ledger-${randomUUID()}`, tenantId: r.tenantId, projectId: r.projectId, batchId: batch.id, jobId: job.id, imageMode: e.mode,
+      currency: q.currency, estimatedMinor: estimate, reservedMinor: q.maxCostMinor, settlement: "reserved", createdAt: e.confirmedAt }],
+      audit: [this.audit(batch, e.confirmedBy, "batch-created", { mode: e.mode, preparationId: e.preparation.id }),
+        this.audit(batch, e.confirmedBy, "batch-confirmed", { mode: e.mode, preparationFingerprint: e.preparation.snapshotFingerprint,
+          pricingFingerprint: e.protocol.pricingFingerprint, executionFingerprint: fingerprint, requestFingerprint: e.protocol.requestFingerprint,
+          payloadChecksumSha256: e.protocol.payloadChecksumSha256 }),
+        this.audit(batch, e.confirmedBy, "budget-reserved", { reservedMinor: String(q.maxCostMinor) }),
+        this.audit(batch, e.confirmedBy, "jobs-created", { count: "1" })] });
+    const before = budget.reservedMinor;
+    try {
+      budget.reservedMinor += q.maxCostMinor;
+      this.batches.set(batch.id, { aggregate, productionImageExecution: e, requestFingerprint: fingerprint, reservedMinor: q.maxCostMinor,
+        actualMinor: 0, jobReservations: new Map([[job.id, q.maxCostMinor]]), jobScenarios: new Map() });
+      this.idempotencyIndex.set(indexKey, batch.id);
+      this.assertStateConsistent(); policy(); this.persist();
+      return this.copy(aggregate);
+    } catch (error) {
+      budget.reservedMinor = before; this.batches.delete(batch.id); this.idempotencyIndex.delete(indexKey); throw error;
+    }
   }
 
   confirmBatch(principal: RunPrincipal, batchId: string, confirmation: ConfirmRunBatchRequest): RunBatchAggregate {
@@ -1194,13 +1260,16 @@ export class InMemoryRunKernel implements RunKernelPort {
         projectId: batch.projectId,
         batchId: batch.id,
         currency: batch.currency,
-        estimatedMinor: releasable,
+        estimatedMinor: batch.imageMode ? batch.estimatedCostMinor : releasable,
+        ...(batch.imageMode ? { imageMode: batch.imageMode } : {}),
         reservedMinor: 0,
         actualMinor: 0,
         settlement: "released",
         createdAt: now,
       });
     }
+    // A zero cap still has a reservation relationship, which cancellation clears.
+    stored.jobReservations.clear();
     aggregate.batch = { ...batch, status: "cancelled" };
     aggregate.jobs = aggregate.jobs.map((job) => ["queued", "leased", "running"].includes(job.status)
       ? { ...job, status: "cancelled", finishedAt: now }
@@ -1253,6 +1322,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (restoredBatches.has(batch.id)) throw new Error("任务内核快照包含重复批次");
       const stored: StoredBatch = {
         aggregate,
+        productionImageExecution: serialized.productionImageExecution,
         imageExecution: serialized.imageExecution,
         imageDispatchIntent: serialized.imageDispatchIntent,
         imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
@@ -1333,6 +1403,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       budgets: [...this.budgets.values()].map((budget) => ({ ...budget })),
       batches: [...this.batches.values()].map((stored) => ({
         aggregate: this.copy(stored.aggregate),
+        ...(stored.productionImageExecution ? { productionImageExecution: stored.productionImageExecution } : {}),
         ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
         ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
         ...(stored.imageFixtureAttempt ? { imageFixtureAttempt: stored.imageFixtureAttempt, imageFixtureAttemptFingerprint: stored.imageFixtureAttemptFingerprint } : {}),
@@ -1353,16 +1424,20 @@ export class InMemoryRunKernel implements RunKernelPort {
     const reservedByProject = new Map<string, number>();
     const spentByProject = new Map<string, number>();
     const globalJobIds = new Set<string>();
+    const executionKeys = new Set<string>();
     for (const stored of this.batches.values()) {
       const { batch, jobs } = stored.aggregate;
       const budgetKey = scopedProjectKey(batch.tenantId, batch.projectId);
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
+        if (batch.imageMode || stored.productionImageExecution || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
+      } else if (stored.productionImageExecution) {
+        this.assertProductionState(stored);
       } else {
+        if (batch.imageMode) throw new Error("生产任务缺少独立完整确认");
         const execution = stored.imageExecution;
         if (!execution) throw new Error("图片任务缺少服务端确认快照");
         this.assertFrozenImageExecution(execution);
@@ -1442,6 +1517,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         }
       }
       for (const job of jobs) {
+        if (executionKeys.has(job.idempotencyKey) && (job.imageMode || job.idempotencyKey.startsWith("production-image-execution-"))) throw new Error("生产执行幂等键重复");
+        executionKeys.add(job.idempotencyKey);
         if (globalJobIds.has(job.id) || job.batchId !== batch.id) throw new Error("任务内核快照中的任务归属无效");
         globalJobIds.add(job.id);
         if (job.executorKind === "mock" && !stored.jobScenarios.has(job.id)) throw new Error("任务内核快照缺少任务执行场景");
@@ -1496,6 +1573,52 @@ export class InMemoryRunKernel implements RunKernelPort {
         throw new Error("任务内核快照中的项目金额不守恒");
       }
     }
+  }
+
+  private assertProductionState(stored: StoredBatch): void {
+    const e = assertProductionConfirmation(stored.productionImageExecution), r = e.protocol.request, q = r.quote;
+    const { batch: b, jobs, ledger, audit, billingOverages } = stored.aggregate, j = jobs[0];
+    const estimate = q.source === "manual-budget" ? null : q.estimatedCostMinor;
+    const ids = r.operation === "edit" ? [...r.inputs.map((ref) => ref.assetId), ...(r.mask ? [r.mask.assetId] : [])] : [];
+    const legacy = [stored.imageExecution, stored.imageDispatchIntent, stored.imageDispatchIntentFingerprint, stored.imageFixtureAttempt,
+      stored.imageFixtureAttemptFingerprint, stored.imageFixtureResult, stored.imageFixtureResultFingerprint, stored.imageTaskArtifact,
+      stored.imageTaskArtifactFingerprint, stored.imageTaskArtifactFailures];
+    if (legacy.some((value) => value !== undefined) || stored.requestFingerprint !== imageSnapshotFingerprint(e) || stored.jobScenarios.size
+      || billingOverages.length || stored.actualMinor !== 0 || b.id !== e.batchId || b.imageMode !== e.mode
+      || b.tenantId !== r.tenantId || b.projectId !== r.projectId || b.constraintSnapshotId !== r.constraintSnapshotId
+      || b.adapterId !== r.adapterId || b.tool !== (r.operation === "edit" ? "image-edit" : "image-generate")
+      || b.idempotencyKey !== productionConfirmationKey(e) || b.confirmedBy !== e.confirmedBy || b.confirmedAt !== e.confirmedAt
+      || b.createdAt !== e.confirmedAt || b.expectedOutputs !== 1 || b.estimatedCostMinor !== estimate || b.maxCostMinor !== q.maxCostMinor
+      || b.currency !== q.currency || jobs.length !== 1 || !j || j.id !== r.jobId || j.imageMode !== e.mode || j.batchId !== b.id
+      || j.idempotencyKey !== r.idempotencyKey || j.executorKind !== "provider" || j.adapterId !== r.adapterId || j.estimatedCostMinor !== estimate
+      || j.outputIndex !== 0 || j.attempt !== 1 || j.createdAt !== e.confirmedAt || j.outputAssetIds.length || j.status !== b.status
+      || JSON.stringify(b.inputAssetIds) !== JSON.stringify(ids) || JSON.stringify(j.inputAssetIds) !== JSON.stringify(ids)
+      || [j.providerRequestId, j.retryOf, j.leaseId, j.leaseOwnerId, j.leasedAt, j.leaseExpiresAt, j.startedAt, j.actualCostMinor, j.failureCode,
+        j.billingResolutionId, j.billingResolvedAt, j.billingResolvedBy, j.billingEvidenceRef].some((v) => v !== undefined)
+      || (b.status === "queued" ? j.finishedAt !== undefined || stored.jobReservations.get(j.id) !== q.maxCostMinor
+        : b.status !== "cancelled" || !j.finishedAt || Date.parse(j.finishedAt) < Date.parse(e.confirmedAt) || stored.jobReservations.size !== 0)) throw new Error("生产任务确认或关闭执行状态不一致");
+    const reservation = ledger[0], releases = ledger.slice(1), releaseNeeded = b.status === "cancelled" && q.maxCostMinor > 0;
+    if (!reservation || reservation.jobId !== j.id || reservation.settlement !== "reserved" || reservation.reservedMinor !== q.maxCostMinor
+      || reservation.estimatedMinor !== estimate || reservation.actualMinor !== undefined || reservation.createdAt !== e.confirmedAt
+      || new Set(ledger.map((l) => l.id)).size !== ledger.length
+      || ledger.some((l) => l.tenantId !== b.tenantId || l.projectId !== b.projectId || l.batchId !== b.id || l.imageMode !== e.mode || l.currency !== b.currency)
+      || releases.length !== (releaseNeeded ? 1 : 0)
+      || releases.some((l) => l.settlement !== "released" || l.reservedMinor !== 0 || l.actualMinor !== 0 || l.estimatedMinor !== estimate || l.jobId !== undefined || l.createdAt !== j.finishedAt)) throw new Error("生产账本与估价/上限不一致");
+    const expected = { "batch-created": { mode: e.mode, preparationId: e.preparation.id },
+      "batch-confirmed": { mode: e.mode, preparationFingerprint: e.preparation.snapshotFingerprint, pricingFingerprint: e.protocol.pricingFingerprint,
+        executionFingerprint: stored.requestFingerprint, requestFingerprint: e.protocol.requestFingerprint, payloadChecksumSha256: e.protocol.payloadChecksumSha256 },
+      "budget-reserved": { reservedMinor: String(q.maxCostMinor) }, "jobs-created": { count: "1" } };
+    for (const [type, metadata] of Object.entries(expected)) {
+      const events = audit.filter((a) => a.eventType === type);
+      if (events.length !== 1 || events[0].actorId !== e.confirmedBy || imageSnapshotFingerprint(events[0].metadata) !== imageSnapshotFingerprint(metadata)
+        || Date.parse(events[0].createdAt) < Date.parse(e.confirmedAt) || Date.parse(events[0].createdAt) >= Date.parse(q.expiresAt)) throw new Error("生产确认审计不一致");
+    }
+    const cancelled = audit.filter((a) => a.eventType === "batch-cancelled"), released = audit.filter((a) => a.eventType === "budget-released");
+    if (cancelled.length !== (b.status === "cancelled" ? 1 : 0) || released.length !== (releaseNeeded ? 1 : 0)
+      || cancelled.some((a) => a.createdAt !== j.finishedAt || a.metadata.previousStatus !== "queued")
+      || released.some((a) => a.createdAt !== j.finishedAt || a.metadata.releasedMinor !== String(q.maxCostMinor))
+      || audit.length !== 4 + cancelled.length + released.length || new Set(audit.map((a) => a.id)).size !== audit.length
+      || audit.some((a) => a.tenantId !== b.tenantId || a.projectId !== b.projectId || a.batchId !== b.id)) throw new Error("生产取消审计不一致");
   }
 
   private recoverExpiredLeases(actorId: string): boolean {
@@ -1738,10 +1861,11 @@ export class InMemoryRunKernel implements RunKernelPort {
     });
   }
 
-  private assertMockBatch(batch: RunBatch): void {
-    if (batch.tool !== "product-retouch") throw new RunKernelError(409, "image_execution_not_configured", "图片任务不能通过旧模拟执行入口处理");
+  private assertMockBatch(batch: RunBatch): asserts batch is RunBatch & { estimatedCostMinor: number } {
+    if (batch.tool !== "product-retouch" || batch.imageMode || batch.estimatedCostMinor === null) throw new RunKernelError(409, "image_execution_not_configured", "图片任务不能通过旧模拟执行入口处理");
   }
   private requireImageExecution(stored: StoredBatch): ConfirmedImageExecution {
+    if (stored.productionImageExecution || stored.aggregate.batch.imageMode) throw new RunKernelError(503, "production_image_execution_not_configured", "生产任务领取与发送尚未启用");
     if (!stored.imageExecution || stored.aggregate.batch.tool === "product-retouch") throw new RunKernelError(422, "image_task_required", "需要已确认的图片任务");
     if (typeof this.options.validateImageTask !== "function") throw new RunKernelError(503, "image_lease_policy_not_configured", "尚未配置可信图片租约政策");
     return stored.imageExecution;

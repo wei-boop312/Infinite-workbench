@@ -4,7 +4,7 @@
 
 当前对话已经创建应用内 heartbeat 自动续做，ID 为 `automation`，每 10 分钟接续当前对话；不是独立 cron 项目，也不创建新的聊天。电脑需保持开机、应用保持运行。
 
-2026-10-04 最新本地验收为阶段4的 **6D2A 独立期待金额/摘要合同及发送前纯协议准备**，836 项单元/集成（42 文件）、93 项 Chrome、6 个工作区构建通过；6D2 整体和真实生成未完成。11:00 周已用68%/剩余32%，高于20%停止线，原自动续做保持 ACTIVE，下一步 **6D2B 独立完整人工确认与同库统一预算/实际任务快照**，随后生产租约/发送响应证据/产物与费用分步。6D2A构造三协议实际JSON/表单/原生负载及原图转换摘要，但snapshot仍unconfirmed/execfalse/realfalse；候选编号不是实际任务，无当前价格/权限/目录查询或预算预留，原准备不改写。manual-budget估价明确未知，不补0或上限；旧任务/账本合同暂不扩展。SQLite v6及ICRD凭证库不变。只自有假价格/随机材料/临时存储，不读取私人密钥或创建生产根钥匙/打开发送。6A–6C不是生产保险库/实际任务授权，回环夹具不是生产网络/SSRF全验收。完整边界见 `production-image-protocol.md`、`production-image-preparations.md`、`encrypted-image-credentials.md`、`native-image-network.md`、`image-egress-contract.md`、`phase4-provider-plan.md` 和 outputs 最新记录。
+2026-10-04 最新本地验收为阶段4的 **6D2B独立完整人工确认与同库统一预算/实际任务快照**，6D2 A/B底座完成；完整912项单元/集成（43文件）、94项Chrome、6构建通过。最终容量守卫76项定向/API构建复验通过。11:35周已用71%/剩余29%，高于20%停止线，原自动续做保持ACTIVE，下一步 **6D3默认关闭的独立生产租约/权威输入重建**，随后持久化发送响应、凭证guard/原生网络、产物与未知费用分步。三协议完整确认、实际编号/独立key/上限预留同一SQLite事务保存；unknown估价在独立生产模式为null，旧mock/local仍拒绝null。原准备unconfirmed/not-run，独立确认confirmed-not-dispatchable/execfalse/realfalse；queued/cancelled生产任务拒绝旧执行/租约/重试/自动结算，zero-cap取消守恒；历史只读不重建/verify/预留。无生产HTTP/确认UI/执行器，SQLite v6/ICRD不变。只自有假价格/临时存储与4173验证，不读取私人钥匙或创建生产根/打开发送，6D2不是实际供应商价格/网络/计费验收。边界见 `production-image-confirmations.md` 及原协议/安全文档和outputs最新记录；真实供应商/模型/金额/根与凭证配置及最低成本请求仍需用户另授权。
 
 ## 执行规则
 

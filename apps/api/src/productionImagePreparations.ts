@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { CreateImagePreparationSchema, FixtureProductionImagePricingSchema, ProductionImageExecutionRequestSchema, ProductionImagePreparationRecordSchema, ProductionImageRequestDraftSchema,
+import { ConfirmProductionImagePreparationSchema, ConfirmedProductionImageExecutionSchema, CreateImagePreparationSchema, FixtureProductionImagePricingSchema, ProductionImageExecutionRequestSchema, ProductionImagePreparationRecordSchema, ProductionImageRequestDraftSchema,
+  type ConfirmedProductionImageExecution, type ConfirmProductionImagePreparation,
   ProductionImagePricingSchema, type CreateImagePreparation, type ProductionImagePreparationRecord, type ProductionImagePriceScope,
   type ProductionImageRequestDraft, type ConstraintSnapshot, type ImageProviderConnection } from "@canvas/contracts";
 import { imageProviderPublicView, imageSnapshotFingerprint, validateProductionImageProviderRequest } from "./imageProviderContract";
@@ -8,13 +9,17 @@ import { assetMetadataFingerprint } from "./verifiedAssets";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 import type { ImageProviderAuthorizer } from "./imageProviders";
 import type { ObjectStorageAuthorizer } from "./objectStorageGateway";
-import { RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
+import { InMemoryRunKernel, RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore } from "./sqliteRunKernelStore";
+import type { SqliteRunKernel } from "./sqliteRunKernel";
+import { prepareProductionImageProtocol, validateProductionImageConfirmationExpectations } from "./productionImageProtocol";
+import { assertProductionConfirmation } from "./productionImageConfirmationIntegrity";
+import { createHash } from "node:crypto";
 
 export interface ImagePriceContext {
   scope: ProductionImagePriceScope; connection: ImageProviderConnection;
   selection: CreateImagePreparation; requestDraft: ProductionImageRequestDraft; constraint: ConstraintSnapshot;
-  requestedAt: string;
+  requestedAt: string; validationAt?: string; purpose?: "prepare" | "confirm";
 }
 interface PricePort {
   // Trusted server ports, not caller-supplied scripts or a sandbox.
@@ -27,6 +32,7 @@ interface BaseOptions {
   preparationEnabled: true; tenantId: string; stateStore: SqliteRunKernelStateStore;
   authorizer: ImageProviderAuthorizer; runAuthorizer: RunAuthorizer; assetAuthorizer: ObjectStorageAuthorizer;
   clock?: () => number; maxMetadataBytes?: number;
+  runKernel?: Pick<SqliteRunKernel, "usesStateStore" | "stageConfirmedProductionImageBatch">;
 }
 type Options = BaseOptions & { pricePort: ProductionImagePricePort | FixtureProductionImagePricePort };
 type Mode = ProductionImagePreparationRecord["mode"];
@@ -51,14 +57,17 @@ function view(r: ProductionImagePreparationRecord) {
     connection: imageProviderPublicView(r.connection), requestDraft: r.requestDraft, constraint: r.constraint, pricing: r.pricing };
 }
 
-// No HTTP route, live inquiry, credential port, task creation or executor.
+let activeConfirmations = 0;
+// No HTTP route, live inquiry, credential port, network or executor.
 class PreparationCore {
+  private readonly pending = new Map<string, string>();
   constructor(private readonly mode: Mode, private readonly options?: Options) {
     if (options) {
       const limit = options.maxMetadataBytes ?? 16 * 1024 * 1024;
       if (!options.tenantId.trim() || options.tenantId !== options.tenantId.trim() || options.tenantId.length > 160
         || !Number.isSafeInteger(limit) || limit < 0 || limit > 16 * 1024 * 1024) reject("production_image_configuration_invalid");
       this.config();
+      if (options.runKernel && !options.runKernel.usesStateStore(options.stateStore)) reject("production_image_shared_store_required", 503);
     }
   }
   private config(): Options {
@@ -197,6 +206,148 @@ class PreparationCore {
       this.permit(principal, projectId, false, record.requestDraft.operation === "edit");
       return view(record);
     });
+  }
+
+  private confirmationPermit(p: RunPrincipal, project: string, write: boolean): void {
+    const o = this.config();
+    this.permit(p, project, write, true);
+    if (sync(() => o.runAuthorizer.allows(p, project, "run:read")) !== true
+      || (write && sync(() => o.runAuthorizer.allows(p, project, "run:confirm")) !== true)) reject("production_image_permission_denied", 403);
+  }
+  private loadConfirmation(p: RunPrincipal, record: ProductionImagePreparationRecord) {
+    const o = this.config(), snapshot = o.stateStore.load();
+    if (!snapshot) reject("production_image_task_snapshot_missing", 503);
+    InMemoryRunKernel.assertSnapshot(snapshot); // No task recovery/save or lease mutation.
+    for (const item of snapshot.batches) {
+      const e = item.productionImageExecution;
+      if (e && e.preparation.tenantId === record.tenantId && e.preparation.projectId === record.projectId) {
+        const original = o.stateStore.loadProductionImagePreparation(e.preparation.tenantId, e.preparation.projectId, e.mode, e.preparation.id);
+        if (!original || imageSnapshotFingerprint(original) !== imageSnapshotFingerprint(e.preparation)) reject("production_image_confirmation_corrupt", 503);
+      }
+    }
+    const stored = snapshot.batches.find((item) => item.productionImageExecution?.mode === record.mode && item.productionImageExecution.preparation.id === record.id);
+    if (!stored) return null;
+    const e = assertProductionConfirmation(stored.productionImageExecution);
+    if (imageSnapshotFingerprint(e.preparation) !== imageSnapshotFingerprint(record)) reject("production_image_confirmation_corrupt", 503);
+    this.confirmationPermit(p, record.projectId, false);
+    return { mode: e.mode, executionState: e.executionState, executionAuthorized: false as const, realExecutionEnabled: false as const,
+      protocolPreparation: "prepared" as const, preparationId: record.id, preparationFingerprint: record.snapshotFingerprint,
+      pricingFingerprint: e.protocol.pricingFingerprint, executionFingerprint: stored.requestFingerprint,
+      requestFingerprint: e.protocol.requestFingerprint, payloadChecksumSha256: e.protocol.payloadChecksumSha256,
+      payloadByteSize: e.protocol.payloadByteSize, contentType: e.protocol.contentType, transformedInputs: structuredClone(e.protocol.transformedInputs),
+      confirmedBy: e.confirmedBy, confirmedAt: e.confirmedAt, pricing: structuredClone(record.pricing), aggregate: structuredClone(stored.aggregate) };
+  }
+  private currentConfirmation(p: RunPrincipal, record: ProductionImagePreparationRecord, extraBytes = 0): void {
+    const o = this.config();
+    const check = () => {
+      this.confirmationPermit(p, record.projectId, true);
+      const fresh = o.stateStore.loadProductionImagePreparation(p.tenantId, record.projectId, this.mode, record.id);
+      if (!fresh || imageSnapshotFingerprint(fresh) !== imageSnapshotFingerprint(record)) reject("production_image_preparation_changed");
+      if (p.actorId !== record.createdBy || imageSnapshotFingerprint(this.current(p.tenantId, record.projectId, record.connection.id)) !== imageSnapshotFingerprint(record.connection)) reject("production_image_connection_changed");
+      const now = this.now();
+      if (Date.parse(now) < Date.parse(record.createdAt) || Date.parse(now) >= Date.parse(record.pricing.quote.expiresAt)) reject("production_image_price_expired");
+      const request = ProductionImageExecutionRequestSchema.parse({ ...record.requestDraft, jobId: "production-static-validation-only", idempotencyKey: "not-an-execution", quote: record.pricing.quote });
+      validateProductionImageProviderRequest(record.connection, request, now);
+      validateProductionImageAssetPolicy(o.stateStore, request);
+      const budget = o.stateStore.load()?.budgets.find((b) => b.tenantId === p.tenantId && b.projectId === record.projectId);
+      if (!budget || budget.currency !== record.pricing.quote.currency) reject("production_image_budget_currency_mismatch");
+      const used = o.stateStore.imageMetadataBytes(p.tenantId, record.projectId) + imageTaskMetadataBytes(o.stateStore.load(), p.tenantId, record.projectId);
+      if (used + extraBytes > (o.maxMetadataBytes ?? 16 * 1024 * 1024)) reject("production_image_metadata_full", 413);
+    };
+    check();
+    const context: ImagePriceContext = { scope: record.pricing.scope, connection: record.connection, selection: record.selection,
+      requestDraft: record.requestDraft, constraint: record.constraint, requestedAt: record.createdAt, validationAt: this.now(), purpose: "confirm" };
+    if (sync(() => o.pricePort.verify(structuredClone(context), structuredClone(record.pricing))) !== true) reject("production_image_price_not_verified");
+    check(); // A trusted oracle may change time, permissions or state.
+  }
+  // Only the live service continuation can supply this ephemeral proof. A
+  // persisted "confirmed" label is never a new creation or send authorization.
+  readonly authorizeConfirmation = (p: RunPrincipal, e: ConfirmedProductionImageExecution): boolean => {
+    const hash = imageSnapshotFingerprint(e);
+    if (this.pending.get(hash) !== `${p.tenantId}\u0000${p.actorId}` || e.mode !== this.mode || e.confirmedBy !== p.actorId) return false;
+    assertProductionConfirmation(e);
+    this.currentConfirmation(p, e.preparation);
+    if (Date.parse(this.now()) < Date.parse(e.confirmedAt)) reject("production_image_clock_invalid");
+    return true;
+  };
+  getConfirmation(p: RunPrincipal, projectId: string, id: string) {
+    return this.database(() => {
+      this.confirmationPermit(p, projectId, false);
+      const record = this.config().stateStore.loadProductionImagePreparation(p.tenantId, projectId, this.mode, id);
+      if (!record) reject("production_image_preparation_not_found", 404);
+      this.assertHistory(record);
+      return this.loadConfirmation(p, record);
+    });
+  }
+  async confirmPreparation(p: RunPrincipal, projectId: string, id: string, input: unknown) {
+    const o = this.config();
+    if (!o.runKernel || !o.runKernel.usesStateStore(o.stateStore)) reject("production_image_confirmation_not_configured", 503);
+    let expected: ConfirmProductionImagePreparation;
+    try { expected = ConfirmProductionImagePreparationSchema.parse(input); } catch { reject("production_image_confirmation_invalid"); }
+    const initial = this.database(() => {
+      this.confirmationPermit(p, projectId, true);
+      const record = o.stateStore.loadProductionImagePreparation(p.tenantId, projectId, this.mode, id);
+      if (!record) reject("production_image_preparation_not_found", 404);
+      this.assertHistory(record);
+      if (record.createdBy !== p.actorId) reject("production_image_permission_denied", 403);
+      validateProductionImageConfirmationExpectations(record, expected);
+      const history = this.loadConfirmation(p, record);
+      if (!history) this.currentConfirmation(p, record);
+      return { record, history };
+    });
+    if (initial.history) return initial.history;
+    if (activeConfirmations >= 2) reject("production_image_confirmation_busy", 429);
+    activeConfirmations += 1;
+    const images: NonNullable<ReturnType<SqliteRunKernelStateStore["loadVerifiedImageBytes"]>>[] = [];
+    let wireBody: Buffer | undefined;
+    try {
+      const { record } = initial;
+      // Explicit permissions and authoritative checks before touching originals.
+      this.database(() => {
+        this.currentConfirmation(p, record);
+        const refs = record.requestDraft.operation === "edit" ? [...record.requestDraft.inputs, ...(record.requestDraft.mask ? [record.requestDraft.mask] : [])] : [];
+        if (refs.reduce((total, ref) => total + ref.byteSize, 0) > 64 * 1024 * 1024) reject("production_image_inputs_too_large", 413);
+        for (const ref of refs) {
+          const image = o.stateStore.loadVerifiedImageBytes(p.tenantId, projectId, ref.assetId);
+          if (!image) reject("production_image_input_not_verified");
+          images.push(image);
+        }
+        this.currentConfirmation(p, record);
+      });
+      const prepared = await prepareProductionImageProtocol(record, expected, {
+        jobId: `production-image-job-${randomUUID()}`, idempotencyKey: `production-image-execution-${randomUUID()}` }, images, this.now());
+      wireBody = prepared.wire.body;
+      return this.database(() => {
+        this.confirmationPermit(p, projectId, true);
+        const history = this.loadConfirmation(p, record);
+        if (history) return history; // Concurrent winner, never a second reservation.
+        this.currentConfirmation(p, record);
+        const e = ConfirmedProductionImageExecutionSchema.parse({ schemaVersion: 1, mode: this.mode,
+          batchId: `production-image-batch-${randomUUID()}`, executionState: "confirmed-not-dispatchable", executionAuthorized: false,
+          realExecutionEnabled: false, preparation: record, protocol: prepared.snapshot, confirmedBy: p.actorId, confirmedAt: this.now() });
+        assertProductionConfirmation(e);
+        if (createHash("sha256").update(wireBody!).digest("hex") !== e.protocol.payloadChecksumSha256
+          || wireBody!.byteLength !== e.protocol.payloadByteSize || prepared.wire.contentType !== e.protocol.contentType) reject("production_image_payload_changed");
+        const bytes = Buffer.byteLength(JSON.stringify(e));
+        if (bytes > 512 * 1024) reject("production_image_metadata_full", 413);
+        this.currentConfirmation(p, record, bytes);
+        const hash = imageSnapshotFingerprint(e);
+        this.pending.set(hash, `${p.tenantId}\u0000${p.actorId}`);
+        try { o.runKernel!.stageConfirmedProductionImageBatch(p, e); }
+        finally { this.pending.delete(hash); }
+        this.currentConfirmation(p, record); // Outer transaction also rolls back saved kernel state.
+        if (Date.parse(this.now()) < Date.parse(e.confirmedAt)) reject("production_image_clock_invalid");
+        const result = this.loadConfirmation(p, record);
+        if (!result) reject("production_image_confirmation_corrupt", 503);
+        return result;
+      });
+    } catch (error) {
+      if (error instanceof RunKernelError) throw error;
+      reject("production_image_confirmation_unavailable", 503);
+    } finally {
+      for (const image of images) image.body.fill(0);
+      wireBody?.fill(0); activeConfirmations -= 1;
+    }
   }
 }
 

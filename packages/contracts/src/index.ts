@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
-import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema } from "./productionImagePricing.ts";
+import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
 
 export * from "./imageProviders.ts";
 export * from "./productionImagePricing.ts";
@@ -222,6 +222,26 @@ export const ProductionImagePreparationRecordSchema = z.discriminatedUnion("mode
 });
 export type ProductionImagePreparationRecord = z.infer<typeof ProductionImagePreparationRecordSchema>;
 
+export const ConfirmedProductionImageExecutionSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]), batchId: ProductionImageBatchIdSchema,
+  executionState: z.literal("confirmed-not-dispatchable"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),
+  preparation: ProductionImagePreparationRecordSchema, protocol: PreparedProductionImageProtocolSnapshotSchema,
+  confirmedBy: IdSchema, confirmedAt: IsoDateSchema,
+}).strict().superRefine((e, ctx) => {
+  const p = e.preparation, s = e.protocol, r = s.request;
+  const { jobId: _job, idempotencyKey: _key, quote, ...draft } = r;
+  const refs = r.operation === "edit" ? [...r.inputs, ...(r.mask ? [r.mask] : [])] : [];
+  if (e.mode !== p.mode || e.mode !== s.mode || s.preparationId !== p.id || s.preparationFingerprint !== p.snapshotFingerprint
+    || e.confirmedBy !== p.createdBy || JSON.stringify(draft) !== JSON.stringify(p.requestDraft) || JSON.stringify(quote) !== JSON.stringify(p.pricing.quote)
+    || Date.parse(s.preparedAt) < Date.parse(p.createdAt) || Date.parse(e.confirmedAt) < Date.parse(s.preparedAt)
+    || Date.parse(e.confirmedAt) >= Date.parse(quote.expiresAt) || refs.length !== s.transformedInputs.length
+    || refs.some((ref, i) => { const t = s.transformedInputs[i]; return !t || t.assetId !== ref.assetId || t.originalChecksumSha256 !== ref.checksumSha256
+      || (r.operation === "edit" && ref === r.mask ? t.transform === "exif-srgb-png-v1" : t.transform !== "exif-srgb-png-v1"); })) {
+    ctx.addIssue({ code: "custom", message: "生产确认与原准备/价格/实际协议不一致" });
+  }
+});
+export type ConfirmedProductionImageExecution = z.infer<typeof ConfirmedProductionImageExecutionSchema>;
+
 // Derived from the immutable server record, not the browser's current constraint.
 export const ImagePreparationPublicSchema = z.object({
   id: IdSchema, projectId: IdSchema, status: z.literal("unconfirmed"), executionAuthorized: z.literal(false),
@@ -393,19 +413,22 @@ export const RunBatchSchema = z.object({
   projectId: IdSchema,
   constraintSnapshotId: IdSchema,
   tool: z.enum(["product-retouch", "image-generate", "image-edit"]),
+  imageMode: z.enum(["production", "production-contract-fixture"]).optional(),
   adapterId: IdSchema,
   inputAssetIds: z.array(IdSchema).max(21),
   idempotencyKey: IdSchema,
   mockScenario: z.enum(["success", "slow", "partial-failure", "failed", "billing-unknown"]).optional(),
   status: z.enum(["draft", "awaiting_confirmation", "queued", "running", "partial", "succeeded", "failed", "billing_unknown", "cancelled"]),
   expectedOutputs: z.number().int().positive(),
-  estimatedCostMinor: z.number().int().nonnegative(),
+  estimatedCostMinor: z.number().int().nonnegative().nullable(),
   maxCostMinor: z.number().int().nonnegative(),
   currency: z.string().regex(/^[A-Z]{3}$/),
   confirmedBy: IdSchema.optional(),
   confirmedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
 }).strict().superRefine((batch, context) => {
+  if ((batch.imageMode && (batch.tool === "product-retouch" || !["queued", "cancelled"].includes(batch.status)))
+    || (!batch.imageMode && batch.estimatedCostMinor === null)) context.addIssue({ code: "custom", message: "旧任务不能使用生产命名空间/未知估价，生产执行尚未启用" });
   if (batch.tool === "product-retouch" ? (!batch.mockScenario || !batch.inputAssetIds.length || batch.inputAssetIds.length > 20)
     : (batch.mockScenario !== undefined || batch.expectedOutputs !== 1 || (batch.tool === "image-generate" ? batch.inputAssetIds.length !== 0 : batch.inputAssetIds.length === 0))) {
     context.addIssue({ code: "custom", message: "任务工具与输入或模拟场景不一致" });
@@ -418,13 +441,14 @@ export const RunJobSchema = z.object({
   outputIndex: z.number().int().nonnegative(),
   attempt: z.number().int().positive(),
   executorKind: z.enum(["provider", "mcp", "mock"]),
+  imageMode: z.enum(["production", "production-contract-fixture"]).optional(),
   adapterId: IdSchema,
   idempotencyKey: IdSchema,
   status: z.enum(["queued", "leased", "running", "succeeded", "failed", "timed_out", "cancelled", "billing_unknown"]),
   retryOf: IdSchema.optional(),
   inputAssetIds: z.array(IdSchema),
   outputAssetIds: z.array(IdSchema),
-  estimatedCostMinor: z.number().int().nonnegative(),
+  estimatedCostMinor: z.number().int().nonnegative().nullable(),
   actualCostMinor: z.number().int().nonnegative().optional(),
   providerRequestId: z.string().min(1).optional(),
   leaseId: IdSchema.optional(),
@@ -439,7 +463,8 @@ export const RunJobSchema = z.object({
   startedAt: IsoDateSchema.optional(),
   finishedAt: IsoDateSchema.optional(),
   createdAt: IsoDateSchema,
-}).strict();
+}).strict().refine((job) => job.imageMode ? job.executorKind === "provider" && ["queued", "cancelled"].includes(job.status) : job.estimatedCostMinor !== null,
+  { message: "生产任务命名空间/未知估价或关闭闸门不一致" });
 
 export const ProviderConnectionSchema = z.object({
   id: IdSchema,
@@ -466,14 +491,16 @@ export const CostLedgerSchema = z.object({
   tenantId: IdSchema,
   projectId: IdSchema,
   batchId: IdSchema,
+  imageMode: z.enum(["production", "production-contract-fixture"]).optional(),
   jobId: IdSchema.optional(),
   currency: z.string().regex(/^[A-Z]{3}$/),
-  estimatedMinor: z.number().int().nonnegative(),
+  estimatedMinor: z.number().int().nonnegative().nullable(),
   reservedMinor: z.number().int().nonnegative(),
   actualMinor: z.number().int().nonnegative().optional(),
   settlement: z.enum(["estimated", "reserved", "settled", "released", "unknown"]),
   createdAt: IsoDateSchema,
-}).strict();
+}).strict().refine((entry) => entry.imageMode ? ["reserved", "released"].includes(entry.settlement) : entry.estimatedMinor !== null,
+  { message: "旧账本不能使用未知估价，生产计费未启用" });
 
 export const CreateRunBatchRequestSchema = z.object({
   projectId: IdSchema,
@@ -635,7 +662,8 @@ export const RunBatchAggregateSchema = z.object({
   ledger: z.array(CostLedgerSchema),
   audit: z.array(RunAuditEventSchema),
   billingOverages: z.array(BillingOverageSchema).default([]),
-}).strict();
+}).strict().refine((a) => a.jobs.every((j) => j.imageMode === a.batch.imageMode) && a.ledger.every((l) => l.imageMode === a.batch.imageMode),
+  { message: "聚合的生产命名空间不一致" });
 
 export const RunBatchListSchema = z.array(RunBatchAggregateSchema);
 
@@ -746,6 +774,7 @@ export const RunKernelBudgetStateSchema = z.object({
 
 export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
+  productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   imageExecution: ConfirmedImageExecutionSchema.optional(),
   imageDispatchIntent: ImageDispatchIntentSchema.optional(),
   imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),

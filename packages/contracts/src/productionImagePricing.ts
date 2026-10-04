@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ImageRequestTemplateSchema } from "./imageProviders.ts";
+import { ImageRequestTemplateSchema, ImageInputTransformSchema } from "./imageProviders.ts";
 
 const Id = z.string().trim().min(1).max(160);
 const Hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -33,6 +33,25 @@ export const ConfirmProductionImagePreparationSchema = z.object({
     z.object({ state: z.literal("unknown") }).strict(),
   ]),
 }).strict();
+const Uuid = "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}";
+export const ProductionImageTaskIdentitySchema = z.object({
+  jobId: z.string().regex(new RegExp(`^production-image-job-${Uuid}$`)),
+  idempotencyKey: z.string().regex(new RegExp(`^production-image-execution-${Uuid}$`)),
+}).strict();
+export const ProductionImageBatchIdSchema = z.string().regex(new RegExp(`^production-image-batch-${Uuid}$`));
+export const PreparedProductionImageProtocolSnapshotSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]),
+  preparationId: Id, preparationFingerprint: Hash, pricingFingerprint: Hash,
+  protocolVersion: z.literal("production-image-protocol-v1"), protocolPreparation: z.literal("prepared"),
+  confirmationState: z.literal("unconfirmed"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),
+  request: ProductionImageExecutionRequestSchema, requestFingerprint: Hash, payloadChecksumSha256: Hash,
+  payloadByteSize: z.number().int().positive().max(64 * 1024 * 1024),
+  contentType: z.string().regex(/^(application\/json|multipart\/form-data; boundary=canvas-[a-f0-9]{40})$/),
+  transformedInputs: z.array(ImageInputTransformSchema).max(21), preparedAt: DateTime, snapshotFingerprint: Hash,
+}).strict().superRefine((p, ctx) => {
+  if (!ProductionImageTaskIdentitySchema.safeParse({ jobId: p.request.jobId, idempotencyKey: p.request.idempotencyKey }).success
+    || Date.parse(p.preparedAt) >= Date.parse(p.request.quote.expiresAt)) ctx.addIssue({ code: "custom", message: "生产候选身份或准备时间不一致" });
+});
 export const ProductionImagePriceScopeSchema = z.object({
   tenantId: Id, projectId: Id, actorId: Id, connectionId: Id,
   connectionRevision: z.number().int().positive(), model: Id, capabilityVersion: Id,
@@ -56,6 +75,7 @@ export const FixtureProductionImagePricingSchema = z.object({
 export type ProductionImageQuote = z.infer<typeof ProductionImageQuoteSchema>;
 export type ProductionImageExecutionRequest = z.infer<typeof ProductionImageExecutionRequestSchema>;
 export type ConfirmProductionImagePreparation = z.infer<typeof ConfirmProductionImagePreparationSchema>;
+export type PreparedProductionImageProtocolSnapshot = z.infer<typeof PreparedProductionImageProtocolSnapshotSchema>;
 export type ProductionImageRequestDraft = z.infer<typeof ProductionImageRequestDraftSchema>;
 export type ProductionImagePriceScope = z.infer<typeof ProductionImagePriceScopeSchema>;
 export type ProductionImagePricing = z.infer<typeof ProductionImagePricingSchema>;

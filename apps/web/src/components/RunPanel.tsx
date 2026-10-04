@@ -28,7 +28,9 @@ function latestJobs(jobs: RunJob[]): RunJob[] {
 }
 
 function reservationMinor(batch: RunBatchAggregate, job: RunJob): number {
-  return batch.batch.tool === "product-retouch" ? job.estimatedCostMinor : batch.batch.maxCostMinor;
+  if (batch.batch.tool !== "product-retouch") return batch.batch.maxCostMinor;
+  if (job.estimatedCostMinor === null) throw new Error("旧模拟任务不能使用未知估价");
+  return job.estimatedCostMinor;
 }
 
 const AUDIT_LABEL: Record<string, string> = {
@@ -213,7 +215,7 @@ export default function RunPanel(props: Props) {
     setDecision({ kind, job, batch });
     setDecisionId(`billing-${crypto.randomUUID()}`);
     setResolution("not-charged"); setEvidence(""); setDecisionSubmitted(false);
-    setActualCost((job.estimatedCostMinor / 100).toFixed(2));
+    setActualCost(job.estimatedCostMinor === null ? "" : (job.estimatedCostMinor / 100).toFixed(2));
     setRequestedCeiling((batch.batch.maxCostMinor / 100).toFixed(2)); setReason("");
   };
   const openReview = (overage: BillingOverage) => {
@@ -226,6 +228,7 @@ export default function RunPanel(props: Props) {
   const submitDecision = () => run(async (client) => {
     if (!decision) return;
     if (decision.kind === "retry") {
+      if (decision.batch.batch.imageMode || decision.job.estimatedCostMinor === null) throw new Error("生产图片任务不开放旧模拟重试");
       await client.register(contextRef.current);
       await verifyInputs(client, decision.batch.batch.inputAssetIds, decision.batch.batch.constraintSnapshotId);
       const result = await client.retry(decision.job.id, decision.job.estimatedCostMinor, decision.batch.batch.currency);
@@ -334,7 +337,7 @@ export default function RunPanel(props: Props) {
           </p> : null;
         })()}
         <div className="run-actions">
-          {batch.batch.tool !== "product-retouch" && <p className="run-hint">本地图片记录已保存；尚未开放图片执行，真实生成关闭。结果不明须人工核账，不会自动重试。</p>}
+          {batch.batch.tool !== "product-retouch" && <p className="run-hint">{batch.batch.imageMode ? "生产图片任务已确认；真实执行尚未开放。" : "本地图片记录已保存；尚未开放图片执行，真实生成关闭。"}结果不明须人工核账，不会自动重试。</p>}
           {batch.batch.status === "awaiting_confirmation" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "confirm"))}>确认模拟成本并排队</button>}
           {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "queued") && batch.batch.status !== "billing_unknown" && <button className="run-primary" disabled={busy} onClick={() => void run((client) => batchAction(client, batch, "dispatch"))}>执行排队任务</button>}
           {batch.batch.tool === "product-retouch" && batch.jobs.some((job) => job.status === "running") && <button disabled={busy} onClick={() => void run((client) => client.action(batch, "reconcile"))}>检查运行状态</button>}
