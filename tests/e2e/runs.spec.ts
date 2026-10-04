@@ -36,12 +36,13 @@ test("凭证与出站合同没有浏览器HTTP入口，探测不改变预算或�
   const checks = await page.evaluate(async ({ projectId }) => {
     const headers = { "x-canvas-local": "1" }, root = "/studio-api/v1", base = `${root}/projects/${encodeURIComponent(projectId)}`;
     const before = await (await fetch(`${base}/budget`, { headers })).json(), statuses: number[] = [];
-    for (const path of [`${base}/image-egress`, `${base}/credentials`, `${root}/image-egress/send`, `${base}/native-image-network`, `${root}/image-network/send`]) {
+    for (const path of [`${base}/image-egress`, `${base}/credentials`, `${root}/image-egress/send`, `${base}/native-image-network`, `${root}/image-network/send`,
+      `${base}/image-credentials`, `${base}/image-credentials/rotate`, `${base}/image-credentials/consume`]) {
       for (const method of ["GET", "POST"]) statuses.push((await fetch(path, { method, headers, redirect: "error", cache: "no-store" })).status);
     }
     return { before, after: await (await fetch(`${base}/budget`, { headers })).json(), statuses, health: await (await fetch("/studio-api/health", { headers })).json() };
   }, { projectId: batch.batch.projectId });
-  expect(checks.statuses).toEqual(Array(10).fill(404)); expect(checks.after).toEqual(checks.before);
+  expect(checks.statuses).toEqual(Array(16).fill(404)); expect(checks.after).toEqual(checks.before);
   expect(checks.health).toMatchObject({ realExecutorsEnabled: false });
   await expect(panel.getByRole("region", { name: "当前批次" })).toContainText("待人工确认");
 });

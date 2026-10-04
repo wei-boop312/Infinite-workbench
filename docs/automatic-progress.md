@@ -4,7 +4,7 @@
 
 当前对话已经创建应用内 heartbeat 自动续做，ID 为 `automation`，每 10 分钟接续当前对话；不是独立 cron 项目，也不创建新的聊天。电脑需保持开机、应用保持运行。
 
-2026-10-04 最新本地验收为阶段 4 的 6B 原生 DNS/固定地址 HTTPS，631 项单元/集成、91 项 Chrome、6 个工作区构建通过；真实生成仍关闭。09:27 周剩余40%，高于20%停止线，原自动续做保持 ACTIVE，下一步为6C默认关闭的受控加密凭证底座与自有随机材料测试；不读取私人密钥或打开发送，不把回环网络夹具当生产供应商/公网路由/SSRF全部验收。完整边界见 `native-image-network.md`、`image-egress-contract.md`、`phase4-provider-plan.md` 和 outputs 最新记录。
+2026-10-04 最新本地验收为阶段 4 的 6C 默认关闭加密凭证底座，702 项单元/集成（40 文件）、91 项 Chrome、6 个工作区构建通过；真实生成仍关闭。09:58 周剩余38%，高于20%停止线，原自动续做保持 ACTIVE，下一步为6D1独立生产准备与可信报价合同；随后完整确认/统一预算任务、生产租约/发送响应证据按冻结计划分步。仅自有假价格/随机材料/临时存储，不读取私人密钥或创建生产根钥匙/打开发送。6C不是生产保险库或实际任务授权，回环网络夹具不是生产供应商/公网路由/SSRF全部验收。完整边界见 `encrypted-image-credentials.md`、`native-image-network.md`、`image-egress-contract.md`、`phase4-provider-plan.md` 和 outputs 最新记录。
 
 ## 执行规则
 
