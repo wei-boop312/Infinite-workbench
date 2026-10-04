@@ -1,10 +1,10 @@
 # 阶段 4 多供应商图片 API 接入计划
 
-日期：2026-10-04（上海）。状态：**里程碑1–5本地闭环、6A–6C安全底座、6D1/6D2生产准备确认及6D3A独立租约底座已本地验收；真实执行继续关闭**。阶段3本机零费用验收基线为 `d1c0246`。
+日期：2026-10-04（上海）。状态：**里程碑1–5本地闭环、6A–6C安全底座、6D1/6D2生产准备确认、6D3A租约及6D3B1权威重建已本地验收；真实执行继续关闭**。阶段3本机零费用验收基线为 `d1c0246`。
 
 接入顺序遵循冻结路线图：一个官方图片 API → 一个 OpenAI 兼容中转协议 → 一个非 OpenAI 协议。画布不直接访问这些服务，全部由统一任务、预算、权限与资产层承接。
 
-最新交接：6D3A独立生产领取/检查/未启动到期恢复已本地验收，见 production-image-leases.md。最终完整978项单元/集成（44文件）、95项Chrome、6构建通过；验收检查周已用76%/剩余24%，高于20%停止线。内部可信同库政策默认关闭，实际领取人/worker/lease/完整确认/原准备/当前目录能力/权威输入约束/原价格verify/预算核验；逐份文件前后检查权限、报价及实际活租约期限，SQL写后故障/撤权/到期整体回滚。原job/key/known或unknown金额及max预留不变，共用旧并发/领取上限/持久化时间窗；追加完整租约历史，重复/跨连接重启不重复领取。明确到期恢复只重排未启动任务，普通读取和旧路径不隐式恢复；过期报价/停用目录历史恢复不是新执行授权。生产job现在queued/leased/cancelled、batch queued/cancelled，旧执行/自动结算仍拒绝；无生产HTTP/UI/负载重建/意图/发送。SQLite v6/ICRD1不变，历史512条/整体512KiB并计共享16MiB；无用户秘密/根配置或供应商DNS网络付费/发布推送。下一步6D3B事务外权威原图负载重建与独立not-connected意图，逐项匹配原确认请求/wire/转换及最终活租约；意图非已发送或产物许可，写意图后unknown必须保留max预留，不走未发送取消或mock成功结算。实际供应商/模型/金额/根与凭证配置和最低成本真实请求仍需另授权；MCP阶段6、视频阶段7。
+最新交接：6D3B1权威负载重建已本地验收，见 production-image-reconstruction.md。最终完整1014项单元/集成（44文件）、96项Chrome、6构建通过；12:39周已用77%/剩余23%，高于20%停止线。默认关闭的ProductionImageTaskReconstruction/独立合同夹具需要同一实际SQLite内核，实际原领取人/worker/lease、完整确认/原准备/当前目录能力/权威原图蒙版约束/原价格verify/预算在读取前后及异步归一化后复查。三协议JSON/中转多段表单实际boundary/原wireSHA长度Content-Type和转换逐项匹配原确认；新重建时间不是原确认，返回无wire或授权令牌的内部摘要。重建不保存任务/意图/账本，不发送或改max预留；known/unknown及zero-cap保持。输入合计64MiB在权威BLOB前拦截，共用完整解码2槽/重建2槽，无无限队列；取消未结清归一化仍占槽，副本尽力清零，非全局沙箱。SQLite v6/ICRD1与旧mock商品锁/预算/配置指纹不变，无HTTP/UI/日常供应商或凭证网络配置。6D3B有限拆为重建/意图两步，当前下一步6D3B2同库独立not-connected意图与完整running/billing_unknown恢复，不能用B1返回摘要或local/pending证明授权提交；写意图后unknown保留max预留、不取消释放或mock成功结算。真实供应商/阶段4整体未完成，真实执行继续关闭；实际供应商/模型/金额/根与凭证配置及最低成本真实请求仍需另授权，MCP阶段6/视频7。
 
 ## 官方资料核对带来的设计边界
 
@@ -38,7 +38,7 @@ OpenAI 的 Image API 提供生成和编辑端点；Responses 还可以通过图�
 
 ## 下一次实施入口
 
-当前入口（覆盖下方历史入口）：先读 `production-image-leases.md`、`production-image-confirmations.md`、`production-image-protocol.md`、`production-image-preparations.md`、原安全文档及outputs最新记录。6D3A领取/检查/未启动恢复已完成，不重复底座。6D3B先从实际服务端确认/任务/原领取人/worker/lease和当前权限、连接/原图约束/可信原价格与预算复查，再事务外有界重建三协议实际wire/输入转换并逐项匹配原确认；最终同步租约事务保存独立not-connected意图。扩展running/unknown须同步私有历史、账本预算和恢复关系，写意图后保留未知预留、不自动重发/取消释放或mock成功结算。意图不等于发送/响应/产物授权。只自有假oracle/临时SQLite和4173验收，真实网络/凭证继续关闭；后续发送响应/凭证网络/产物费用与生产确认UI按冻结计划分步。真实供应商/模型/金额/根/凭证和最低成本请求仍需另授权。
+当前入口（覆盖下方历史入口）：先读 `production-image-reconstruction.md`、`production-image-leases.md`、原生产确认/协议/准备/安全文档及outputs最新记录。6D3B有限拆成重建/意图两步；B1已完成，不重复租约/重建底座。当前6D3B2在内部重建活流程最终同一SQL任务/原运行租约事务接默认关闭生产启动政策及永久not-connected意图，不接收B1返回摘要或local/pending证明自证授权。完整当前权限/原确认准备/实际任务编号/原领取人worker lease/目录能力/权威输入约束/原价格verify及预算、原wire和转换须最终重核。扩展running/billing_unknown前同时完善意图指纹/租约历史/账本预算/存档聚合/恢复核验；历史不重解码或新启动，写意图后到期崩溃保留max未知预留，不取消释放或mock成功结算。意图非发送/原响应/产物授权，只有自有假oracle/临时SQLite与4173本地验收；后续发送响应/凭证guard/网络/产物费用及生产确认UI按冻结路线图分步，真实供应商/模型/金额/根及凭证配置和最低成本请求仍需另授权。
 
 先读 `docs/phase3-acceptance.md`、本计划及 outputs 最新进展，核对工作区和周用量，继续**5B5 实际任务结果谱系与已缓存资产回画布**。5B4B 见 `docs/image-confirmation-ui.md`，5B4A 见 `docs/image-preparation-ui.md`；5A 至 5B3B 分别见 `generated-image-ingestion.md`、`image-provider-preparations.md`、`image-task-confirmations.md`、`image-task-leases.md`、`image-fixture-execution.md`、`image-task-artifacts.md`、`generated-asset-readback.md`、`generated-asset-cache.md`，不重复实现。必填 authorizeCommit 已根据实际服务端证据实现本地授权，资产/任务已同库原子绑定；不是生产执行授权。
 

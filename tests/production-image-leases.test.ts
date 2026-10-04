@@ -7,12 +7,17 @@ import { SqliteRunKernelStateStore } from "../apps/api/src/sqliteRunKernelStore"
 import { InMemoryRunKernel, type RunKernelOptions } from "../apps/api/src/runKernel";
 import { imageSnapshotFingerprint } from "../apps/api/src/imageProviderContract";
 import { productionExpected } from "../apps/api/src/productionImageConfirmationIntegrity";
+import { ImageProductionReconstructionHarness, ProductionImageTaskReconstruction } from "../apps/api/src/productionImageTaskReconstruction";
+import * as productionProtocol from "../apps/api/src/productionImageProtocol";
+import { validateProductionImageAssetPolicy } from "../apps/api/src/imageAssetPolicy";
+import { RunKernelError } from "../apps/api/src/runKernel";
 import { at, connection, principal, setupImageTask } from "./helpers/image-task-fixture";
 
 const owned: ReturnType<typeof setupImageTask>[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const f of owned.splice(0).reverse()) f.cleanup(); });
 const other = { ...principal, actorId: "other" }, worker = { workerId: "owned-worker", maxJobs: 2 };
 function fixture(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; cap?: number; policy?: boolean;
+  editEncoding?: "json-images" | "multipart-image-array" | "multipart-image-single";
   quota?: number; kernel?: Partial<RunKernelOptions> } = {}) {
   let allowed: unknown = true, service: ImageProductionPreparationHarness, policy: ProductionImageLeasePolicy;
   const denied = new Set<string>();
@@ -25,7 +30,7 @@ function fixture(options: { protocol?: ImageProviderConnection["protocol"]; manu
   const f = setupImageTask({ format: options.protocol === "google" ? "jpeg" : "png", kernel: kernelOptions }); owned.push(f);
   const base = connection(), model = base.models[0], protocol = options.protocol ?? "openai";
   const config = connection({ protocol,
-    ...(protocol === "openai-compatible" ? { compatibility: { version: "owned-compat", editEncoding: "json-images", responseEncoding: "images-b64-json-v1",
+    ...(protocol === "openai-compatible" ? { compatibility: { version: "owned-compat", editEncoding: options.editEncoding ?? "json-images", responseEncoding: "images-b64-json-v1",
       auth: { scheme: "header", headerName: "x-api-key" }, endpoints: { generate: "/images/generations", edit: "/images/edits" }, extraParameters: [] } } : {}),
     ...(protocol === "google" ? { baseUrl: "https://generativelanguage.googleapis.com", models: [{ ...model, maxInputImages: 14, outputFormats: ["jpeg"] }],
       googleNative: { version: "owned-google", apiVersion: "v1", requestEncoding: "generate-content-response-format-v1", modelMappings: [{ model: model.model,
@@ -229,6 +234,128 @@ describe("6D3A 独立生产租约（自有零费用合同夹具，无发送）",
   it("可信端口私密异常脱敏，不透传message/cause", async () => {
     const f = fixture(), batch = await f.confirm(); f.pricePort.verify.mockImplementation(() => { throw new Error("PRIVATE-PRICE"); });
     try { f.claim(batch.batch.id); throw new Error("unexpected-success"); } catch (e) { expect(String(e)).not.toContain("PRIVATE-PRICE"); }
+  });
+});
+describe("6D3B1 权威生产负载重建（不保存意图、不发送）", () => {
+  const service = (f: ReturnType<typeof fixture>) => new ImageProductionReconstructionHarness({ reconstructionEnabled: true,
+    tenantId: principal.tenantId, stateStore: f.store, runKernel: f.kernel, clock: f.clock });
+  const run = (f: ReturnType<typeof fixture>, batch: string, lease: { jobId: string; workerId: string; leaseId: string }, signal?: AbortSignal) =>
+    service(f).reconstruct(principal, "project-a", batch, lease.jobId, { workerId: lease.workerId, leaseId: lease.leaseId }, signal);
+  it("默认关闭且不读取存储", async () => {
+    const f = fixture(), spy = vi.spyOn(f.store, "load");
+    for (const s of [new ProductionImageTaskReconstruction(), new ImageProductionReconstructionHarness()])
+      await expect(s.reconstruct(principal, "project-a", "fake", "fake", {})).rejects.toThrow();
+    expect(spy).not.toHaveBeenCalled();
+  });
+  it.each(["openai", "openai-compatible", "google"] as const)("%s known/unknown和编辑原字节匹配原确认且不改任务账本", async (protocol) => {
+    for (const manual of [false, true]) for (const edit of [false, true]) {
+      const f = fixture({ protocol, manual, edit }), batch = await f.confirm(), lease = f.claim(batch.batch.id).leases[0]; f.advance(500);
+      const before = f.store.load(), result = await run(f, batch.batch.id, lease), e = before!.batches[0].productionImageExecution!;
+      expect(result).toMatchObject({ batchId: batch.batch.id, jobId: lease.jobId, requestFingerprint: e.protocol.requestFingerprint,
+        payloadChecksumSha256: e.protocol.payloadChecksumSha256, payloadByteSize: e.protocol.payloadByteSize, contentType: e.protocol.contentType,
+        transformedInputs: e.protocol.transformedInputs, confirmedAt: e.confirmedAt, reconstructedAt: new Date(f.clock()).toISOString(),
+        executionAuthorized: false, realExecutionEnabled: false, dispatchIntentRecorded: false });
+      expect(result.reconstructedAt).not.toBe(e.protocol.preparedAt); expect(f.store.load()).toEqual(before);
+      expect(JSON.stringify(result)).not.toMatch(/never-called|credentialRef|opaque-never|base64|原人工指令/);
+      expect(f.pricePort.read).toHaveBeenCalledTimes(1);
+    }
+  });
+  it("生产入口不接受合同夹具，也不复用local租约", async () => {
+    const f = fixture(), batch = await f.confirm(), lease = f.claim(batch.batch.id).leases[0];
+    const real = new ProductionImageTaskReconstruction({ reconstructionEnabled: true, tenantId: principal.tenantId, stateStore: f.store, runKernel: f.kernel, clock: f.clock });
+    await expect(real.reconstruct(principal, "project-a", batch.batch.id, lease.jobId, { workerId: lease.workerId, leaseId: lease.leaseId })).rejects.toThrow();
+    const local = await setupLocal(f), l = f.kernel.claimImageBatch(principal, local.batch.id, worker).leases[0];
+    await expect(run(f, local.batch.id, l)).rejects.toThrow();
+  });
+  it.each(["multipart-image-array", "multipart-image-single"] as const)("中转%s匹配原实际boundary/字节且清零临时负载", async (editEncoding) => {
+    const f = fixture({ protocol: "openai-compatible", edit: true, editEncoding }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0];
+    const original = productionProtocol.prepareProductionImageProtocol; let body: Buffer | undefined;
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => { const v = await original(...args); body = v.wire.body; return v; });
+    const before = f.store.load(), result = await run(f, b.batch.id, l);
+    expect(result.contentType).toContain("multipart/form-data; boundary=canvas-"); expect(body!.every((v) => v === 0)).toBe(true);
+    expect(f.store.load()).toEqual(before);
+  });
+  it("异步归一化在SQL事务外，zero-cap原预留关系不变", async () => {
+    const f = fixture({ manual: true, cap: 0, edit: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0];
+    const transaction = f.store.transaction.bind(f.store); let depth = 0;
+    vi.spyOn(f.store, "transaction").mockImplementation((action) => transaction(() => { depth++; try { return action(); } finally { depth--; } }));
+    const prepare = productionProtocol.prepareProductionImageProtocol;
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => { expect(depth).toBe(0); const v = await prepare(...args); expect(depth).toBe(0); return v; });
+    const before = f.store.load(); await run(f, b.batch.id, l); expect(f.store.load()).toEqual(before);
+    expect(f.store.load()!.batches[0].jobReservations).toEqual([[l.jobId, 0]]);
+  });
+  it("不同store实例关闭，即使路径相同", async () => {
+    const f = fixture(), batch = await f.confirm(), l = f.claim(batch.batch.id).leases[0], store = new SqliteRunKernelStateStore(f.path);
+    try { const s = new ImageProductionReconstructionHarness({ reconstructionEnabled: true, tenantId: principal.tenantId, stateStore: store, runKernel: f.kernel, clock: f.clock });
+      await expect(s.reconstruct(principal, "project-a", batch.batch.id, l.jobId, { workerId: l.workerId, leaseId: l.leaseId })).rejects.toThrow();
+    } finally { store.close(); }
+  });
+  it.each(["actor", "worker", "lease", "job", "project", "tenant"])("%s错配在读取实际原文件之前拒绝", async (kind) => {
+    const f = fixture({ edit: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], raw = vi.spyOn(f.store, "loadVerifiedImageBytes");
+    await expect(service(f).reconstruct({ ...principal, ...(kind === "actor" ? { actorId: "other" } : kind === "tenant" ? { tenantId: "other" } : {}) },
+      kind === "project" ? "other" : "project-a", b.batch.id, kind === "job" ? "other" : l.jobId,
+      { workerId: kind === "worker" ? "other" : l.workerId, leaseId: kind === "lease" ? "other" : l.leaseId })).rejects.toThrow();
+    expect(raw).not.toHaveBeenCalled();
+  });
+  it.each(["run:read", "run:execute", "provider:read", "asset:read"])("%s撤权不读私有状态或原字节", async (permission) => {
+    const f = fixture({ edit: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0]; f.deny(permission);
+    const load = vi.spyOn(f.store, "load"), raw = vi.spyOn(f.store, "loadVerifiedImageBytes");
+    await expect(run(f, b.batch.id, l)).rejects.toThrow(); expect(load).not.toHaveBeenCalled(); expect(raw).not.toHaveBeenCalled();
+  });
+  it.each(["revoke", "expiry", "price", "constraint", "connection", "cancel", "abort"])("归一化await后%s拒绝且保留原费用", async (kind) => {
+    const f = fixture({ manual: true, edit: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], controller = new AbortController();
+    const original = productionProtocol.prepareProductionImageProtocol; let wire: Buffer | undefined;
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => {
+      const v = await original(...args); wire = v.wire.body;
+      if (kind === "revoke") f.deny("asset:read"); if (kind === "expiry") f.advance(30_000); if (kind === "price") f.advance(60_000);
+      if (kind === "constraint") f.store.transaction(() => { const c = f.store.loadCatalog()!; c.projects[0].constraints[0].brandRules = { changed: "yes" }; f.store.saveCatalog(c); });
+      if (kind === "connection") f.register(connection({ revision: 2 })); if (kind === "cancel") f.kernel.cancelBatch(principal, b.batch.id);
+      if (kind === "abort") controller.abort(); return v;
+    });
+    await expect(run(f, b.batch.id, l, controller.signal)).rejects.toThrow();
+    expect(wire!.every((byte) => byte === 0)).toBe(true);
+    expect(f.store.load()!.batches[0]).not.toHaveProperty("imageDispatchIntent");
+    expect(f.store.load()!.batches[0].reservedMinor).toBe(kind === "cancel" ? 0 : 40);
+  });
+  it.each(["bytes", "checksum", "length", "contentType", "transform", "request"])("实际重建%s错配失败关闭", async (kind) => {
+    const f = fixture({ edit: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], before = f.store.load();
+    const original = productionProtocol.prepareProductionImageProtocol;
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => {
+      const v = await original(...args);
+      if (kind === "bytes") v.wire.body[0] ^= 1; if (kind === "checksum") v.snapshot.payloadChecksumSha256 = "0".repeat(64);
+      if (kind === "length") v.snapshot.payloadByteSize++; if (kind === "contentType") v.snapshot.contentType = "wrong";
+      if (kind === "transform") v.snapshot.transformedInputs[0].transmittedChecksumSha256 = "0".repeat(64);
+      if (kind === "request") v.snapshot.request.parameters.prompt = "changed"; return v;
+    });
+    await expect(run(f, b.batch.id, l)).rejects.toThrow(); expect(f.store.load()).toEqual(before);
+  });
+  it("取消在读取前关闭；读取后撤权清除自有副本且不留准备证明", async () => {
+    const f = fixture({ edit: true }), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], controller = new AbortController(); controller.abort();
+    const original = f.store.loadVerifiedImageBytes.bind(f.store), raw = vi.spyOn(f.store, "loadVerifiedImageBytes");
+    await expect(run(f, b.batch.id, l, controller.signal)).rejects.toThrow(); expect(raw).not.toHaveBeenCalled(); let copy: Buffer | undefined;
+    raw.mockImplementation((...args) => { const v = original(...args); copy = v!.body; f.deny("asset:read"); return v; });
+    await expect(run(f, b.batch.id, l)).rejects.toThrow(); expect(copy!.every((byte) => byte === 0)).toBe(true);
+  });
+  it("同时两份、无无限队列，取消未结清归一化不释放槽位", async () => {
+    const f = fixture(), b = await f.confirm(), l = f.claim(b.batch.id).leases[0], controller = new AbortController();
+    const original = productionProtocol.prepareProductionImageProtocol; let finish!: () => void;
+    const wait = new Promise<void>((resolve) => { finish = resolve; });
+    vi.spyOn(productionProtocol, "prepareProductionImageProtocol").mockImplementation(async (...args) => { await wait; return original(...args); });
+    const first = run(f, b.batch.id, l, controller.signal), second = run(f, b.batch.id, l); controller.abort();
+    await expect(run(f, b.batch.id, l)).rejects.toMatchObject({ status: 429 }); finish();
+    const outcomes = await Promise.allSettled([first, second]); expect(outcomes.map((v) => v.status)).toEqual(["rejected", "fulfilled"]);
+    await expect(run(f, b.batch.id, l)).resolves.toMatchObject({ dispatchIntentRecorded: false });
+  });
+  it("超过64MiB声明合计在权威原图BLOB读取之前拒绝", async () => {
+    const f = fixture({ edit: true }), b = await f.confirm(), request = structuredClone(f.store.load()!.batches[0].productionImageExecution!.protocol.request);
+    if (request.operation !== "edit") throw new Error("fixture must edit");
+    request.inputs = [0, 1, 2].map((i) => ({ ...request.inputs[0], assetId: `large-${i}`, byteSize: 24 * 1024 * 1024 }));
+    const read = vi.spyOn(f.store, "loadVerifiedImage"); expect(() => validateProductionImageAssetPolicy(f.store, request)).toThrow(); expect(read).not.toHaveBeenCalled();
+  });
+  it("私密异常message/code/cause不透传", async () => {
+    const f = fixture(), b = await f.confirm(), l = f.claim(b.batch.id).leases[0];
+    vi.spyOn(f.kernel, "inspectProductionImageLease").mockImplementation(() => { throw new RunKernelError(503, "PRIVATE-CODE", "PRIVATE-MESSAGE"); });
+    try { await run(f, b.batch.id, l); throw new Error("unexpected-success"); } catch (error) { expect(JSON.stringify(error)).not.toContain("PRIVATE"); expect(String(error)).not.toContain("PRIVATE"); }
   });
 });
 async function setupLocal(f: ReturnType<typeof fixture>) {

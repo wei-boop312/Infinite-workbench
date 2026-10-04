@@ -17,7 +17,12 @@ export function validateLocalImageAssetPolicy(store: SqliteRunKernelStateStore, 
   return validateAssetPolicy(store, ImageExecutionRequestSchema.parse(request));
 }
 export function validateProductionImageAssetPolicy(store: SqliteRunKernelStateStore, request: ProductionImageExecutionRequest, guard?: () => void) {
-  return validateAssetPolicy(store, ProductionImageExecutionRequestSchema.parse(request), guard);
+  const parsed = ProductionImageExecutionRequestSchema.parse(request);
+  const refs = parsed.operation === "edit" ? [...parsed.inputs, ...(parsed.mask ? [parsed.mask] : [])] : [];
+  // Before even receipt/BLOB verification: later reconstruction copies these
+  // originals and must not discover an excessive aggregate after reading them.
+  if (refs.reduce((total, ref) => total + ref.byteSize, 0) > 64 * 1024 * 1024) reject("production_image_inputs_too_large");
+  return validateAssetPolicy(store, parsed, guard);
 }
 function validateAssetPolicy(store: SqliteRunKernelStateStore, request: ImageExecutionRequest | ProductionImageExecutionRequest, guard?: () => void) {
   const catalog = store.loadCatalog();

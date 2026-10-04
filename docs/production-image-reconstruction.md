@@ -1,0 +1,34 @@
+# 6D3B1 权威生产负载重建（不保存派发意图）
+
+日期：2026-10-04（上海）。6D3B有限拆为“权威重建”和“独立持久化意图”两步，本步已本地验收；6D3B、6D3、真实供应商及阶段4整体未完成。仅自有假价格/独立临时SQLite和4173零费用测试，不打开真实执行。
+
+## 实际权威上下文
+
+内部 `ProductionImageTaskReconstruction` 默认未配置拒绝；配置须显式reconstructionEnabled=true、租户及同一实际SQLite内核/存储实例。独立 `ImageProductionReconstructionHarness` 仅production-contract-fixture；生产入口拒绝该命名空间，不能给原local-fixture租约或纯协议改名当生产。端口是可信服务端代码，不是用户脚本沙箱。
+
+不接收调用者自报confirmed/prepared、完整执行对象、价格、URL或原文件。任务编号只用来检索实际内核，严格请求只带workerId/leaseId。租户/项目/run:read/run:execute/provider:read/asset:read、实际原领取人/worker/lease及活期限、完整不可变确认/原准备、当前完整连接修订能力、权威原图蒙版SHA/尺寸/字节/顺序/原约束、可信原价格verify及统一预算关系由6D3A实际内核检查。价格保留原创建人scope，verify不重新read询价；漂移要求新人工动作。
+
+实际原文件读取每份前后、归一化前后及最终同步事务再次检查实际上下文；撤权/租约或报价到期/取消/原图约束目录漂移立即拒绝，不能用起始检查当最终许可。共享生产资产政策在接触权威BLOB之前先拦截原输入合计超过64MiB。只把当前SQL返回的自有原文件副本带出同步事务，不在SQL写锁内await。
+
+## 原负载逐项匹配
+
+使用原实际job/key、原完整人工金额期待和原准备，事务外重建三协议：官方JSON、兼容JSON/多段表单和Google原生固定合同。逐项匹配原确认的命名空间/准备与价格摘要、实际请求SHA/请求完整内容、协议版本、真实wire SHA/精确长度/Content-Type、原SHA/传输SHA与转换谱系。另对实际body重哈希与wire字段核验，不能用一个新整体snapshot SHA代替这些关系。多段表单须匹配原真实boundary和正文，不用JSON描述代替实际字节。
+
+重建的preparedAt是当前时刻，不改原确认时间，也不将原确认时间复制来制造“同一次确认”；服务单独返回confirmedAt/reconstructedAt/validatedAt。临时wire永不返回；只返回有界内部摘要和executionAuthorized=false/realExecutionEnabled=false/dispatchIntentRecorded=false。没有地址、凭证引用、正文、执行key或活续接令牌；这些摘要不是派发意图/发送/响应/5A入库授权，也不能供下一步调用者提交后自证prepared。
+
+重建完全不保存任务、账本、预留、租约历史或派发意图，不重排到期任务，不自动重试/核账/结算。任务仍queued/leased/cancelled、批次queued/cancelled；max预留和known/unknown估价包括zero-cap关系不变。需要恢复到期租约仍用6D3A明确reconcile。
+
+## 资源与错误
+
+全进程生产/合同夹具共用2份重建槽，无无限等待队列。取消先检查并在实际读取与异步归一化返回后再次检查；原生解码不能强制中断，未结清操作保留槽，不能靠取消腾空无限后台任务。本步没有生产任务启动超时或发送；实际租约和报价期限仍在最终检查强制核验。
+
+原图/输出/归一化继续共用原2份完整解码槽和8192/1600万像素政策，auto/4096平方/pixel-exact/product.pixels拒绝、旧商品锁不变。完成/失败/取消清零服务拥有的原图与wire副本，不改用户原文件，不保证JS/native字符串可靠擦除或恶意可信端口隔离。异常固定消息及受控代码，私密message/code/cause不透传。不是跨进程全局硬闸门、生产隔离沙箱、秘密保险库或全数据库资源上限；SQLite v6/独立ICRD1不变。
+
+## 本地验收与下一步
+
+新增36项单元/集成：实际三协议生成/编辑、known/unknown、兼容两种multipart、原确认与新时间、无SQL锁await/zero-cap、默认关闭/命名空间/同库/身份权限、归一化后撤权到期/目录约束漂移/取消、实际字节与SHA/长度/Content-Type/转换/请求错配、清零、取消/两槽、不合作等待、64MiB读前拦截和私密异常。首定向98/99通过，1失败因测试在spy后绑定原读取函数导致递归；修正夹具不放宽清零断言后99/99与API构建通过，再补3项表单/SQL锁测试。
+
+最终完整 `pnpm check`：1014项单元/集成（44文件）、96项Chrome、6个工作区构建全部通过。新增1项Chrome仅验证6个未开放重建/意图GET/POST返回404、预算不变和真实闸门关闭；实际服务端授权用临时SQLite覆盖，不种日常供应商/任务、不冒充生产UI/真实价格/公网或计费验收。浏览器运行期间冻结源文件，保留已有Zod/NO_COLOR非致命警告，未改依赖或主动重启5173。
+
+下一步6D3B2：在内部重建活流程最终同一SQL任务/租约事务接默认关闭的独立生产启动政策和永久not-connected意图，不接收B1返回对象或local/pending证明作许可。原任务/job/key/batch、完整确认、原领取人/worker/lease与当前权威政策/预算及原wire须最终重核。扩展running/billing_unknown前同步完整私有意图/指纹、确认与租约历史、账本预算、存档聚合和恢复关系；首次启动与历史恢复区分，后者不重解码/启动/发送。意图后到期/超时/崩溃保守unknown并保留max预留，不能沿用未发送取消释放或旧mock已知费用成功结算。意图不是已发送/原响应/产物授权。后续持久化尝试/原响应、凭证guard/固定地址HTTPS、权威产物与费用和生产确认UI按冻结路线图分步；真实供应商/模型/金额/根及凭证配置与最低成本请求仍需用户另授权，MCP阶段6/视频7。
+
