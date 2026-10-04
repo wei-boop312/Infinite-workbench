@@ -3,10 +3,7 @@ import { ConfirmProductionImagePreparationSchema, CreateImagePreparationSchema, 
   ProductionImageConfirmationHistorySchema, type ProductionImagePreparationRecord, type RunKernelSnapshot } from "@canvas/contracts";
 import { ImageProductionPreparationHarness, ProductionImagePreparations } from "./productionImagePreparations";
 import { imageProviderPublicView, imageSnapshotFingerprint as fp } from "./imageProviderContract";
-import { validateProductionImageAssetPolicy } from "./imageAssetPolicy";
-import { assertProductionImageRawResponse } from "./productionImageResponse";
-import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
-import { assetMetadataFingerprint } from "./verifiedAssets";
+import { validateProductionImageReadSnapshot } from "./productionImageReadIntegrity";
 import { RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
 import type { ImageProviderAuthorizer } from "./imageProviders";
 import type { ObjectStorageAuthorizer } from "./objectStorageGateway";
@@ -76,34 +73,8 @@ class PublicCore {
       const result = this.view(this.record(p, project, id)); this.scope(p, project, "read"); return result; }); });
   }
   private evidence(p: RunPrincipal, project: string, snapshot: RunKernelSnapshot) {
-    const o = this.config(), guard = () => this.scope(p, project, "read"); guard(); o.runKernel.validateProductionBillingSnapshot(snapshot);
-    // Check every original production task in this readable project, including
-    // orphan rows when ALL task response/artifact fields have been removed.
-    for (const s of snapshot.batches.filter(b => b.aggregate.batch.tenantId === p.tenantId && b.aggregate.batch.projectId === project && b.productionImageExecution)) {
-      const e = s.productionImageExecution!, job = e.protocol.request.jobId; guard();
-      const original = o.stateStore.loadProductionImagePreparation(p.tenantId, project, e.mode, e.preparation.id); guard();
-      if (!original || fp(original) !== fp(e.preparation)) reject();
-      validateProductionImageAssetPolicy(o.stateStore, e.protocol.request, guard); guard();
-      const artifact = o.stateStore.supportsProductionImageArtifacts() || s.productionImageArtifact ? o.stateStore.loadProductionImageArtifact(p.tenantId, project, e.mode, job) : null; guard();
-      const raw = o.stateStore.supportsProductionImageResponses() || s.productionImageAttempt || s.productionImageResult ? o.stateStore.loadProductionImageResponse(p.tenantId, project, e.mode, job) : null;
-      try { guard();
-        if (s.productionImageResult?.kind === "returned") {
-          if (!raw || fp(raw.record) !== s.productionImageResultFingerprint || fp(raw.record) !== fp(s.productionImageResult)) reject();
-          const parsed = assertProductionImageRawResponse(raw.record, e, s.productionImageLeases?.at(-1), s.productionImageDispatchIntent, s.productionImageAttempt, raw.body);
-          try {
-            if (s.productionImageArtifact) {
-              if (!artifact || fp(artifact) !== s.productionImageArtifactFingerprint || fp(artifact) !== fp(s.productionImageArtifact)) reject();
-              assertProductionImageArtifact(s, artifact); guard();
-              const asset = o.stateStore.loadCatalog()?.projects.find(v => v.projectId === project)?.assets.find(a => a.id === artifact.image.asset.id); guard();
-              if (!asset || assetMetadataFingerprint(asset) !== artifact.image.registeredMetadataSha256 || !parsed.candidate
-                || parsed.candidate.checksumSha256 !== artifact.image.checksumSha256 || parsed.candidate.mimeType !== asset.mimeType || parsed.candidate.body.length !== asset.byteSize) reject();
-            } else if (artifact) reject();
-          } finally { parsed.candidate?.body.fill(0); }
-        } else if (raw || artifact || s.productionImageArtifact) reject();
-      } finally { raw?.body.fill(0); }
-      validateProductionImageAssetPolicy(o.stateStore, e.protocol.request, guard); guard();
-    }
-    guard(); if (fp(o.stateStore.load()) !== fp(snapshot)) reject("production_image_public_history_changed"); guard();
+    const o = this.config();
+    validateProductionImageReadSnapshot(o.stateStore, o.runKernel, p.tenantId, project, snapshot, () => this.scope(p, project, "read"));
   }
   getConfirmation(p: RunPrincipal, project: string, id: string) {
     return this.safe(() => { this.scope(p, project, "read"); const o = this.config(); return o.stateStore.transaction(() => {

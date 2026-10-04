@@ -951,6 +951,50 @@ export const ProductionImageArtifactSchema = z.object({
 }).strict();
 export type ProductionImageArtifact = z.infer<typeof ProductionImageArtifactSchema>;
 
+// Independent immutable production read views. Never accepted as send, cache,
+// commit or billing authority, and never coerced into legacy numeric quotes.
+const ProductionGeneratedAssetBase = {
+  schemaVersion: z.literal(1), mode: ProductionPublicMode, tenantId: IdSchema, projectId: IdSchema,
+  executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false), image: VerifiedImageSchema, artifactFingerprint: ProductionPublicHash,
+};
+function validProductionGeneratedImage(p: { tenantId: string; projectId: string; image: z.infer<typeof VerifiedImageSchema> }) {
+  const i = p.image.asset;
+  return p.image.tenantId === p.tenantId && i.projectId === p.projectId && i.purpose === "generated"
+    && ["image/png", "image/jpeg", "image/webp"].includes(i.mimeType) && i.byteSize > 0 && i.byteSize <= 20 * 1024 * 1024
+    && i.width <= 8192 && i.height <= 8192 && i.width * i.height <= 16_000_000;
+}
+export const ProductionGeneratedAssetMetadataSchema = z.object(ProductionGeneratedAssetBase).strict().refine(validProductionGeneratedImage);
+export const ProductionGeneratedAssetLineageSchema = z.object({ ...ProductionGeneratedAssetBase,
+  batchId: ProductionImageBatchIdSchema, jobId: ProductionImageTaskIdentitySchema.shape.jobId, jobStatus: z.enum(["billing_unknown", "succeeded"]),
+  connection: ImageProviderPublicSchema, requestDraft: ProductionImageRequestDraftSchema, constraint: ConstraintSnapshotSchema, pricing: ProductionImagePublicPricingSchema,
+  preparationId: IdSchema, preparationFingerprint: ProductionPublicHash, pricingFingerprint: ProductionPublicHash, executionFingerprint: ProductionPublicHash,
+  requestFingerprint: ProductionPublicHash, payloadChecksumSha256: ProductionPublicHash,
+  transformedInputs: z.array(ImageInputTransformSchema).max(21), confirmedBy: IdSchema, confirmedAt: IsoDateSchema,
+  billing: z.object({ state: z.enum(["unknown", "settled"]), currency: z.string().regex(/^[A-Z]{3}$/),
+    estimatedMinor: ProductionOutputMoney.nullable(), maxCostMinor: ProductionOutputMoney, currentMaxCostMinor: ProductionOutputMoney,
+    reservedMinor: ProductionOutputMoney, actualMinor: ProductionOutputMoney.optional(),
+  }).strict(),
+}).strict().superRefine((p, ctx) => {
+  const d = p.requestDraft, c = p.constraint, i = p.image.asset, q = p.pricing.quote, b = p.billing;
+  const refs = [...d.inputs, ...(d.operation === "edit" && d.mask ? [d.mask] : [])], model = p.connection.models.find(m => m.model === d.model);
+  if (!validProductionGeneratedImage(p) || d.tenantId !== p.tenantId || d.projectId !== p.projectId || c.projectId !== p.projectId || c.id !== d.constraintSnapshotId
+    || d.connectionId !== p.connection.id || d.connectionRevision !== p.connection.revision || !model || model.capabilityVersion !== d.capabilityVersion
+    || !model.operations.includes(d.operation) || d.protection !== "none" || c.lockedPaths.includes("product.pixels")
+    || d.parameters.size === "auto" || d.parameters.size.width !== i.width || d.parameters.size.height !== i.height
+    || i.width !== c.outputSpec.width || i.height !== c.outputSpec.height || i.mimeType !== `image/${c.outputSpec.format}` || i.mimeType !== `image/${d.parameters.outputFormat}`
+    || i.sourceAssetId !== d.inputs[0]?.assetId || b.currency !== q.currency || b.maxCostMinor !== q.maxCostMinor || b.currentMaxCostMinor < q.maxCostMinor
+    || b.estimatedMinor !== (q.source === "manual-budget" ? null : q.estimatedCostMinor)
+    || (p.mode === "production") === (p.pricing.evidence.kind === "contract-fixture")
+    || Date.parse(p.confirmedAt) < Date.parse(p.pricing.evidence.checkedAt) || Date.parse(p.confirmedAt) >= Date.parse(q.expiresAt) || Date.parse(p.confirmedAt) > Date.parse(p.image.verifiedAt)
+    || refs.length !== p.transformedInputs.length || refs.some((r, n) => p.transformedInputs[n]?.assetId !== r.assetId
+      || p.transformedInputs[n]?.originalChecksumSha256 !== r.checksumSha256
+      || (n < d.inputs.length ? p.transformedInputs[n]?.transform !== "exif-srgb-png-v1" : p.transformedInputs[n]?.transform === "exif-srgb-png-v1"))
+    || (b.state === "unknown" ? p.jobStatus !== "billing_unknown" || b.actualMinor !== undefined || b.reservedMinor !== q.maxCostMinor
+      : p.jobStatus !== "succeeded" || b.reservedMinor !== 0 || b.actualMinor === undefined || b.actualMinor > b.currentMaxCostMinor)) ctx.addIssue({ code: "custom", message: "生产谱系的任务/原输入约束/金额或命名空间不一致" });
+});
+export type ProductionGeneratedAssetMetadata = z.infer<typeof ProductionGeneratedAssetMetadataSchema>;
+export type ProductionGeneratedAssetLineage = z.infer<typeof ProductionGeneratedAssetLineageSchema>;
+
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,
   projectId: IdSchema,

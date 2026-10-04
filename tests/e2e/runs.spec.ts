@@ -192,6 +192,19 @@ test("生产公开准备/确认合同不会自动启用日常确认及只读历�
   expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
 });
 
+test("生产只读原图及谱系不会自动开放日常路由或改变预算", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["production-generated-assets/fake/lineage", "production-generated-assets/fake/content"]) {
+    expect((await page.request.get(`${base}/${suffix}`, { headers })).status()).toBe(404);
+    expect((await page.request.post(`${base}/${suffix}`, { headers, data: { mode: "production", imageVerified: true, actualCostMinor: 0 } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+});
+
 test("生产未知估价/纯协议摘要不能代替本地确认或解锁发送", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(response => response.url().endsWith("/studio-api/v1/run-batches") && response.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();

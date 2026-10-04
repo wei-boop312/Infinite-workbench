@@ -1,5 +1,7 @@
 # 6D8A 独立生产公开准备/确认合同与关闭式 HTTP 接线
 
+6D9A增量：确认历史的完整只读核验抽取到`productionImageReadIntegrity.ts`，与独立生产谱系/原图读取共用；原公开权限与同库确认/非发送边界保持。见[production-generated-asset-readback.md](production-generated-asset-readback.md)，其完整验收以该入口最新记录为准。
+
 后续最新验收：6D8B完整人工UI/独立只读指针恢复已本地完成，见[production-image-confirmation-ui.md](production-image-confirmation-ui.md)。完整1678项单元/集成、133Chrome、6构建通过；A+B有限底座完成，日常UI/执行仍默认关闭。本文件保留A验收时点，以下“B未实现/下一步”仅历史；当前续做原生产只读谱系/原图缓存回流与专项，真实供应商/价格费用/阶段4仍未完成。
 
 2026-10-05（上海）。冻结的生产准备/人工确认项有限分为 A 公开合同与服务接线、B 实际人工确认 UI/只读指针恢复；没有新增最终功能。此入口只描述 A，**不是生产 UI、供应商价格/生成验收或阶段4完成**。日常真实执行关闭。

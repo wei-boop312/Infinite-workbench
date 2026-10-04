@@ -29,8 +29,9 @@ import { MAX_IMAGE_PROTOCOL_OUTPUT_BYTES } from "./imageProtocolResponse";
 import { imageMagicMime } from "./staticImageDecoder";
 import { handleProductionImagePublicHttp } from "./productionImagePublicHttp";
 import type { ProductionImagePublicPort } from "./productionImagePublic";
-
-let activeGeneratedTransfers = 0;
+import { handleProductionGeneratedAssetHttp } from "./productionGeneratedAssetHttp";
+import type { ProductionGeneratedAssetReadPort } from "./productionGeneratedAssetReads";
+import { acquireGeneratedTransfer } from "./generatedTransferSlots";
 
 const MAX_RUN_BODY_BYTES = 64 * 1024;
 const MAX_CANVAS_BODY_BYTES = 2 * 1024 * 1024;
@@ -42,6 +43,7 @@ export type ApiServerOptions = {
   verifiedAssets?: VerifiedAssetPort;
   imageProviders?: LocalImageProviders;
   productionImagePreparations?: ProductionImagePublicPort;
+  productionGeneratedAssets?: ProductionGeneratedAssetReadPort;
   generatedAssetReads?: GeneratedAssetReadPort;
   generatedAssetLineages?: GeneratedAssetLineagePort;
 };
@@ -96,6 +98,7 @@ export function createApiServer(options: ApiServerOptions = {}) {
 
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1"), pathname = requestUrl.pathname;
     if (await handleProductionImagePublicHttp(request, response, options.productionImagePreparations)) return;
+    if (handleProductionGeneratedAssetHttp(request, response, options.productionGeneratedAssets)) return;
     const generatedLineageMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/generated-assets\/([^/]+)\/lineage$/);
     if (generatedLineageMatch) {
       const fail = (status: number, code: string) => sendJson(response, status, { error: code }, "private, no-store");
@@ -135,10 +138,8 @@ export function createApiServer(options: ApiServerOptions = {}) {
         response.setHeader("connection", "close"); fail(400, "generated_asset_request_invalid"); return;
       }
       if (request.headers.range !== undefined) { fail(416, "generated_asset_range_not_supported"); return; }
-      if (activeGeneratedTransfers >= 2) { fail(429, "generated_asset_read_busy"); return; }
-      activeGeneratedTransfers++;
-      let released = false;
-      const release = () => { if (!released) { released = true; activeGeneratedTransfers--; } };
+      const release = acquireGeneratedTransfer();
+      if (!release) { fail(429, "generated_asset_read_busy"); return; }
       response.once("finish", release); response.once("close", release);
       try {
         const content = reader.read(principal, decodeURIComponent(generatedContentMatch[1]), decodeURIComponent(generatedContentMatch[2]));
