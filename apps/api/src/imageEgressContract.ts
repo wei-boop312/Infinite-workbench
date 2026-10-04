@@ -8,6 +8,9 @@ import type { CompatibleImagePreparedRequest } from "./compatibleImageProtocol";
 import type { GoogleImagePreparedRequest } from "./googleImageProtocol";
 import type { RunPrincipal } from "./runKernel";
 import { MAX_STATIC_IMAGE_EDGE, MAX_STATIC_IMAGE_PIXELS } from "./staticImageDecoder";
+import { ImageEgressContractError, rejectImageEgress as reject, isImageEgressDomain as domain, parseImageEgressEndpoint as endpoint,
+  canonicalImageEgressAddress as canonicalAddress, isAllowedImageEgressAddress } from "./imageEgressPolicy";
+export { ImageEgressContractError, isAllowedImageEgressAddress } from "./imageEgressPolicy";
 
 type Prepared = PreparedImageProtocolRequest | CompatibleImagePreparedRequest | GoogleImagePreparedRequest;
 type Auth = { scheme: "bearer"; credentialRef: string } | { scheme: "header"; headerName: "x-api-key" | "api-key" | "x-access-token" | "x-goog-api-key"; credentialRef: string };
@@ -35,50 +38,10 @@ export type ImageEgressFixtureTransport = {
     status: number; headers: Record<string, string>; body: AsyncIterable<Uint8Array>;
   }>;
 };
-export class ImageEgressContractError extends Error {
-  constructor(public readonly code: string) { super(code); this.name = "ImageEgressContractError"; }
-}
 const errorCodes = new Set(["url_invalid", "protocol_unsupported", "explicit_size_required", "dimensions_exceeded", "endpoint_mismatch", "payload_mismatch", "content_type_invalid",
   "configuration_invalid", "not_configured", "fixture_consumed", "capacity", "request_too_large", "permission_denied", "cancelled", "target_not_allowed", "dns_rejected",
   "dns_expired", "credential_reused", "credential_invalid", "response_invalid", "response_headers_invalid", "redirect_rejected", "response_encoding_invalid", "response_too_large",
   "response_chunks_invalid", "response_length_mismatch", "contract_failed"].map(code => `image_egress_${code}`));
-function reject(code: string): never { throw new ImageEgressContractError(code); }
-const domain = (host: string) => host.length <= 253 && host === host.toLowerCase() && host.includes(".") && !isIP(host)
-  && host.split(".").every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))
-  && !/\.(?:localhost|local|internal|home|lan|arpa)$/.test(host);
-function endpoint(input: string) {
-  if (typeof input !== "string" || input.length > 2048 || !/^https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?\/[A-Za-z0-9/_:.-]*$/.test(input)) reject("image_egress_url_invalid");
-  let url: URL; try { url = new URL(input); } catch { return reject("image_egress_url_invalid"); }
-  const rawPath = input.slice(input.indexOf("/", 8));
-  if (!domain(url.hostname) || url.username || url.password || url.search || url.hash || rawPath !== url.pathname
-    || rawPath.includes("//") || rawPath.split("/").some(part => part === "." || part === "..")) reject("image_egress_url_invalid");
-  return { hostname: url.hostname, port: Number(url.port || 443), path: url.pathname };
-}
-function v4(address: string) { return address.split(".").reduce((value, octet) => (value << 8n) + BigInt(octet), 0n); }
-function v6(address: string) {
-  const halves = address.split("::"), left = halves[0] ? halves[0].split(":") : [], right = halves[1] ? halves[1].split(":") : [];
-  const parts = halves.length === 1 ? left : [...left, ...Array(8 - left.length - right.length).fill("0"), ...right];
-  return parts.reduce((value, part) => (value << 16n) + BigInt(`0x${part}`), 0n);
-}
-function inPrefix(value: bigint, base: bigint, prefix: number, bits: number) { return value >> BigInt(bits - prefix) === base >> BigInt(bits - prefix); }
-// Conservative profile: deny ALL listed IPv4 special-purpose blocks (including
-// globally reachable protocol exceptions), multicast and reserved. IPv6 admits
-// only 2000::/3 minus special/transition/documentation blocks. Not a route proof.
-const deniedV4 = [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
-  ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.31.196.0", 24], ["192.52.193.0", 24],
-  ["192.88.99.0", 24], ["192.168.0.0", 16], ["192.175.48.0", 24], ["198.18.0.0", 15], ["198.51.100.0", 24],
-  ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4], ["168.63.129.16", 32]]
-  .map(([base, prefix]) => [v4(base as string), prefix as number] as const);
-const deniedV6 = [["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["2620:4f:8000::", 48], ["3fff::", 20]]
-  .map(([base, prefix]) => [v6(base as string), prefix as number] as const);
-export function isAllowedImageEgressAddress(address: string, family: 4 | 6): boolean {
-  if (typeof address !== "string" || isIP(address) !== family || address.includes("%")) return false;
-  if (family === 4) return !deniedV4.some(([base, prefix]) => inPrefix(v4(address), base, prefix, 32));
-  // Reject dotted IPv4 embeddings as well as mapped, NAT64, ULA, link-local etc.
-  if (address.includes(".")) return false;
-  const value = v6(address);
-  return inPrefix(value, v6("2000::"), 3, 128) && !deniedV6.some(([base, prefix]) => inPrefix(value, base, prefix, 128));
-}
 function bindWire(connection: ImageProviderConnection, request: ImageExecutionRequest, prepared: Prepared, now: string) {
   const checked = validateImageProviderRequest(connection, request, now);
   // The controlled egress profile has an explicit human output specification;
@@ -209,15 +172,16 @@ export class ImageEgressFixtureHarness {
     }
   }
 }
-async function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+export async function raceImageEgressAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) reject("image_egress_cancelled");
   let listener: (() => void) | undefined;
   try { return await Promise.race([work, new Promise<never>((_, rejectPromise) => {
     listener = () => rejectPromise(new ImageEgressContractError("image_egress_cancelled")); signal.addEventListener("abort", listener, { once: true });
   })]); } finally { if (listener) signal.removeEventListener("abort", listener); }
 }
-function canonicalAddress(address: string) { return isIP(address) === 4 ? `v4:${v4(address)}` : `v6:${v6(address)}`; }
-async function readResponse(response: Awaited<ReturnType<ImageEgressFixtureTransport["send"]>>, signal: AbortSignal, maximum: number, track: <T>(work: Promise<T>) => Promise<T>): Promise<ImageProtocolResponse> {
+const raceAbort = raceImageEgressAbort;
+export type ImageEgressStreamResponse = { status: number; headers: Record<string, string>; body: AsyncIterable<Uint8Array> };
+export async function readBoundedImageEgressResponse(response: ImageEgressStreamResponse, signal: AbortSignal, maximum: number, track: <T>(work: Promise<T>) => Promise<T>): Promise<ImageProtocolResponse> {
   if (!response?.body || typeof response.body[Symbol.asyncIterator] !== "function") reject("image_egress_response_invalid");
   const iterator = response.body[Symbol.asyncIterator](), chunks: Buffer[] = []; let size = 0, count = 0, done = false;
   try {
@@ -251,3 +215,4 @@ async function readResponse(response: Awaited<ReturnType<ImageEgressFixtureTrans
     for (const chunk of chunks) chunk.fill(0);
   }
 }
+const readResponse = readBoundedImageEgressResponse;
