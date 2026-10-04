@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { AssetSchema, VerifiedImageSchema, type Asset, type VerifiedImage } from "@canvas/contracts";
+import { VerifiedImageSchema, type Asset, type VerifiedImage } from "@canvas/contracts";
 import type { ObjectStorageAuthorizer, StoragePrincipal } from "./objectStorageGateway";
 import { RunKernelError } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 import { decodeStaticImage, imageMagicMime, rejectStaticImageAnimation, MAX_STATIC_IMAGE_PIXELS } from "./staticImageDecoder";
+import { assetMetadataFingerprint } from "./assetMetadata";
+export { assetMetadataFingerprint } from "./assetMetadata";
 
 export interface VerifiedAssetPort {
   authenticate(request: IncomingMessage): StoragePrincipal | null;
@@ -13,10 +15,6 @@ export interface VerifiedAssetPort {
 }
 export const MAX_VERIFIED_IMAGE_BYTES = 30 * 1024 * 1024;
 export const MAX_VERIFIED_IMAGE_PIXELS = MAX_STATIC_IMAGE_PIXELS;
-
-export function assetMetadataFingerprint(asset: Asset): string {
-  return createHash("sha256").update(JSON.stringify(AssetSchema.parse(asset))).digest("hex");
-}
 
 function reject(code: string, message: string, status = 422): never { throw new RunKernelError(status, code, message); }
 

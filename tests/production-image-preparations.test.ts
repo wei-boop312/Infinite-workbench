@@ -239,7 +239,7 @@ describe("6D1 independent production preparation / pricing contract", () => {
     const db = new DatabaseSync(f.path); db.exec("DROP TABLE production_image_preparations; DROP TABLE production_image_preparation_presence; PRAGMA user_version = 5"); db.close();
     const other = setupImageTask({ path: f.path }); owned.push(other); expect(other.store.load()).toEqual(snapshot); expect(other.store.loadCatalog()).toEqual(catalog);
     expect(other.store.loadVerifiedImage(principal.tenantId, "project-a", "source")).toBeDefined(); expect(other.store.loadImagePreparationByAction(principal.tenantId, "project-a", "human-action-a")).not.toBeNull();
-    const version = new DatabaseSync(f.path); expect(version.prepare("PRAGMA user_version").get()!.user_version).toBe(7); version.close();
+    const version = new DatabaseSync(f.path); expect(version.prepare("PRAGMA user_version").get()!.user_version).toBe(8); version.close();
   });
   it.each(["production_image_preparations", "production_image_preparation_presence"])("当前库缺原生产准备表%s不静默重建", (table) => {
     const f = fixture(), db = new DatabaseSync(f.path); db.exec(`DROP TABLE ${table}`); db.close();

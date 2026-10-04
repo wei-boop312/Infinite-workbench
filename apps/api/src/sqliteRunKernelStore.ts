@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ProductionImagePreparationRecordSchema, ProductionImageRawResponseSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ProductionImageRawResponse, type ProductionImagePreparationRecord, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
+import { ProductionImageArtifactSchema, type ProductionImageArtifact } from "@canvas/contracts";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
@@ -28,9 +29,11 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   private depth = 0;
   private closed = false;
   private readonly productionResponseStorageEnabled: boolean;
+  private readonly productionArtifactStorageEnabled: boolean;
 
-  constructor(filePath: string, options: { busyTimeoutMs?: number; productionResponseStorageEnabled?: true } = {}) {
+  constructor(filePath: string, options: { busyTimeoutMs?: number; productionResponseStorageEnabled?: true; productionArtifactStorageEnabled?: true } = {}) {
     this.productionResponseStorageEnabled = options.productionResponseStorageEnabled === true;
+    this.productionArtifactStorageEnabled = options.productionArtifactStorageEnabled === true;
     if (!filePath.trim()) throw new Error("数据库路径不能为空");
     const timeout = options.busyTimeoutMs ?? 1_000;
     if (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 5_000) throw new Error("数据库等待时间无效");
@@ -41,9 +44,10 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
       this.transaction(() => {
         const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version);
-        if (![0, 1, 2, 3, 4, 5, 6, 7].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
+        if (![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(version)) throw new Error("不支持此数据库版本，禁止覆盖");
         if (version >= 6 && ["production_image_preparations", "production_image_preparation_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产准备表丢失，禁止重新创建");
-        if (version === 7 && ["production_image_responses", "production_image_response_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产原包表丢失，禁止重新创建");
+        if (version >= 7 && ["production_image_responses", "production_image_response_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产原包表丢失，禁止重新创建");
+        if (version === 8 && ["production_image_artifacts", "production_image_artifact_presence"].some((name) => !this.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))) throw new Error("生产产物表丢失，禁止重新创建");
         this.database.exec(`CREATE TABLE IF NOT EXISTS kernel_state (
           kind TEXT PRIMARY KEY CHECK (kind IN ('runs', 'catalog')),
           revision INTEGER NOT NULL CHECK (revision > 0),
@@ -119,7 +123,17 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
           job_id TEXT NOT NULL, response_id TEXT NOT NULL, record_sha256 TEXT NOT NULL,
           PRIMARY KEY (tenant_id, project_id, mode, job_id), UNIQUE (tenant_id, project_id, mode, response_id)
         ) STRICT;
-        PRAGMA user_version = 7`);
+        CREATE TABLE IF NOT EXISTS production_image_artifacts (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('production', 'production-contract-fixture')),
+          job_id TEXT NOT NULL, asset_id TEXT NOT NULL, record TEXT NOT NULL, record_sha256 TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, mode, job_id), UNIQUE (tenant_id, project_id, asset_id)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS production_image_artifact_presence (
+          tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('production', 'production-contract-fixture')),
+          job_id TEXT NOT NULL, asset_id TEXT NOT NULL, record_sha256 TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, project_id, mode, job_id), UNIQUE (tenant_id, project_id, asset_id)
+        ) STRICT;
+        PRAGMA user_version = 8`);
       });
     } catch (error) {
       this.database.close();
@@ -332,7 +346,8 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   }
   imageMetadataBytes(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_provider_revisions WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM generated_images WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_preparations WHERE tenant_id = ? AND project_id = ?), 0) + COALESCE((SELECT SUM(length(CAST(record AS BLOB))) FROM production_image_responses WHERE tenant_id = ? AND project_id = ?), 0) AS bytes")
-      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0);
+      .get(tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId, tenantId, projectId)?.bytes ?? 0)
+      + Number(this.database.prepare("SELECT COALESCE(SUM(length(CAST(record AS BLOB))), 0) AS bytes FROM production_image_artifacts WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);
   }
   imageFixtureResponseBytes(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM image_fixture_responses WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);
@@ -342,6 +357,44 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   }
   productionImageResponseBytes(tenantId: string, projectId: string): number {
     return Number(this.database.prepare("SELECT COALESCE(SUM(length(body)), 0) AS bytes FROM production_image_responses WHERE tenant_id = ? AND project_id = ?").get(tenantId, projectId)?.bytes ?? 0);
+  }
+  supportsProductionImageArtifacts(): boolean { return this.productionArtifactStorageEnabled; }
+  loadProductionImageArtifact(tenant: string, project: string, mode: ProductionImageArtifact["mode"], job: string): ProductionImageArtifact | null {
+    if (!this.productionArtifactStorageEnabled) throw new Error("生产产物存储默认关闭");
+    try { return this.transaction(() => {
+      const args = [tenant, project, mode, job];
+      const row = this.database.prepare("SELECT asset_id, record_sha256, length(CAST(record AS BLOB)) AS bytes FROM production_image_artifacts WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(...args);
+      const marker = this.database.prepare("SELECT asset_id, record_sha256 FROM production_image_artifact_presence WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(...args);
+      if (!row && !marker) return null;
+      if (!row || !marker || row.asset_id !== marker.asset_id || row.record_sha256 !== marker.record_sha256 || typeof row.bytes !== "number" || row.bytes > 512 * 1024) throw new Error("生产产物证据缺失或超限");
+      const value = this.database.prepare("SELECT record, record_sha256 FROM production_image_artifacts WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(...args)!;
+      const record = ProductionImageArtifactSchema.parse(this.readImageMetadata(value));
+      const sizes = this.database.prepare("SELECT length(body) AS bytes, length(CAST(record AS BLOB)) AS metadata FROM verified_images WHERE tenant_id = ? AND project_id = ? AND asset_id = ?").get(tenant, project, String(row.asset_id));
+      if (record.tenantId !== tenant || record.projectId !== project || record.mode !== mode || record.jobId !== job || record.image.asset.id !== row.asset_id
+        || !sizes || typeof sizes.bytes !== "number" || sizes.bytes < 1 || sizes.bytes > 20 * 1024 * 1024 || typeof sizes.metadata !== "number" || sizes.metadata > 512 * 1024) throw new Error("生产产物归属或正文容量损坏");
+      const image = this.loadVerifiedImageBytes(tenant, project, record.image.asset.id);
+      try { if (!image || JSON.stringify(image.receipt) !== JSON.stringify(record.image)) throw new Error("生产产物正文/收据与谱系不一致"); }
+      finally { image?.body.fill(0); }
+      return record;
+    }); } catch (error) { throw databaseError(error); }
+  }
+  saveProductionImageArtifact(input: ProductionImageArtifact, body: Buffer, limits: { maxMetadataBytes?: number; maxProjectBytes?: number } = {}): void {
+    if (!this.productionArtifactStorageEnabled || this.depth === 0) throw new Error("生产产物须显式同库同步事务");
+    const r = ProductionImageArtifactSchema.parse(input), payload = this.imageMetadataPayload(r), hash = createHash("sha256").update(payload).digest("hex");
+    const metadata = limits.maxMetadataBytes ?? 16 * 1024 * 1024, binary = limits.maxProjectBytes ?? 512 * 1024 * 1024;
+    if (!Number.isSafeInteger(metadata) || metadata < 0 || metadata > 16 * 1024 * 1024 || !Number.isSafeInteger(binary) || binary < 0 || binary > 512 * 1024 * 1024
+      || !Buffer.isBuffer(body) || body.byteLength !== r.image.asset.byteSize || body.byteLength > 20 * 1024 * 1024 || createHash("sha256").update(body).digest("hex") !== r.image.checksumSha256) throw new Error("生产产物容量或字节不一致");
+    this.transaction(() => {
+      const existing = this.loadProductionImageArtifact(r.tenantId, r.projectId, r.mode, r.jobId);
+      if (existing) { if (JSON.stringify(existing) !== payload) throw new Error("生产产物历史不能覆盖"); return; }
+      if (this.localImageBinaryBytes(r.tenantId, r.projectId) + body.length > binary
+        || this.imageMetadataBytes(r.tenantId, r.projectId) + imageTaskMetadataBytes(this.load(), r.tenantId, r.projectId) + Buffer.byteLength(payload) > metadata) throw new Error("生产产物共享容量不足");
+      this.saveVerifiedImage(r.image, body);
+      this.database.prepare("INSERT INTO production_image_artifacts(tenant_id, project_id, mode, job_id, asset_id, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(r.tenantId, r.projectId, r.mode, r.jobId, r.image.asset.id, payload, hash);
+      this.database.prepare("INSERT INTO production_image_artifact_presence(tenant_id, project_id, mode, job_id, asset_id, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(r.tenantId, r.projectId, r.mode, r.jobId, r.image.asset.id, hash);
+    });
   }
   // Internal raw storage ONLY, default closed. Does not prove actual task,
   // attempt, permissions, transport invocation, asset authorization or billing.

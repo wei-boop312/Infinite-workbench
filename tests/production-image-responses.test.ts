@@ -351,7 +351,7 @@ describe("6D4A 默认关闭有界生产原包存储（尚未绑定实际任务�
     withDb(f.path, db => db.exec("DROP TABLE production_image_responses; DROP TABLE production_image_response_presence; CREATE TABLE owned_user_data(value TEXT); INSERT INTO owned_user_data VALUES('preserve'); PRAGMA user_version=6"));
     const upgraded = rawStore(f.path); expect(upgraded.load()).toEqual(before); expect(upgraded.loadCatalog()).toEqual(catalog);
     expect(upgraded.loadVerifiedImageBytes(principal.tenantId, "project-a", "preserved-source")!.body).toEqual(png);
-    withDb(f.path, db => { expect(db.prepare("PRAGMA user_version").get()!.user_version).toBe(7); expect(db.prepare("SELECT value FROM owned_user_data").get()!.value).toBe("preserve"); db.exec("PRAGMA user_version=8"); });
+    withDb(f.path, db => { expect(db.prepare("PRAGMA user_version").get()!.user_version).toBe(8); expect(db.prepare("SELECT value FROM owned_user_data").get()!.value).toBe("preserve"); db.exec("PRAGMA user_version=9"); });
     expect(() => new SqliteRunKernelStateStore(f.path)).toThrow(); expect(withDb(f.path, db => db.prepare("SELECT value FROM owned_user_data").get()!.value)).toBe("preserve");
   });
   it.each(["production_image_responses", "production_image_response_presence"])("v7缺失%s不假装空或重建", async table => {

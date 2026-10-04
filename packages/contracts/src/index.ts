@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
-import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
+import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
 
 export * from "./imageProviders.ts";
 export * from "./productionImagePricing.ts";
@@ -627,6 +627,7 @@ export const RunAuditEventSchema = z.object({
     "production-image-attempted",
     "production-image-returned",
     "production-image-interrupted",
+    "production-image-artifact-verified",
     "image-artifact-verified",
     "image-artifact-rejected",
     "job-succeeded",
@@ -862,6 +863,19 @@ export const ProductionImageOutputDraftSchema = z.object({
 }).strict();
 export type ProductionImageOutputDraft = z.infer<typeof ProductionImageOutputDraftSchema>;
 
+// Independent production lineage; legacy GeneratedImageRecord still requires
+// a numeric quote. This record is evidence, never a caller's commit authority.
+export const ProductionImageArtifactSchema = z.object({
+  schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]),
+  validation: z.literal("verified"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),
+  tenantId: IdSchema, projectId: IdSchema, jobId: ProductionEvidenceJob, batchId: ProductionImageBatchIdSchema,
+  draft: ProductionImageOutputDraftSchema, draftFingerprint: ProductionEvidenceHash,
+  request: ProductionImageExecutionRequestSchema, constraint: ConstraintSnapshotSchema,
+  transformedInputs: z.array(ImageInputTransformSchema).max(21),
+  image: VerifiedImageSchema, committedBy: IdSchema, committedAt: IsoDateSchema,
+}).strict();
+export type ProductionImageArtifact = z.infer<typeof ProductionImageArtifactSchema>;
+
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,
   projectId: IdSchema,
@@ -881,6 +895,8 @@ export const RunKernelStoredBatchSchema = z.object({
   productionImageAttemptFingerprint: ProductionEvidenceHash.optional(),
   productionImageResult: ProductionImageResultSchema.optional(),
   productionImageResultFingerprint: ProductionEvidenceHash.optional(),
+  productionImageArtifact: ProductionImageArtifactSchema.optional(),
+  productionImageArtifactFingerprint: ProductionEvidenceHash.optional(),
   imageExecution: ConfirmedImageExecutionSchema.optional(),
   imageDispatchIntent: ImageDispatchIntentSchema.optional(),
   imageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),

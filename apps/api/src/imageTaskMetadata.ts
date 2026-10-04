@@ -4,7 +4,8 @@ export function imageTaskMetadataBytes(snapshot: RunKernelSnapshot | null, tenan
     .reduce((total, item) => total + [item.productionImageExecution, item.productionImageLeases, item.productionImageDispatchIntent,
       item.productionImageDispatchIntentFingerprint,
       item.productionImageAttempt, item.productionImageAttemptFingerprint, item.productionImageResult, item.productionImageResultFingerprint,
-      ...(item.productionImageExecution ? [item.aggregate.audit.filter((a) => ["job-leased", "job-lease-expired", "job-started", "billing-unknown", "production-image-attempted", "production-image-returned", "production-image-interrupted"].includes(a.eventType)),
+      item.productionImageArtifact, item.productionImageArtifactFingerprint,
+      ...(item.productionImageExecution ? [item.aggregate.audit.filter((a) => ["job-leased", "job-lease-expired", "job-started", "billing-unknown", "production-image-attempted", "production-image-returned", "production-image-interrupted", "production-image-artifact-verified"].includes(a.eventType)),
         item.aggregate.ledger.filter((l) => l.settlement === "unknown")] : []),
       item.imageExecution, item.imageDispatchIntent, item.imageFixtureAttempt, item.imageFixtureResult, item.imageTaskArtifact, item.imageTaskArtifactFailures]
       .reduce((bytes, record) => bytes + (record ? Buffer.byteLength(JSON.stringify(record), "utf8") : 0), 0), 0);

@@ -18,6 +18,7 @@ import {
   ProductionImageLeaseEvidenceSchema, type ProductionImageLeaseEvidence,
   type ProductionImageDispatchIntent,
   type ProductionImageAttempt, type ProductionImageResult,
+  type ProductionImageArtifact,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -43,6 +44,7 @@ import { assertProductionConfirmation, productionConfirmationKey } from "./produ
 import { assertProductionDispatchIntent } from "./productionImageDispatchIntentIntegrity";
 import { assertProductionImageAttempt } from "./productionImageResponse";
 import { assertProductionImageResult } from "./productionImageResultIntegrity";
+import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
 import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
 export type RunPrincipal = {
@@ -131,6 +133,8 @@ type StoredBatch = {
   productionImageAttemptFingerprint?: string;
   productionImageResult?: ProductionImageResult;
   productionImageResultFingerprint?: string;
+  productionImageArtifact?: ProductionImageArtifact;
+  productionImageArtifactFingerprint?: string;
   imageExecution?: ConfirmedImageExecution;
   imageDispatchIntent?: ImageDispatchIntent;
   imageDispatchIntentFingerprint?: string;
@@ -174,6 +178,11 @@ export type RunKernelOptions = {
   productionImageLeasePolicy?: ProductionImageLeasePolicy;
   productionImageStartPolicy?: ProductionImageStartPolicy;
   productionImageResponsePolicy?: ProductionImageResponsePolicy;
+  productionImageArtifactPolicy?: {
+    usesStateStore(store: unknown): boolean;
+    authorizeScope(p: RunPrincipal, project: string): boolean;
+    validateCommit(p: RunPrincipal, record: ProductionImageArtifact): boolean;
+  };
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
   validateImageTask?: (principal: RunPrincipal, execution: ConfirmedImageExecution, intent?: ImageDispatchIntent, additionalMetadataBytes?: number) => undefined;
@@ -805,6 +814,33 @@ export class InMemoryRunKernel implements RunKernelPort {
     const c = this.inspectProductionImageAttempt(p, project, batch, job, input);
     if (!c.attempt || !c.result || c.aggregate.jobs[0].status !== "billing_unknown") throw new RunKernelError(409, "production_image_result_missing", "响应未实际保存");
     this.productionPolicyTrue(() => this.options.productionImageResponsePolicy!.validateResult(p, c.execution, c.lease, c.intent!, c.attempt!, c.result!));
+  }
+
+  inspectProductionImageArtifact(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest) {
+    const policy = this.options.productionImageArtifactPolicy;
+    if (!policy) throw new RunKernelError(503, "production_image_artifact_not_configured", "生产产物默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(p, project));
+    const current = this.inspectProductionImageAttempt(p, project, batch, job, input), stored = this.requireBatch(p, batch);
+    if (!current.attempt || !current.intent || current.result?.kind !== "returned" || current.aggregate.jobs[0].status !== "billing_unknown")
+      throw new RunKernelError(409, "production_image_artifact_response_required", "产物须实际保存的当次完整原包");
+    return { ...current, artifact: stored.productionImageArtifact ? structuredClone(stored.productionImageArtifact) : undefined };
+  }
+
+  attachProductionImageArtifact(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest, record: ProductionImageArtifact) {
+    const current = this.inspectProductionImageArtifact(p, project, batch, job, input), stored = this.requireBatch(p, batch), hash = imageSnapshotFingerprint(record);
+    if (current.artifact) {
+      if (imageSnapshotFingerprint(current.artifact) !== hash) throw new RunKernelError(409, "production_image_artifact_conflict", "原产物不能覆盖");
+      return current.aggregate;
+    }
+    assertProductionImageArtifact(stored, record);
+    if (Date.parse(record.committedAt) > this.clock()) throw new RunKernelError(409, "production_image_artifact_clock_invalid", "产物时间不能晚于实际提交");
+    const event = { ...this.audit(stored.aggregate.batch, p.actorId, "production-image-artifact-verified", { jobId: job,
+      artifactFingerprint: hash, assetId: record.image.asset.id, checksumSha256: record.image.checksumSha256 }), createdAt: record.committedAt };
+    this.assertProductionImageTask(p, project, batch, "history", Buffer.byteLength(JSON.stringify(record)) + Buffer.byteLength(JSON.stringify(event)) + 70);
+    this.productionPolicyTrue(() => this.options.productionImageArtifactPolicy!.validateCommit(p, structuredClone(record)));
+    stored.productionImageArtifact = record; stored.productionImageArtifactFingerprint = hash; stored.aggregate.audit.push(event);
+    this.replaceJob(stored.aggregate, { ...stored.aggregate.jobs[0], outputAssetIds: [record.image.asset.id] });
+    this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
   }
 
   private productionUnknown(stored: StoredBatch, p: RunPrincipal, reason: string): boolean {
@@ -1566,6 +1602,7 @@ export class InMemoryRunKernel implements RunKernelPort {
         productionImageDispatchIntentFingerprint: serialized.productionImageDispatchIntentFingerprint,
         productionImageAttempt: serialized.productionImageAttempt, productionImageAttemptFingerprint: serialized.productionImageAttemptFingerprint,
         productionImageResult: serialized.productionImageResult, productionImageResultFingerprint: serialized.productionImageResultFingerprint,
+        productionImageArtifact: serialized.productionImageArtifact, productionImageArtifactFingerprint: serialized.productionImageArtifactFingerprint,
         imageExecution: serialized.imageExecution,
         imageDispatchIntent: serialized.imageDispatchIntent,
         imageDispatchIntentFingerprint: serialized.imageDispatchIntentFingerprint,
@@ -1656,6 +1693,7 @@ export class InMemoryRunKernel implements RunKernelPort {
         ...(stored.productionImageDispatchIntentFingerprint ? { productionImageDispatchIntentFingerprint: stored.productionImageDispatchIntentFingerprint } : {}),
         ...(stored.productionImageAttempt ? { productionImageAttempt: stored.productionImageAttempt, productionImageAttemptFingerprint: stored.productionImageAttemptFingerprint } : {}),
         ...(stored.productionImageResult ? { productionImageResult: stored.productionImageResult, productionImageResultFingerprint: stored.productionImageResultFingerprint } : {}),
+        ...(stored.productionImageArtifact ? { productionImageArtifact: stored.productionImageArtifact, productionImageArtifactFingerprint: stored.productionImageArtifactFingerprint } : {}),
         ...(stored.imageExecution ? { imageExecution: stored.imageExecution } : {}),
         ...(stored.imageDispatchIntent ? { imageDispatchIntent: stored.imageDispatchIntent, imageDispatchIntentFingerprint: stored.imageDispatchIntentFingerprint } : {}),
         ...(stored.imageFixtureAttempt ? { imageFixtureAttempt: stored.imageFixtureAttempt, imageFixtureAttemptFingerprint: stored.imageFixtureAttemptFingerprint } : {}),
@@ -1683,12 +1721,12 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
+        if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);
-      } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint) {
+      } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint) {
         throw new Error("生产租约缺少独立生产确认");
       } else {
         if (batch.imageMode) throw new Error("生产任务缺少独立完整确认");
@@ -1846,7 +1884,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       || b.createdAt !== e.confirmedAt || b.expectedOutputs !== 1 || b.estimatedCostMinor !== estimate || b.maxCostMinor !== q.maxCostMinor
       || b.currency !== q.currency || jobs.length !== 1 || !j || j.id !== r.jobId || j.imageMode !== e.mode || j.batchId !== b.id
       || j.idempotencyKey !== r.idempotencyKey || j.executorKind !== "provider" || j.adapterId !== r.adapterId || j.estimatedCostMinor !== estimate
-      || j.outputIndex !== 0 || j.attempt !== 1 || j.createdAt !== e.confirmedAt || j.outputAssetIds.length
+      || j.outputIndex !== 0 || j.attempt !== 1 || j.createdAt !== e.confirmedAt
+      || imageSnapshotFingerprint(j.outputAssetIds) !== imageSnapshotFingerprint(stored.productionImageArtifact ? [stored.productionImageArtifact.image.asset.id] : [])
       || (b.status === "queued" ? !["queued", "leased"].includes(j.status) : j.status !== b.status)
       || JSON.stringify(b.inputAssetIds) !== JSON.stringify(ids) || JSON.stringify(j.inputAssetIds) !== JSON.stringify(ids)
       || [j.providerRequestId, j.retryOf, j.actualCostMinor,
@@ -1939,11 +1978,19 @@ export class InMemoryRunKernel implements RunKernelPort {
     if (["production-response-returned", "production-timeout", "production-transport-error", "production-response-invalid", "production-response-save-failed"].includes(j.failureCode ?? "")
       && (!result || j.finishedAt !== (result.kind === "returned" ? result.receivedAt : result.interruptedAt)
         || j.failureCode !== (result.kind === "returned" ? "production-response-returned" : result.outcome.failureCode))) throw new Error("生产未知响应结论不一致");
+    const artifacts = audit.filter(a => a.eventType === "production-image-artifact-verified"), artifact = stored.productionImageArtifact;
+    if (!!artifact !== !!stored.productionImageArtifactFingerprint || artifacts.length !== (artifact ? 1 : 0)) throw new Error("生产产物缺少任务/审计绑定");
+    if (artifact) {
+      assertProductionImageArtifact(stored, artifact);
+      if (stored.productionImageArtifactFingerprint !== imageSnapshotFingerprint(artifact) || artifacts[0].actorId !== artifact.committedBy
+        || artifacts[0].createdAt !== artifact.committedAt || imageSnapshotFingerprint(artifacts[0].metadata) !== imageSnapshotFingerprint({ jobId: j.id,
+          artifactFingerprint: stored.productionImageArtifactFingerprint, assetId: artifact.image.asset.id, checksumSha256: artifact.image.checksumSha256 })) throw new Error("生产产物审计损坏");
+    }
     const cancelled = audit.filter((a) => a.eventType === "batch-cancelled"), released = audit.filter((a) => a.eventType === "budget-released");
     if (cancelled.length !== (b.status === "cancelled" ? 1 : 0) || released.length !== (releaseNeeded ? 1 : 0)
       || cancelled.some((a) => a.createdAt !== j.finishedAt || a.metadata.previousStatus !== "queued")
       || released.some((a) => a.createdAt !== j.finishedAt || a.metadata.releasedMinor !== String(q.maxCostMinor))
-      || audit.length !== 4 + cancelled.length + released.length + leaseEvents.length + expiries.length + starts.length + unknowns.length + attempts.length + results.length || new Set(audit.map((a) => a.id)).size !== audit.length
+      || audit.length !== 4 + cancelled.length + released.length + leaseEvents.length + expiries.length + starts.length + unknowns.length + attempts.length + results.length + artifacts.length || new Set(audit.map((a) => a.id)).size !== audit.length
       || audit.some((a) => a.tenantId !== b.tenantId || a.projectId !== b.projectId || a.batchId !== b.id)) throw new Error("生产取消审计不一致");
   }
 
