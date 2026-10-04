@@ -1,5 +1,7 @@
 # 6D9A 独立生产谱系与生成原图只读回读
 
+最新增量：6D9C受控回画布已本地验收，最终1841单元/集成、189Chrome、6构建，见[production-generated-result-canvas.md](production-generated-result-canvas.md)。原A+B+C本地底座完成，原只读服务/权限和默认关闭保持；下方A/B时点“未缓存/未回流/下一步回流”仅历史。
+
 最新增量：6D9B浏览器独立原图缓存已本地验收（1800单元/集成、160Chrome、6构建），见[production-generated-asset-cache.md](production-generated-asset-cache.md)。下一步原受控画布回流；以下A时点边界保留为历史，不代表当前尚无浏览器缓存。
 
 2026-10-05 02:19（上海）。原冻结的生产产物回读/缓存/回流项有限分步：A 服务端独立谱系与二进制，随后浏览器缓存与受控回流。没有新增最终功能。A本地验收：首完整pnpm check为1756项单元/集成（52文件）、134项Chrome、6构建全部通过，新增78项/1Chrome；相关315项/API通过。本步骤不是浏览器缓存/回画布、真实供应商/生产会话/价格费用或阶段4完成。日常真实执行关闭。

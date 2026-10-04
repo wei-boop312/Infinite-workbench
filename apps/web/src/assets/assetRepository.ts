@@ -348,13 +348,24 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
   }
 
   async readProductionGenerated(input: ProductionGeneratedAssetLineage, abortSignal: AbortSignal): Promise<Asset> {
+    return (await this.readProductionSnapshot(input, abortSignal, false)).asset;
+  }
+
+  async readProductionResult(input: ProductionGeneratedAssetLineage, abortSignal: AbortSignal): Promise<{ asset: Asset; inputAssets: Asset[] }> {
+    return this.readProductionSnapshot(input, abortSignal, true);
+  }
+
+  private async readProductionSnapshot(input: ProductionGeneratedAssetLineage, abortSignal: AbortSignal, includeInputs: boolean): Promise<{ asset: Asset; inputAssets: Asset[] }> {
     const frozen = structuredClone(input); abortSignal.throwIfAborted();
     const { assertProductionLineage, ProductionReadLifetime, productionMarkerMatches } = await import("./productionGeneratedAssetPolicy");
     const life = new ProductionReadLifetime(abortSignal, "production-local-validation");
     try {
       const view = await life.wait(assertProductionLineage(frozen, { generatedReadUiEnabled: true, tenantId: frozen.tenantId, mode: frozen.mode }, frozen.projectId, frozen.image.asset.id));
+      const d = view.requestDraft, refs = includeInputs ? [...d.inputs, ...(d.operation === "edit" && d.mask ? [d.mask] : [])] : [];
+      if (refs.reduce((total, ref) => total + ref.byteSize, 0) > 64 * 1024 * 1024) throw new Error("生产回流原输入声明超过 64MiB，未读取本机原文件。");
       const expected = view.image.asset, database = await life.wait(openDatabase(life.signal), db => db.close());
       let asset: Asset | undefined, marker: ProductionCacheRecord | undefined, original: BlobRecord | undefined, proxy: BlobRecord | undefined, local: unknown;
+      let inputRecords: Array<[Asset | undefined, BlobRecord | undefined]> = [];
       try {
         life.check();
         const transaction = database.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE, PRODUCTION_CACHE_STORE], "readonly"), done = transactionComplete(transaction);
@@ -362,13 +373,18 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
         const abort = () => { try { transaction.abort(); } catch { /* Read snapshot already completed. */ } };
         life.signal.addEventListener("abort", abort, { once: true });
         try {
-          [asset, marker, original, proxy, local] = await life.wait(Promise.all([
+          const reads = Promise.all([
             requestResult(transaction.objectStore(ASSET_STORE).get(expected.id) as IDBRequest<Asset | undefined>),
             requestResult(transaction.objectStore(PRODUCTION_CACHE_STORE).get(expected.id) as IDBRequest<ProductionCacheRecord | undefined>),
             requestResult(transaction.objectStore(BLOB_STORE).get(`${expected.id}:original`) as IDBRequest<BlobRecord | undefined>),
             requestResult(transaction.objectStore(BLOB_STORE).get(`${expected.id}:proxy`) as IDBRequest<BlobRecord | undefined>),
             requestResult(transaction.objectStore(GENERATED_CACHE_STORE).get(expected.id)),
-          ]));
+          ]);
+          const inputReads = Promise.all(refs.map(ref => Promise.all([
+            requestResult(transaction.objectStore(ASSET_STORE).get(ref.assetId) as IDBRequest<Asset | undefined>),
+            requestResult(transaction.objectStore(BLOB_STORE).get(`${ref.assetId}:original`) as IDBRequest<BlobRecord | undefined>),
+          ])));
+          [[asset, marker, original, proxy, local], inputRecords] = await life.wait(Promise.all([reads, inputReads]));
           await life.wait(done);
         } catch (e) { abort(); await done.catch(() => undefined); throw e; }
         finally { life.signal.removeEventListener("abort", abort); }
@@ -381,7 +397,23 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
       const bitmap = await life.wait(createImageBitmap(original.blob), late => late.close());
       try { if (bitmap.width !== expected.width || bitmap.height !== expected.height) throw new Error("生产原图缓存实际尺寸错配。"); }
       finally { bitmap.close(); }
-      life.check(); return structuredClone(asset);
+      const { AssetSchema } = await life.wait(import("@canvas/contracts"));
+      const inputAssets: Asset[] = [];
+      for (const [index, ref] of refs.entries()) {
+        const [metadata, record] = inputRecords[index], a = AssetSchema.parse(metadata);
+        if (a.id !== ref.assetId || a.projectId !== view.projectId || a.kind !== "image" || a.contentFingerprint !== `sha256:${ref.checksumSha256}`
+          || a.mimeType !== ref.mimeType || a.width !== ref.width || a.height !== ref.height || a.byteSize !== ref.byteSize
+          || ref.width > 8192 || ref.height > 8192 || ref.width * ref.height > 16_000_000
+          || (index === d.inputs.length ? a.purpose !== "mask" || a.sourceAssetId !== d.inputs[0]?.assetId : a.purpose === "mask")
+          || !record || record.key !== `${ref.assetId}:original` || record.assetId !== ref.assetId || record.role !== "original"
+          || !(record.blob instanceof Blob) || record.blob.type !== ref.mimeType || record.blob.size !== ref.byteSize) throw new Error("本机原输入/蒙版元数据、順序或完整原文件错配。");
+        if (await life.wait(blobSha256(record.blob)) !== ref.checksumSha256) throw new Error("本机原输入/蒙版 SHA 错配。");
+        const native = await life.wait(createImageBitmap(record.blob), late => late.close());
+        try { if (native.width !== ref.width || native.height !== ref.height) throw new Error("本机原输入/蒙版实际尺寸错配。"); }
+        finally { native.close(); }
+        inputAssets.push(a);
+      }
+      life.check(); return { asset: structuredClone(asset), inputAssets };
     } finally { life.close(); }
   }
 

@@ -73,4 +73,13 @@ export class ProductionGeneratedAssetClient {
       life.check(); return { asset, view: latest };
     } finally { life.close(); }
   }
+  async result(projectId: string, assetId: string, repository: Pick<typeof assetRepository, "readProductionResult"> = assetRepository) {
+    const life = new ProductionReadLifetime(this.signal, "production-cache");
+    try {
+      const view = await this.readLineage(projectId, assetId, life), snapshot = await life.wait(repository.readProductionResult(view, life.signal));
+      const latest = await this.readLineage(projectId, assetId, life);
+      if (productionCacheIdentity(latest) !== productionCacheIdentity(view)) throw new Error("生产回流完整冻结关系漂移。");
+      life.check(); return { ...snapshot, view: latest };
+    } finally { life.close(); }
+  }
 }

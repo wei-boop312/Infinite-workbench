@@ -3,8 +3,9 @@ import { ProductionGeneratedReadScopeSchema, type Asset, type ProductionGenerate
 import { ProductionGeneratedAssetClient } from "../runs/productionGeneratedAssetClient";
 const amount = (minor: number, currency: string) => `${currency} ${minor} 最小单位`;
 
-export default function ProductionGeneratedAssetPanel({ scope: input, projectId, onCachedAsset }: {
+export default function ProductionGeneratedAssetPanel({ scope: input, projectId, onCachedAsset, onAddProduction }: {
   scope: ProductionGeneratedReadScope; projectId: string; onCachedAsset: (asset: Asset) => void;
+  onAddProduction: (client: ProductionGeneratedAssetClient, assetId: string, signal: AbortSignal) => Promise<void>;
 }) {
   const scope = ProductionGeneratedReadScopeSchema.parse(input), [id, setId] = useState(""), [busy, setBusy] = useState(false);
   const [view, setView] = useState<ProductionGeneratedAssetLineage | null>(null), [error, setError] = useState(""), [notice, setNotice] = useState("");
@@ -13,12 +14,15 @@ export default function ProductionGeneratedAssetPanel({ scope: input, projectId,
     const c = new AbortController(); abort.current = c; client.current = new ProductionGeneratedAssetClient(scope, c.signal);
     return () => { c.abort(); client.current = null; abort.current = null; };
   }, [projectId, scope.tenantId, scope.mode]);
-  const run = async (kind: "lineage" | "cache" | "verify") => {
+  const run = async (kind: "lineage" | "cache" | "verify" | "return") => {
     const api = client.current, signal = abort.current?.signal, assetId = id.trim(); if (!api || !signal || pending.current) return;
     const current = () => client.current === api && !signal.aborted;
     pending.current = true; setBusy(true); setError(""); setNotice(""); setView(null);
     try {
-      if (kind === "cache") {
+      if (kind === "return") {
+        await onAddProduction(api, assetId, signal); if (!current()) return;
+        setNotice("生产原图已受控回画布；未生成、核账或释放未知预留。");
+      } else if (kind === "cache") {
         const asset = await api.cache(projectId, assetId); if (!current()) return;
         onCachedAsset(asset); setNotice("生产原文件已缓存到项目资产库；未生成、结算或回画布。");
       } else {
@@ -34,6 +38,7 @@ export default function ProductionGeneratedAssetPanel({ scope: input, projectId,
     <label>原产物编号<input aria-label="生产原图资产编号" maxLength={160} value={id} disabled={busy} onChange={e => { setId(e.target.value); setView(null); setNotice(""); setError(""); }} /></label>
     <div className="run-fields"><button disabled={busy || !id.trim()} onClick={() => void run("lineage")}>只读生产原图谱系</button><button disabled={busy || !id.trim()} onClick={() => void run("cache")}>缓存生产原图</button></div>
     <button disabled={busy || !id.trim()} onClick={() => void run("verify")}>重新核验生产原图缓存</button>
+    <button disabled={busy || !id.trim()} onClick={() => void run("return")}>核验生产原图并回画布</button>
     {error && <p role="alert" className="run-error">{error}</p>}{notice && <p role="status" className="run-hint">{notice}</p>}
     {view && <article className="image-preparation-summary" aria-label="生产原图谱系摘要">
       <strong>{view.image.asset.originalName} · {view.image.asset.width}×{view.image.asset.height} · {view.image.asset.mimeType}</strong>
@@ -41,7 +46,7 @@ export default function ProductionGeneratedAssetPanel({ scope: input, projectId,
       <small>原图 {view.image.asset.byteSize} 字节 · SHA {view.image.checksumSha256} · 产物 {view.artifactFingerprint}</small>
       <p>原估价 {view.billing.estimatedMinor === null ? "未知（不是零费用）" : amount(view.billing.estimatedMinor, view.billing.currency)} · 原上限 {amount(view.billing.maxCostMinor, view.billing.currency)} · 当前结算上限 {amount(view.billing.currentMaxCostMinor, view.billing.currency)} · 当前预留 {amount(view.billing.reservedMinor, view.billing.currency)} · 实费 {view.billing.actualMinor === undefined ? "未测得" : amount(view.billing.actualMinor, view.billing.currency)}</p>
       <details><summary>原冻结输入与约束</summary><pre>{JSON.stringify({ request: view.requestDraft, constraint: view.constraint, transformedInputs: view.transformedInputs }, null, 2)}</pre></details>
-      <p className="run-hint">本机副本可离线保留，缓存不代表当前读取权限；普通添加到画布仍关闭，受控生产回流尚未开放。</p>
+      <p className="run-hint">本机副本可离线保留，缓存不代表当前读取权限；普通添加到画布仍关闭，受控回流每次重新核验服务器与本机原图、输入及约束。</p>
     </article>}
   </section>;
 }

@@ -9,6 +9,7 @@ import ImagePreparationPanel from "./ImagePreparationPanel";
 import ProductionImagePreparationPanel from "./ProductionImagePreparationPanel";
 import ProductionGeneratedAssetPanel from "./ProductionGeneratedAssetPanel";
 import GeneratedImageResult from "./GeneratedImageResult";
+import type { ProductionGeneratedAssetClient } from "../runs/productionGeneratedAssetClient";
 import "./RunPanel.css";
 
 type Props = {
@@ -23,6 +24,7 @@ type Props = {
   onAddResults: (batch: RunBatchAggregate) => void;
   onCachedAsset: (asset: Asset) => void;
   onAddGenerated: (view: GeneratedAssetLineage, signal: AbortSignal) => Promise<void>;
+  onAddProduction: (client: ProductionGeneratedAssetClient, assetId: string, signal: AbortSignal) => Promise<void>;
 };
 type Decision = { kind: "retry" | "billing"; job: RunJob; batch: RunBatchAggregate }
   | { kind: "overage-review"; job: RunJob; batch: RunBatchAggregate; overage: BillingOverage };
@@ -60,7 +62,7 @@ export default function RunPanel(props: Props) {
     {props.productionImagePreparation && <ProductionImagePreparationPanel key={`${props.productionImagePreparation.tenantId}:${props.productionImagePreparation.mode}:${props.projectId}`}
       scope={props.productionImagePreparation} projectId={props.projectId} assets={props.assets} constraints={props.constraints} missingOriginalAssetIds={props.missingOriginalAssetIds} disabled={false} />}
     {props.productionGeneratedRead && <ProductionGeneratedAssetPanel key={`${props.productionGeneratedRead.tenantId}:${props.productionGeneratedRead.mode}:${props.projectId}`}
-      scope={props.productionGeneratedRead} projectId={props.projectId} onCachedAsset={props.onCachedAsset} />}
+      scope={props.productionGeneratedRead} projectId={props.projectId} onCachedAsset={props.onCachedAsset} onAddProduction={props.onAddProduction} />}
   </aside>;
   return <LocalRunPanel {...props} />;
 }

@@ -1,5 +1,5 @@
 import type { Asset, CanvasDocument, ConstraintSnapshot } from "@canvas/contracts";
-import { migrateCanvasDocumentLight, parseGeneratedCanvasHistory } from "@canvas/canvas-schema/light";
+import { migrateCanvasDocumentLight, parseGeneratedCanvasHistory, parseProductionCanvasHistory } from "@canvas/canvas-schema/light";
 
 const MAGIC = "AICPKG01";
 const MAGIC_BYTES = new TextEncoder().encode(MAGIC);
@@ -130,6 +130,12 @@ function validateReferences(document: CanvasDocument, constraints: ConstraintSna
       if (!output || output.purpose !== "generated" || output.contentFingerprint !== `sha256:${history.checksumSha256}`
         || history.inputAssetIds.some(id => !assetMap.has(id))) throw new Error("生成结果历史的输出或输入引用已断裂");
       if (history.evidence === "local-fixture-history" && history.originProjectId !== document.projectId) throw new Error("生成结果历史项目错配");
+    }
+    if (node.data.productionGeneratedHistory !== undefined) {
+      const h = parseProductionCanvasHistory(node.data.productionGeneratedHistory), output = assetMap.get(h.assetId);
+      if (!output || output.purpose !== "generated" || output.contentFingerprint !== `sha256:${h.checksumSha256}`
+        || h.inputAssetIds.some((id, i) => assetMap.get(id)?.contentFingerprint !== `sha256:${h.inputChecksums[i]}`)) throw new Error("生产历史原图或输入引用已断裂。");
+      if (h.evidence !== "imported-copy-history" && h.originProjectId !== document.projectId) throw new Error("生产历史原确认项目错配。");
     }
   }
 }
@@ -321,7 +327,7 @@ export function remapProjectPackage(source: PortableProject, documentId: string,
       ...node,
       data: {
         ...node.data,
-        ...(node.data.generatedHistory === undefined ? {} : { badge: "导入历史副本", subtitle: "离线原图与历史关系 · 非服务端新授权" }),
+        ...(node.data.generatedHistory === undefined && node.data.productionGeneratedHistory === undefined ? {} : { badge: "导入历史副本", subtitle: "离线原图与历史关系 · 非服务端新授权" }),
         assetId: node.data.assetId ? assetIds.get(node.data.assetId) : undefined,
         constraintSnapshotId: node.data.constraintSnapshotId
           ? constraintIds.get(node.data.constraintSnapshotId)
@@ -330,6 +336,11 @@ export function remapProjectPackage(source: PortableProject, documentId: string,
           const history = parseGeneratedCanvasHistory(node.data.generatedHistory);
           return { ...history, evidence: "imported-copy-history" as const, assetId: assetIds.get(history.assetId),
             inputAssetIds: history.inputAssetIds.map(id => assetIds.get(id)), constraintSnapshotId: constraintIds.get(history.constraintSnapshotId) };
+        })(),
+        productionGeneratedHistory: node.data.productionGeneratedHistory === undefined ? undefined : (() => {
+          const h = parseProductionCanvasHistory(node.data.productionGeneratedHistory);
+          return { ...h, evidence: "imported-copy-history" as const, assetId: assetIds.get(h.assetId),
+            inputAssetIds: h.inputAssetIds.map(id => assetIds.get(id)), constraintSnapshotId: constraintIds.get(h.constraintSnapshotId) };
         })(),
       },
     })),

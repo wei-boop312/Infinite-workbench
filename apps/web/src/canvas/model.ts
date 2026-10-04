@@ -1,6 +1,6 @@
 import type { Edge, Node, XYPosition } from "@xyflow/react";
 import type { Asset } from "@canvas/contracts";
-import type { GeneratedCanvasHistory } from "@canvas/canvas-schema/light";
+import type { GeneratedCanvasHistory, ProductionCanvasHistory } from "@canvas/canvas-schema/light";
 
 export type StudioKind = "image" | "video" | "constraint" | "action" | "output" | "text";
 
@@ -15,6 +15,7 @@ export type StudioNodeData = {
   runJobId?: string;
   runBatchId?: string;
   generatedHistory?: GeneratedCanvasHistory;
+  productionGeneratedHistory?: ProductionCanvasHistory;
   body?: string;
 };
 

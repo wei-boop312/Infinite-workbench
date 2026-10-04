@@ -1047,12 +1047,40 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead }: P
     }
   }, [commit, loaded, screenToFlowPosition, setFlowViewport]);
 
+  const addProductionResult = useCallback(async (client: import("./runs/productionGeneratedAssetClient").ProductionGeneratedAssetClient, assetId: string, signal: AbortSignal) => {
+    const scope = productionGeneratedRead, targetProject = projectId;
+    const check = () => {
+      signal.throwIfAborted();
+      if (!loaded || activeProjectIdRef.current !== targetProject || scope?.generatedReadUiEnabled !== true
+        || client.scope.tenantId !== scope.tenantId || client.scope.mode !== scope.mode) throw new Error("生产回流客户端或当前项目范围已变化；未添加结果。");
+    };
+    check();
+    // Import before the fresh reads: no asynchronous work between final scope /
+    // constraint checks and the single canvas commit.
+    const { buildProductionResultGraph } = await import("./canvas/productionGeneratedResult"); check();
+    const { view, asset, inputAssets } = await client.result(targetProject, assetId); check();
+    const current = currentRef.current.snapshot, anchor = screenToFlowPosition({ x: window.innerWidth / 3, y: window.innerHeight / 2 });
+    const right = current.nodes.filter(n => !n.parentId).reduce((x, n) => Math.max(x, n.position.x + nodeSize(n).width), anchor.x);
+    const next = buildProductionResultGraph(current, view, targetProject, [...inputAssets, asset], constraintRepository.list(targetProject), { x: right + 80, y: anchor.y });
+    check();
+    if (next === current) { setLastAction("该生产原图历史已在画布上；未重复添加或改写历史费用。"); return; }
+    currentRef.current = { ...currentRef.current, snapshot: next };
+    commit(next, "已核验生产原图回画布；未生成、结算或释放未知预留");
+    const targets = next.nodes.filter(n => n.id.startsWith(`production-result-${view.jobId}-`)), bounds = getNodesBounds(targets);
+    const pane = document.querySelector(".react-flow")?.getBoundingClientRect();
+    if (pane && pane.width > 0 && pane.height > 0 && bounds.width > 0 && bounds.height > 0) {
+      const focused = getViewportForBounds(bounds, pane.width, pane.height, 0.18, 2, 0.2);
+      if ([focused.x, focused.y, focused.zoom].every(Number.isFinite)) void setFlowViewport(focused, { duration: 200 });
+    }
+  }, [commit, loaded, productionGeneratedRead, projectId, screenToFlowPosition, setFlowViewport]);
+
   const assetReferenceCounts = useMemo(() => {
     const counts: Record<string, number> = { ...(runReferences?.projectId === projectId ? runReferences.counts : loadRunReferences(projectId)) };
     for (const node of nodes) {
       if (node.type !== "studio") continue;
       if (node.data.assetId) counts[node.data.assetId] = (counts[node.data.assetId] ?? 0) + 1;
       for (const id of node.data.generatedHistory?.inputAssetIds ?? []) counts[id] = (counts[id] ?? 0) + 1;
+      for (const id of node.data.productionGeneratedHistory?.inputAssetIds ?? []) counts[id] = (counts[id] ?? 0) + 1;
     }
     for (const snapshot of constraintSnapshots) {
       for (const region of snapshot.editableRegions) {
@@ -1071,6 +1099,7 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead }: P
     ? constraintSnapshots.find((snapshot) => snapshot.id === selectedConstraint.data.constraintSnapshotId) ?? null
     : null;
   const selectedGenerated = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && Boolean(node.data.generatedHistory));
+  const selectedProduction = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && Boolean(node.data.productionGeneratedHistory));
   const saveConstraintSnapshot = useCallback((draft: ConstraintDraft) => {
     if (!selectedConstraint) return;
     const snapshot = constraintRepository.save(projectId, draft);
@@ -1275,7 +1304,7 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead }: P
         {runPanelOpen && <Suspense fallback={<aside className="inspector" role="status">正在加载任务面板…</aside>}>
           <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots} productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead}
             missingOriginalAssetIds={missingOriginalAssetIds} onClose={() => setRunPanelOpen(false)}
-            onBatches={rememberRunReferences} onAddResults={addRunResults} onAddGenerated={addGeneratedResult} onCachedAsset={(asset) => {
+            onBatches={rememberRunReferences} onAddResults={addRunResults} onAddGenerated={addGeneratedResult} onAddProduction={addProductionResult} onCachedAsset={(asset) => {
               if (asset.projectId === activeProjectIdRef.current) setAssetCatalogRevision((revision) => revision + 1);
             }} />
         </Suspense>}
@@ -1292,6 +1321,18 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead }: P
           <small>当前输出 {selectedGenerated.data.assetId} · 约束 {selectedGenerated.data.constraintSnapshotId}</small>
           <small>来源 {selectedGenerated.data.generatedHistory.inputAssetIds.join("、") || "无输入（生成）"}</small>
           <small>原图 SHA-256 {selectedGenerated.data.generatedHistory.checksumSha256}</small>
+        </aside>}
+        {selectedProduction?.data.productionGeneratedHistory && !runPanelOpen && <aside className="inspector generated-history-inspector" aria-label="生产生成结果历史">
+          <strong>{selectedProduction.data.productionGeneratedHistory.evidence === "imported-copy-history" ? "导入副本的生产历史" : "生产结果历史观察"}</strong>
+          <p>有界历史关系，不是实时账本、缓存标记或当前服务端授权。合同夹具不代表真实供应商生成。</p>
+          <small>{selectedProduction.data.productionGeneratedHistory.protocol} · {selectedProduction.data.productionGeneratedHistory.model} · 原确认项目 {selectedProduction.data.productionGeneratedHistory.originProjectId}</small>
+          <p>原估价 {selectedProduction.data.productionGeneratedHistory.estimatedCostMinor === null ? "未知（不是零费用）" : selectedProduction.data.productionGeneratedHistory.estimatedCostMinor} · 原上限 {selectedProduction.data.productionGeneratedHistory.maxCostMinor} · 观察时结算上限 {selectedProduction.data.productionGeneratedHistory.currentMaxCostMinor} · {selectedProduction.data.productionGeneratedHistory.currency}（最小货币单位）</p>
+          <p>{selectedProduction.data.productionGeneratedHistory.billingState === "unknown" ? `观察时费用未知，预留 ${selectedProduction.data.productionGeneratedHistory.reservedMinor}` : `观察时已核账，实费 ${selectedProduction.data.productionGeneratedHistory.actualMinor}`}</p>
+          <small>人工确认 {selectedProduction.data.productionGeneratedHistory.confirmedBy} · {selectedProduction.data.productionGeneratedHistory.confirmedAt}</small>
+          <small>原批次 {selectedProduction.data.productionGeneratedHistory.batchId} · 原任务 {selectedProduction.data.productionGeneratedHistory.jobId}</small>
+          <small>当前输出 {selectedProduction.data.assetId} · 约束 {selectedProduction.data.constraintSnapshotId}</small>
+          <small>原输入/蒙版 {selectedProduction.data.productionGeneratedHistory.inputAssetIds.join("、") || "无输入（生成）"}</small>
+          <small>原图 SHA {selectedProduction.data.productionGeneratedHistory.checksumSha256}</small>
         </aside>}
         {selectedText && !runPanelOpen && (
           <aside className="inspector" onPointerDown={(event) => event.stopPropagation()}>

@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
-import { type ConfirmedProductionImageExecution, type ImageProviderConnection } from "../../packages/contracts/src/index";
+import { VerifiedImageSchema, type Asset, type ConfirmedProductionImageExecution, type ImageProviderConnection } from "../../packages/contracts/src/index";
+import { assetMetadataFingerprint } from "../../apps/api/src/verifiedAssets";
 import { ImageProductionPreparationHarness, ProductionImagePreparations, type ImagePriceContext } from "../../apps/api/src/productionImagePreparations";
 import { createProductionImageLeaseFixturePolicy, createProductionImageLeasePolicy, type ProductionImageLeasePolicy } from "../../apps/api/src/productionImageLeasePolicy";
 import { ImageProductionReconstructionHarness, ProductionImageTaskReconstruction } from "../../apps/api/src/productionImageTaskReconstruction";
@@ -7,11 +8,11 @@ import { ImageProductionArtifactHarness } from "../../apps/api/src/productionIma
 import { productionExpected } from "../../apps/api/src/productionImageConfirmationIntegrity";
 import { SqliteRunKernelStateStore } from "../../apps/api/src/sqliteRunKernelStore";
 import type { RunKernelOptions } from "../../apps/api/src/runKernel";
-import { principal, connection, setupImageTask } from "./image-task-fixture";
+import { principal, connection, setupImageTask, sha, at } from "./image-task-fixture";
 
 const sharp = createRequire(new URL("../../apps/api/package.json", import.meta.url))("sharp");
 
-export async function ownedProductionBillingTask(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; cap?: number; bad?: boolean; enabled?: boolean; path?: string; actionId?: string; productionStartOnly?: boolean } = {}, mock: (fn: (...args: any[]) => any) => any = fn => fn) {
+export async function ownedProductionBillingTask(options: { protocol?: ImageProviderConnection["protocol"]; manual?: boolean; edit?: boolean; mask?: boolean; twoInputs?: boolean; cap?: number; bad?: boolean; enabled?: boolean; path?: string; actionId?: string; productionStartOnly?: boolean } = {}, mock: (fn: (...args: any[]) => any) => any = fn => fn) {
   let preparations: ImageProductionPreparationHarness, policy: ProductionImageLeasePolicy, reconstruction: ImageProductionReconstructionHarness, artifacts: ImageProductionArtifactHarness;
   const denied = new Set<string>(); let allowed = true;
   const auth = { authenticate: () => principal, allows: (p: typeof principal, project: string, permission?: string) => allowed && !denied.has(permission ?? "")
@@ -25,10 +26,18 @@ export async function ownedProductionBillingTask(options: { protocol?: ImageProv
   const protocol = options.protocol ?? "openai", format = protocol === "google" ? "jpeg" : "png";
   const f = setupImageTask({ path: options.path, productionResponses: true, productionArtifacts: true, format, kernel: kernelOptions });
   try {
-  const model = connection().models[0]; const config = connection({ protocol,
+  const model = { ...connection().models[0], ...(options.mask ? { mask: { mode: "prompt-guidance" as const, polarity: "transparent-edit" as const } } : {}) }; const config = connection({ protocol, models: [model],
     ...(protocol === "openai-compatible" ? { compatibility: { version: "owned-compat", editEncoding: "multipart-image-array", responseEncoding: "images-b64-json-v1", auth: { scheme: "bearer" }, endpoints: { generate: "/images/generations", edit: "/images/edits" }, extraParameters: [] } } : {}),
     ...(protocol === "google" ? { baseUrl: "https://generativelanguage.googleapis.com", models: [{ ...model, maxInputImages: 14, outputFormats: ["jpeg"] }], googleNative: { version: "owned-google", apiVersion: "v1", requestEncoding: "generate-content-response-format-v1", modelMappings: [{ model: model.model, sizes: [{ width: 1024, height: 1024, aspectRatio: "1:1", imageSize: "1K" }] }] } } : {}) });
   f.register(config); if (options.edit) f.source();
+  if (options.edit && options.twoInputs) f.source("source-2");
+  if (options.edit && options.mask) {
+    const bytes: Buffer = await sharp({ create: { width: 1, height: 1, channels: 4, background: "#ffffff" } }).png().toBuffer();
+    const asset: Asset = { id: "owned-mask", projectId: "project-a", kind: "image", purpose: "mask", sourceAssetId: "source", originalName: "owned-mask.png",
+      storageKey: "local-verified:owned-mask", mimeType: "image/png", width: 1, height: 1, byteSize: bytes.length, contentFingerprint: `sha256:${sha(bytes)}`, createdAt: at };
+    const receipt = VerifiedImageSchema.parse({ schemaVersion: 1, id: "proof-owned-mask", tenantId: principal.tenantId, asset, checksumSha256: sha(bytes), sourceChecksumSha256: f.store.loadVerifiedImage(principal.tenantId, "project-a", "source")!.checksumSha256, registeredMetadataSha256: assetMetadataFingerprint(asset), decoder: "sharp-full-decode-v1", verifiedAt: at, verifiedBy: "owned-fixture" });
+    f.store.transaction(() => { f.store.saveVerifiedImage(receipt, bytes); const catalog = f.store.loadCatalog()!; catalog.projects[0].assets.push(asset); catalog.projects[0].constraints[0].editableRegions.push({ id: "owned-region", description: "自有允许编辑区域", maskAssetId: asset.id }); f.store.saveCatalog(catalog); });
+  }
   const price = { kind: options.productionStartOnly ? "server-pricing" as const : "contract-fixture" as const, realExecutionEnabled: false as const, read: mock((c: ImagePriceContext) => ({ schemaVersion: 1, scope: c.scope,
     quote: { id: "owned-price", version: "owned-v1", source: options.manual === false ? "server-price-table" : "manual-budget", currency: "CNY", maxCostMinor: options.cap ?? 40,
       ...(options.manual === false ? { estimatedCostMinor: 25 } : {}), expiresAt: new Date(f.clock() + 60_000).toISOString() },
@@ -45,7 +54,7 @@ export async function ownedProductionBillingTask(options: { protocol?: ImageProv
   const artifactOptions = { artifactHandlingEnabled: true as const, tenantId: principal.tenantId, stateStore: f.store, runKernel: f.kernel, clock: f.clock, runAuthorizer: auth, providerAuthorizer: auth, assetAuthorizer: auth };
   artifacts = new ImageProductionArtifactHarness(options.enabled === false ? undefined : artifactOptions);
   const publicPreparation = preparations.createPreparation(principal, { projectId: "project-a", idempotencyKey: options.actionId ?? "owned-artifact-action", connectionId: config.id, connectionRevision: 1, model: model.model, capabilityVersion: model.version,
-    constraintSnapshotId: "constraint-a", protection: "none", operation: options.edit ? "edit" : "generate", inputAssetIds: options.edit ? ["source"] : [], parameters: { prompt: "人工原构图", n: 1, size: { width: 1024, height: 1024 }, quality: "auto", background: "auto", outputFormat: format } });
+    constraintSnapshotId: "constraint-a", protection: "none", operation: options.edit ? "edit" : "generate", inputAssetIds: options.edit ? options.twoInputs ? ["source", "source-2"] : ["source"] : [], ...(options.edit && options.mask ? { maskAssetId: "owned-mask" } : {}), parameters: { prompt: "人工原构图", n: 1, size: { width: 1024, height: 1024 }, quality: "auto", background: "auto", outputFormat: format } });
   const preparation = f.store.loadProductionImagePreparation(principal.tenantId, "project-a", options.productionStartOnly ? "production" : "production-contract-fixture", publicPreparation.id)!;
   const b = (await preparations.confirmPreparation(principal, "project-a", preparation.id, productionExpected(preparation))).aggregate;
   const l = f.kernel.claimProductionImageBatch(principal, "project-a", b.batch.id, { workerId: "owned-worker", maxJobs: 1 }).leases[0];
