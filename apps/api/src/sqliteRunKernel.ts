@@ -39,9 +39,9 @@ export class SqliteRunKernel implements RunKernelPort {
     for (const stored of snapshot.batches) for (const lease of [...stored.productionImageLeases ?? [], ...stored.lockedProductionImageLeases ?? []]) {
       if (Date.parse(lease.expiresAt) - Date.parse(lease.leasedAt) !== (this.options.leaseDurationMs ?? 30_000)) throw new Error("原租约期限与实际内核配置不一致");
     }
-    for (const stored of snapshot.batches.filter(b => b.productionImageExecution)) {
+    for (const stored of snapshot.batches.filter(b => b.productionImageExecution || b.lockedProductionImageExecution)) {
       const job = stored.aggregate.jobs[0];
-      if (job.failureCode === "production-job-timeout-after-intent"
+      if (["production-job-timeout-after-intent", "locked-job-timeout-after-intent"].includes(job.failureCode ?? "")
         && Date.parse(job.finishedAt!) < Date.parse(job.startedAt!) + (this.options.jobTimeoutMs ?? 30_000)) throw new Error("原任务超时早于实际内核期限");
     }
     for (const configured of this.options.budgets) {
@@ -84,6 +84,22 @@ export class SqliteRunKernel implements RunKernelPort {
     this.lockedLeaseCommand(p, project, batch, "cancel", k => k.cancelLockedProductionImageBatch(p, project, batch));
   inspectProductionImageLease: InMemoryRunKernel["inspectProductionImageLease"] = (p, project, batch, job, input) => this.productionLeaseCommand(p, project, batch, "inspect",
     (kernel) => kernel.inspectProductionImageLease(p, project, batch, job, input), (_result, kernel) => { kernel.inspectProductionImageLease(p, project, batch, job, input); });
+  inspectLockedProductionImageStart: InMemoryRunKernel["inspectLockedProductionImageStart"] = (p, project, batch, job, input) => {
+    this.lockedStartScope(p, project);
+    return this.lockedLeaseCommand(p, project, batch, "start-history", k => k.inspectLockedProductionImageStart(p, project, batch, job, input));
+  };
+  startLockedProductionImageJob: InMemoryRunKernel["startLockedProductionImageJob"] = (p, project, batch, job, input, intent) => {
+    this.lockedStartScope(p, project);
+    return this.lockedLeaseCommand(p, project, batch, "start-history", k => k.startLockedProductionImageJob(p, project, batch, job, input, intent), (r, k) => {
+      if (r.started) k.assertLockedProductionImageStartCommit(p, project, batch, job, input);
+      else k.inspectLockedProductionImageStart(p, project, batch, job, input);
+    });
+  };
+  private lockedStartScope(p: RunPrincipal, project: string) {
+    const policy = this.options.lockedProductionImageStartPolicy;
+    if (!policy) throw new RunKernelError(503, "locked_start_not_configured", "保护启动默认关闭");
+    this.strictArtifactPolicy(() => policy.usesStateStore(this.options.stateStore)); this.strictArtifactPolicy(() => policy.authorizeScope(p, project));
+  }
   reconcileProductionImageBatch: InMemoryRunKernel["reconcileProductionImageBatch"] = (p, project, batch) => this.productionLeaseCommand(p, project, batch, "reconcile",
     (kernel) => kernel.reconcileProductionImageBatch(p, project, batch));
   inspectProductionImageStart: InMemoryRunKernel["inspectProductionImageStart"] = (p, project, batch, job, input) => {
@@ -254,9 +270,12 @@ export class SqliteRunKernel implements RunKernelPort {
     if (!policy) throw new RunKernelError(503, "locked_lease_not_configured", "保护租约须显式同库政策");
     try {
       const store = this.options.stateStore, clock = this.options.clock, identities = [policy.usesStateStore, policy.authorizeScope, policy.validate], principalFingerprint = imageSnapshotFingerprint(p);
+      const startPolicy = this.options.lockedProductionImageStartPolicy, startFunctions = startPolicy && [startPolicy.usesStateStore, startPolicy.authorizeScope, startPolicy.validateStart];
       const fixed = () => { if (this.options.stateStore !== store || this.options.clock !== clock || this.options.lockedProductionImageLeasePolicy !== policy
         || imageSnapshotFingerprint(p) !== principalFingerprint
-        || identities.some((f, i) => f !== [policy.usesStateStore, policy.authorizeScope, policy.validate][i])) throw new Error("保护租约配置/身份/端口漂移"); };
+        || identities.some((f, i) => f !== [policy.usesStateStore, policy.authorizeScope, policy.validate][i])
+        || (purpose.startsWith("start") && (this.options.lockedProductionImageStartPolicy !== startPolicy
+          || startFunctions?.some((f,i) => f !== [startPolicy!.usesStateStore,startPolicy!.authorizeScope,startPolicy!.validateStart][i])))) throw new Error("保护租约配置/身份/端口漂移"); };
       fixed();
       this.strictArtifactPolicy(() => policy.usesStateStore(this.options.stateStore));
       this.strictArtifactPolicy(() => policy.authorizeScope(p, project, purpose));

@@ -6,6 +6,7 @@ import { constraintContentChecksum } from "./imageAssetPolicy";
 import { prepareLockedProductionOpenAiImageRequest } from "./openaiImageProtocol";
 import { prepareLockedProductionCompatibleImageRequest } from "./compatibleImageProtocol";
 import type { TrustedImageBytes } from "./imageRequestPayload";
+import { assertLockedDispatchIntent } from "./lockedProductionImageDispatchIntentIntegrity";
 
 const hash = imageSnapshotFingerprint;
 function reject(): never { throw new ImageProviderContractError("locked_image_confirmation_corrupt"); }
@@ -47,26 +48,30 @@ export function assertLockedConfirmation(input: unknown) {
   if (s.transformedInputs.at(-1)?.transform !== transform) reject();
   return e;
 }
-// Only queued/leased/unsent-cancelled. No intent/raw/artifact or billing grafts.
-export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDurationMs?: number) {
+// Closed v2 states; attempts/raw/artifacts/fees still cannot be grafted here.
+export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDurationMs?: number, jobTimeoutMs?: number) {
   const e = assertLockedConfirmation(s.lockedProductionImageExecution), r = e.protocol.request, q = r.quote;
   const a = s.aggregate, b = a.batch, j = a.jobs[0], estimate = q.source === "manual-budget" ? null : q.estimatedCostMinor;
   const ids = [...r.inputs.map(i => i.assetId), r.mask!.assetId];
-  const cancelled = b.status === "cancelled", history = s.lockedProductionImageLeases ?? [];
-  const allowed = new Set(["aggregate", "lockedProductionImageExecution", "lockedProductionImageLeases", "requestFingerprint", "reservedMinor", "actualMinor", "jobReservations", "jobScenarios"]);
+  const cancelled = b.status === "cancelled", history = s.lockedProductionImageLeases ?? [], intent = s.lockedProductionImageDispatchIntent;
+  const started = ["running", "billing_unknown"].includes(b.status), unknown = b.status === "billing_unknown";
+  const allowed = new Set(["aggregate", "lockedProductionImageExecution", "lockedProductionImageLeases", "lockedProductionImageDispatchIntent", "lockedProductionImageDispatchIntentFingerprint", "requestFingerprint", "reservedMinor", "actualMinor", "jobReservations", "jobScenarios"]);
   if (Object.entries(s).some(([k, v]) => v !== undefined && !allowed.has(k)) || s.requestFingerprint !== hash(e) || s.actualMinor !== 0
     || s.reservedMinor !== (cancelled ? 0 : q.maxCostMinor) || s.jobScenarios.length
     || (cancelled ? s.jobReservations.length !== 0 : s.jobReservations.length !== 1 || s.jobReservations[0][0] !== r.jobId || s.jobReservations[0][1] !== q.maxCostMinor)
     || b.id !== e.batchId || b.imageMode !== e.mode || b.tenantId !== r.tenantId || b.projectId !== r.projectId || b.constraintSnapshotId !== r.constraintSnapshotId
-    || b.adapterId !== r.adapterId || b.tool !== "image-edit" || b.idempotencyKey !== lockedConfirmationKey(e) || !["queued", "cancelled"].includes(b.status) || b.expectedOutputs !== 1
+    || b.adapterId !== r.adapterId || b.tool !== "image-edit" || b.idempotencyKey !== lockedConfirmationKey(e) || !["queued", "cancelled", "running", "billing_unknown"].includes(b.status) || b.expectedOutputs !== 1
     || b.estimatedCostMinor !== estimate || b.maxCostMinor !== q.maxCostMinor || b.currency !== q.currency || b.createdAt !== e.confirmedAt || b.confirmedAt !== e.confirmedAt || b.confirmedBy !== e.confirmedBy
     || a.jobs.length !== 1 || !j || j.id !== r.jobId || j.batchId !== b.id || j.imageMode !== e.mode || j.executorKind !== "provider" || j.adapterId !== r.adapterId
-    || j.idempotencyKey !== r.idempotencyKey || !(cancelled ? j.status === "cancelled" : ["queued", "leased"].includes(j.status)) || j.attempt !== 1 || j.outputIndex !== 0 || j.estimatedCostMinor !== estimate || j.createdAt !== e.confirmedAt
+    || j.idempotencyKey !== r.idempotencyKey || !(started || cancelled ? j.status === b.status : ["queued", "leased"].includes(j.status)) || j.attempt !== 1 || j.outputIndex !== 0 || j.estimatedCostMinor !== estimate || j.createdAt !== e.confirmedAt
     || hash(b.inputAssetIds) !== hash(ids) || hash(j.inputAssetIds) !== hash(ids) || j.outputAssetIds.length || a.billingOverages.length || a.productionBilling
-    || [j.startedAt, j.providerRequestId, j.retryOf, j.actualCostMinor, j.failureCode,
+    || [j.providerRequestId, j.retryOf, j.actualCostMinor,
       j.billingResolutionId, j.billingResolvedAt, j.billingResolvedBy, j.billingEvidenceRef].some(v => v !== undefined)) reject();
+  if (started ? !intent || !s.lockedProductionImageDispatchIntentFingerprint || j.startedAt !== intent.recordedAt
+    : intent || s.lockedProductionImageDispatchIntentFingerprint || j.startedAt) reject();
+  if (unknown ? !["locked-lease-expired-after-intent", "locked-job-timeout-after-intent", "locked-recovered-after-restart"].includes(j.failureCode ?? "") || !j.finishedAt : j.failureCode !== undefined) reject();
   const l = a.ledger[0];
-  if (a.ledger.length !== (cancelled && q.maxCostMinor > 0 ? 2 : 1) || !l || l.tenantId !== b.tenantId || l.projectId !== b.projectId || l.batchId !== b.id || l.jobId !== j.id || l.imageMode !== e.mode
+  if (a.ledger.length !== (unknown || cancelled && q.maxCostMinor > 0 ? 2 : 1) || !l || l.tenantId !== b.tenantId || l.projectId !== b.projectId || l.batchId !== b.id || l.jobId !== j.id || l.imageMode !== e.mode
     || l.currency !== q.currency || l.estimatedMinor !== estimate || l.reservedMinor !== q.maxCostMinor || l.actualMinor !== undefined || l.settlement !== "reserved" || l.createdAt !== e.confirmedAt) reject();
   const expected = { "batch-created": { mode: e.mode, preparationId: e.preparation.id }, "batch-confirmed": { mode: e.mode,
     preparationFingerprint: e.preparation.snapshotFingerprint, pricingFingerprint: e.protocol.pricingFingerprint, executionFingerprint: s.requestFingerprint,
@@ -77,7 +82,7 @@ export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDura
       || hash(events[0].metadata) !== hash(metadata) || Date.parse(events[0].createdAt) < Date.parse(e.confirmedAt) || Date.parse(events[0].createdAt) >= Date.parse(q.expiresAt)) reject(); }
   const leaseEvents = a.audit.filter(x => x.eventType === "job-leased"), expiries = a.audit.filter(x => x.eventType === "job-lease-expired");
   const cancellations = a.audit.filter(x => x.eventType === "batch-cancelled"), releases = a.audit.filter(x => x.eventType === "budget-released");
-  if (a.audit.length !== 4 + history.length + expiries.length + (cancelled ? 1 + (q.maxCostMinor > 0 ? 1 : 0) : 0)
+  if (a.audit.length !== 4 + history.length + expiries.length + (started ? 1 + (unknown ? 1 : 0) : 0) + (cancelled ? 1 + (q.maxCostMinor > 0 ? 1 : 0) : 0)
     || leaseEvents.length !== history.length || history.length > 512 || Buffer.byteLength(JSON.stringify(history)) > 512 * 1024
     || new Set(history.map(x => x.leaseId)).size !== history.length) reject();
   let end = Date.parse(e.confirmedAt), expiryCount = 0;
@@ -90,13 +95,29 @@ export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDura
         workerId: lease.workerId, adapterId: j.adapterId, mode: e.mode, executionFingerprint: s.requestFingerprint, protectionPolicyFingerprint: lease.protectionPolicyFingerprint, expiresAt: lease.expiresAt })) reject();
     if (expired.length) { expiryCount++; if (expired.length !== 1 || Date.parse(expired[0].createdAt) < Date.parse(lease.expiresAt)
       || hash(expired[0].metadata) !== hash({ jobId: j.id, leaseId: lease.leaseId, action: "requeued-before-start" })) reject(); end = Date.parse(expired[0].createdAt); }
-    else { if (i !== history.length - 1 || !["leased", "cancelled"].includes(j.status) || j.leaseId !== lease.leaseId || j.leaseOwnerId !== lease.workerId
+    else { if (i !== history.length - 1 || !["leased", "cancelled", "running", "billing_unknown"].includes(j.status) || j.leaseId !== lease.leaseId || j.leaseOwnerId !== lease.workerId
       || j.leasedAt !== lease.leasedAt || j.leaseExpiresAt !== lease.expiresAt) reject(); end = Date.parse(lease.leasedAt); }
   }
   if (expiryCount !== expiries.length || (j.status === "leased" && (!history.length || expiries.some(x => x.metadata.leaseId === j.leaseId)))
     || ((j.status === "queued" || !history.length || expiries.some(x => x.metadata.leaseId === history.at(-1)?.leaseId))
       && [j.leaseId, j.leaseOwnerId, j.leasedAt, j.leaseExpiresAt].some(v => v !== undefined))) reject();
-  if (!cancelled) { if (j.finishedAt !== undefined || cancellations.length || releases.length) reject(); }
+  const starts = a.audit.filter(x => x.eventType === "job-started"), unknowns = a.audit.filter(x => x.eventType === "billing-unknown");
+  if (starts.length !== (started ? 1 : 0) || unknowns.length !== (unknown ? 1 : 0)) reject();
+  if (started) {
+    const i = assertLockedDispatchIntent(intent, s.lockedProductionImageDispatchIntentFingerprint!, e, history.at(-1)), event = starts[0];
+    if (expiries.some(x => x.metadata.leaseId === i.leaseId) || event.actorId !== i.actorId || event.createdAt !== i.recordedAt
+      || hash(event.metadata) !== hash({ jobId: j.id, leaseId: i.leaseId, workerId: i.workerId, lockedProductionImageDispatchIntentId: i.id,
+        intentFingerprint: s.lockedProductionImageDispatchIntentFingerprint, payloadChecksumSha256: i.payloadChecksumSha256, transport: "not-connected" })) reject();
+    if (unknown) { const u = unknowns[0], entry = a.ledger[1];
+      if (u.createdAt !== j.finishedAt || Date.parse(u.createdAt) < Date.parse(i.recordedAt)
+        || hash(u.metadata) !== hash({ jobId: j.id, lockedProductionImageDispatchIntentId: i.id, intentFingerprint: s.lockedProductionImageDispatchIntentFingerprint, reason: j.failureCode })
+        || entry.tenantId !== b.tenantId || entry.projectId !== b.projectId || entry.batchId !== b.id || entry.jobId !== j.id || entry.imageMode !== e.mode
+        || entry.currency !== q.currency || entry.estimatedMinor !== estimate || entry.reservedMinor !== q.maxCostMinor || entry.actualMinor !== undefined || entry.settlement !== "unknown" || entry.createdAt !== j.finishedAt
+        || (j.failureCode === "locked-lease-expired-after-intent" && Date.parse(j.finishedAt!) < Date.parse(history.at(-1)!.expiresAt))
+        || (j.failureCode === "locked-job-timeout-after-intent" && (Date.parse(j.finishedAt!) <= Date.parse(i.recordedAt)
+          || jobTimeoutMs !== undefined && Date.parse(j.finishedAt!) < Date.parse(i.recordedAt) + jobTimeoutMs))) reject(); }
+  }
+  if (!cancelled) { if ((!unknown && j.finishedAt !== undefined) || cancellations.length || releases.length) reject(); }
   else {
     const c = cancellations[0];
     if (cancellations.length !== 1 || !j.finishedAt || c.createdAt !== j.finishedAt || Date.parse(c.createdAt) < end

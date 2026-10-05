@@ -192,6 +192,20 @@ test("保护租约/检查/到期恢复/安全取消均无日常路由，纯客�
   expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
 });
 
+test("保护原wire重建/永久未连接意图没有日常HTTP路由，不补发或释放预留", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["reconstruct", "start", "intent"]) {
+    const path = `${base}/locked-production-image-batches/fake/${suffix}`;
+    expect((await page.request.get(path, { headers })).status()).toBe(404);
+    expect((await page.request.post(path, { headers, data: { schemaVersion: 2, workerId: "fake", leaseId: "fake", confirmed: true, transport: "not-connected", protectionPolicyFingerprint: "0".repeat(64) } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+});
+
 test("生产同库产物底座没有HTTP提交/谱系/下载入口，保留真实闸门", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();

@@ -975,6 +975,15 @@ export const ProductionImageDispatchIntentSchema = z.object({
   && Date.parse(intent.reconstructedAt) <= Date.parse(intent.recordedAt), { message: "生产意图时间关系无效" });
 export type ProductionImageDispatchIntent = z.infer<typeof ProductionImageDispatchIntentSchema>;
 
+// Policy-bound v2 history, never a caller-supplied start/send permit.
+export const LockedProductionImageDispatchIntentSchema = z.object({ ...ProductionImageDispatchIntentSchema.shape,
+  schemaVersion: z.literal(2),
+  id: z.string().regex(/^locked-production-image-intent:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/),
+  protocolVersion: z.literal("locked-production-image-protocol-v2"),
+  protectionPolicyFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict().refine(i => Date.parse(i.confirmedAt) <= Date.parse(i.reconstructedAt) && Date.parse(i.reconstructedAt) <= Date.parse(i.recordedAt), { message: "保护意图时间关系无效" });
+export type LockedProductionImageDispatchIntent = z.infer<typeof LockedProductionImageDispatchIntentSchema>;
+
 // Independent evidence shapes. Neither a schema nor lower-level raw storage
 // proves that an attempt was committed for an actual task or invoked a transport.
 const ProductionEvidenceHash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -1114,6 +1123,8 @@ export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
   lockedProductionImageExecution: ConfirmedLockedProductionImageExecutionSchema.optional(),
   lockedProductionImageLeases: z.array(LockedProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
+  lockedProductionImageDispatchIntent: LockedProductionImageDispatchIntentSchema.optional(),
+  lockedProductionImageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),

@@ -1,5 +1,7 @@
 # 阶段 4 多供应商图片 API 接入计划
 
+2026-10-05最新增量：[原锁区B4实际重建/意图](locked-image-dispatch-intents.md)首完整2183单元/集成（59文件）、194Chrome、6构建通过，新增60项/1Chrome。独立默认关闭同库原v2确认/政策/原领取身份与实际wire匹配，永久not-connected意图、running与到期unknown-max联合原子保存/恢复；两个OS进程一次启动、SQL写后回滚、历史不重建/报价/补发。尚无保护attempt/raw/供应商输出像素核验/产物/公开cache/canvas或保护UI，整体硬锁、真实关口/阶段4/项目未完成。旧下面时点只历史，不覆盖本步。
+
 ## 当前有效验收：原锁区B3租约与未发送安全取消完成
 
 2026-10-05 09:39[locked-image-leases.md](locked-image-leases.md)首完整2123单元/集成（58文件）、193Chrome、6构建全通过，新增72项/1Chrome。实际同库原v2准备确认/政策/job/key/batch、原领取人worker/lease与权威输入约束/原price verify/预算联合核验，独立默认关闭领取/检查/未启动恢复/安全取消。两连接及两个OS进程一次领取/释放，原quote/确认/租约历史和unknown-null/max保持，未发送取消不推实费0。全部源文件Chrome期间冻结，原最多4 worker/默认时限/断言/依赖保持。

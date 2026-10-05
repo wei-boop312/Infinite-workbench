@@ -10,7 +10,7 @@ import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 import { RunKernelError, type RunAuthorizer, type RunPrincipal } from "./runKernel";
 import type { SqliteRunKernelStateStore } from "./sqliteRunKernelStore";
 
-export type LockedLeasePurpose = "claim" | "inspect" | "history" | "reconcile" | "cancel";
+export type LockedLeasePurpose = "claim" | "inspect" | "history" | "reconcile" | "cancel" | "start" | "start-commit" | "start-history";
 export interface LockedProductionImageLeasePolicy {
   readonly timeoutMs?: number;
   usesStateStore(store: SqliteRunKernelStateStore): boolean;
@@ -36,10 +36,10 @@ function create(mode: ConfirmedLockedProductionImageExecution["mode"], options?:
   const quota = o.maxMetadataBytes ?? 16 * 1024 * 1024, timeout = o.timeoutMs ?? 5000;
   if (!Number.isSafeInteger(quota) || quota < 0 || quota > 16 * 1024 * 1024 || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30000) reject("locked_lease_configuration_invalid");
   const scope = (p: RunPrincipal, project: string, purpose: LockedLeasePurpose) => {
-    if (p.tenantId !== o.tenantId || !p.actorId || p.actorId !== p.actorId.trim() || !["claim", "inspect", "history", "reconcile", "cancel"].includes(purpose)) reject("locked_lease_permission_denied", 403);
+    if (p.tenantId !== o.tenantId || !p.actorId || p.actorId !== p.actorId.trim() || !["claim", "inspect", "history", "reconcile", "cancel", "start", "start-commit", "start-history"].includes(purpose)) reject("locked_lease_permission_denied", 403);
     strict(() => o.lockedLeasePolicy(structuredClone({ principal: p, projectId: project, purpose })));
     strict(() => o.runAuthorizer.allows(structuredClone(p), project, "run:read"));
-    if (["claim", "inspect", "reconcile"].includes(purpose)) strict(() => o.runAuthorizer.allows(structuredClone(p), project, "run:execute"));
+    if (["claim", "inspect", "reconcile", "start", "start-commit", "start-history"].includes(purpose)) strict(() => o.runAuthorizer.allows(structuredClone(p), project, "run:execute"));
     if (purpose === "cancel") strict(() => o.runAuthorizer.allows(structuredClone(p), project, "run:cancel"));
     strict(() => o.providerAuthorizer.allows(structuredClone(p), project, "provider:read")); strict(() => o.assetAuthorizer.allows(structuredClone(p), project, "asset:read")); return true;
   };
@@ -49,12 +49,12 @@ function create(mode: ConfirmedLockedProductionImageExecution["mode"], options?:
       if (!o.stateStore.supportsProductionImageResponses() || !o.stateStore.supportsProductionImageArtifacts()) reject("locked_lease_storage_closed", 503);
       let last = o.clock?.() ?? Date.now();
       if (!Number.isSafeInteger(last) || last < 0 || last > 8_640_000_000_000_000 - 30000) reject("locked_lease_clock_invalid"); const deadline = last + timeout;
-      const e = assertLockedConfirmation(incoming), r = e.protocol.request, record = e.preparation, historic = ["history", "reconcile", "cancel"].includes(purpose);
+      const e = assertLockedConfirmation(incoming), r = e.protocol.request, record = e.preparation, historic = ["history", "reconcile", "cancel", "start-history"].includes(purpose);
       const guard = () => { scope(p, r.projectId, purpose); const t = o.clock?.() ?? Date.now();
         if (!Number.isSafeInteger(t) || t < 0 || t < last || t < Date.parse(e.confirmedAt) || t >= deadline || t > 8_640_000_000_000_000 - 30000) reject("locked_lease_clock_invalid"); last = t;
         if (!historic && t >= Date.parse(r.quote.expiresAt)) reject("locked_lease_price_expired");
-        if (purpose === "inspect") { const s = o.stateStore.load()?.batches.find(b => b.aggregate.batch.id === e.batchId), j = s?.aggregate.jobs[0], l = s?.lockedProductionImageLeases?.at(-1);
-          if (!j || j.status !== "leased" || !l || l.actorId !== p.actorId || l.leaseId !== j.leaseId || l.workerId !== j.leaseOwnerId
+        if (["inspect", "start", "start-commit"].includes(purpose)) { const s = o.stateStore.load()?.batches.find(b => b.aggregate.batch.id === e.batchId), j = s?.aggregate.jobs[0], l = s?.lockedProductionImageLeases?.at(-1);
+          if (!j || j.status !== (purpose === "start-commit" ? "running" : "leased") || !l || l.actorId !== p.actorId || l.leaseId !== j.leaseId || l.workerId !== j.leaseOwnerId
             || t < Date.parse(l.leasedAt) || t >= Date.parse(l.expiresAt)) reject("locked_lease_expired"); }
       };
       return o.stateStore.transaction(() => {
