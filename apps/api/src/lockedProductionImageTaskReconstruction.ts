@@ -3,6 +3,7 @@ import { ExecuteRunJobRequestSchema, type ConfirmedLockedProductionImageExecutio
 import type { LockedProductionImageAttempt, LockedProductionImageResult } from "@canvas/contracts";
 import { assertLockedImageAttempt, assertLockedImageResult, parseLockedImageResponse, lockedImageUnknownOutcome } from "./lockedProductionImageResponse";
 import type { ImageProtocolResponse } from "./imageProtocolResponse";
+import { ProductionImageCredentialNetwork, type ProductionImageCredentialNetworkOptions } from "./productionImageCredentialNetwork";
 import { imageSnapshotFingerprint as fp } from "./imageProviderContract";
 import { lockedExpected, prepareLockedProductionImageProtocol } from "./lockedProductionImageProtocol";
 import { assertLockedDispatchIntent } from "./lockedProductionImageDispatchIntentIntegrity";
@@ -17,6 +18,7 @@ type Options = { lockedReconstructionEnabled: true; lockedStartEnabled: true; te
   leasePolicy: LockedProductionImageLeasePolicy; lockedStartPolicy(scope: { principal: RunPrincipal; projectId: string }): boolean;
   lockedResponseEnabled?: true; lockedResponsePolicy?(scope: { principal: RunPrincipal; projectId: string }): boolean;
   fixtureTransport?: { mode: "contract-fixture"; realExecutionEnabled: false; send(context: { wire: Awaited<ReturnType<typeof prepareLockedProductionImageProtocol>>["wire"]; signal: AbortSignal; assertCurrent(): void }): Promise<ImageProtocolResponse> };
+  credentialNetwork?: ProductionImageCredentialNetworkOptions;
   clock?: () => number; timeoutMs?: number };
 let active = 0;
 function reject(code: string, status = 409): never { throw new RunKernelError(status, code, "保护启动未完成；保留原编号和预留核对，不授权发送"); }
@@ -29,12 +31,18 @@ const publicCodes = new Set(["locked_start_not_configured", "locked_start_permis
 
 class Core implements LockedProductionImageStartPolicy {
   private readonly options?: Options;
+  private readonly credentialNetwork?: ProductionImageCredentialNetwork;
   private readonly pending = new Map<string, { identity: string; execution: string; lease: string; check(): void }>();
   private readonly attempts = new Map<string, { identity: string; execution: string; lease: string; intent: string; check(): void }>();
   private readonly results = new Map<string, { identity: string; execution: string; lease: string; intent: string; attempt: string; check(): void }>();
   readonly responsePolicy: LockedProductionImageResponsePolicy = { usesStateStore: s => this.usesStateStore(s), authorizeScope: (p, project) => this.authorizeResponseScope(p, project),
     validateAttempt: (p,e,l,i,a) => this.validateAttempt(p,e,l,i,a), validateResult: (p,e,l,i,a,r) => this.validateResult(p,e,l,i,a,r) };
   constructor(private readonly mode: ConfirmedLockedProductionImageExecution["mode"], options?: Options) {
+    if (options?.credentialNetwork) {
+      if (options.fixtureTransport || options.credentialNetwork.credentials?.tenantId !== options.tenantId
+        || options.credentialNetwork.network?.tenantId !== options.tenantId) reject("locked_response_not_configured", 503);
+      this.credentialNetwork = new ProductionImageCredentialNetwork(mode, options.credentialNetwork);
+    }
     this.options = options && { ...options, fixtureTransport: options.fixtureTransport && { ...options.fixtureTransport, send: options.fixtureTransport.send.bind(options.fixtureTransport) }, leasePolicy: { timeoutMs: options.leasePolicy?.timeoutMs,
       usesStateStore: options.leasePolicy?.usesStateStore.bind(options.leasePolicy), authorizeScope: options.leasePolicy?.authorizeScope.bind(options.leasePolicy),
       validate: options.leasePolicy?.validate.bind(options.leasePolicy) } };
@@ -76,8 +84,16 @@ class Core implements LockedProductionImageStartPolicy {
   }
   async executeFixture(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, options: { signal?: AbortSignal } = {}) {
     this.authorizeResponseScope(principal, projectId); const o = this.options!;
-    if (this.mode !== "production-contract-fixture" || o.fixtureTransport?.mode !== "contract-fixture" || o.fixtureTransport.realExecutionEnabled !== false) reject("locked_fixture_transport_rejected", 503);
+    if (this.mode !== "production-contract-fixture" || this.credentialNetwork || o.fixtureTransport?.mode !== "contract-fixture" || o.fixtureTransport.realExecutionEnabled !== false) reject("locked_fixture_transport_rejected", 503);
     return this.run(principal, projectId, batchId, jobId, input, options, true);
+  }
+  async executeNative(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, options: { signal?: AbortSignal } = {}) {
+    if (this.mode !== "production" || !this.credentialNetwork) reject("locked_response_not_configured", 503);
+    this.authorizeResponseScope(principal, projectId); return this.run(principal, projectId, batchId, jobId, input, options, true);
+  }
+  async executeNetworkFixture(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, options: { signal?: AbortSignal } = {}) {
+    if (this.mode !== "production-contract-fixture" || !this.credentialNetwork) reject("locked_response_not_configured", 503);
+    this.authorizeResponseScope(principal, projectId); return this.run(principal, projectId, batchId, jobId, input, options, true);
   }
   private async run(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: unknown, options: { signal?: AbortSignal }, execute: boolean) {
     const p = structuredClone(principal), o = this.options!, controller = new AbortController(), signal = controller.signal;
@@ -156,7 +172,7 @@ class Core implements LockedProductionImageStartPolicy {
     wire: Awaited<ReturnType<typeof prepareLockedProductionImageProtocol>>["wire"], signal: AbortSignal, clock: () => string, fixed: () => void, resource: { pending?: Promise<unknown> }) {
     const o = this.options!, k = o.runKernel, at = clock(); let latest = Date.parse(at), open = true, raw: Buffer | undefined, abortListener: (() => void) | undefined;
     const a: LockedProductionImageAttempt = { schemaVersion: 2, mode: e.mode, state: "attempted", id: `locked-production-image-attempt:${randomUUID()}`, tenantId: p.tenantId,
-      projectId: project, jobId: job, batchId: batch, actorId: p.actorId, workerId: l.workerId, leaseId: l.leaseId, transport: "contract-fixture",
+      projectId: project, jobId: job, batchId: batch, actorId: p.actorId, workerId: l.workerId, leaseId: l.leaseId, transport: e.mode === "production" ? "native-https" : "contract-fixture",
       intentFingerprint: fp(i), executionFingerprint: fp(e), leaseFingerprint: fp(l), protectionPolicyFingerprint: fp(e.preparation.protectionPolicy),
       requestFingerprint: e.protocol.requestFingerprint, payloadChecksumSha256: e.protocol.payloadChecksumSha256, attemptedAt: at };
     const hash = fp(a), { body: bytes, ...meta } = wire, metadata = fp(meta);
@@ -181,7 +197,15 @@ class Core implements LockedProductionImageStartPolicy {
       current(); k.beginLockedImageAttempt!(p, project, batch, job, input, a);
       const assertCurrent = () => { current(); k.assertLockedImageAttemptCurrent!(p, project, batch, job, input); current(); };
       let response: ImageProtocolResponse;
-      try { assertCurrent(); const operation = Promise.resolve().then(() => { assertCurrent(); return o.fixtureTransport!.send({ wire, signal, assertCurrent }); });
+      try { assertCurrent();
+        const assertHistory = () => { clock(); if (!open || signal.aborted) reject("locked_start_cancelled", 408);
+          const actual = k.inspectLockedImageAttempt!(p, project, batch, job, input);
+          if (fp(actual.execution) !== fp(e) || fp(actual.lease) !== fp(l) || fp(actual.intent) !== fp(i)
+            || fp(actual.attempt) !== hash || actual.result) reject("locked_start_task_changed"); clock(); };
+        const operation = Promise.resolve().then(() => { assertCurrent(); return this.credentialNetwork
+          ? this.credentialNetwork.send(e, wire, p.actorId, signal, assertCurrent, assertHistory)
+          : o.fixtureTransport!.send({ wire, signal, assertCurrent }); }).then(response => {
+            if (this.credentialNetwork && signal.aborted && Buffer.isBuffer(response?.body)) response.body.fill(0); return response; });
         resource.pending = operation.then(() => undefined, () => undefined); void resource.pending.then(() => { resource.pending = undefined; });
         const cancelled = new Promise<never>((_, fail) => { abortListener = () => fail(new Error("cancelled")); signal.addEventListener("abort", abortListener, { once: true }); if (signal.aborted) abortListener(); });
         response = await Promise.race([operation, cancelled]); if (signal.aborted) return interrupted("production-timeout");
@@ -190,6 +214,7 @@ class Core implements LockedProductionImageStartPolicy {
       try { if (!response || !Buffer.isBuffer(response.body) || response.body.length > 32 * 1024 * 1024) throw new Error("invalid");
         raw = Buffer.from(response.body); parsed = parseLockedImageResponse(e, l, i, a, { ...response, body: raw }, observe(false)); }
       catch { return interrupted("production-response-invalid"); }
+      finally { if (this.credentialNetwork && Buffer.isBuffer(response?.body)) response.body.fill(0); }
       try { return commit(parsed.record, raw); } catch { return interrupted("production-response-save-failed"); } finally { parsed.candidate?.body.fill(0); }
     } finally { open = false; this.attempts.delete(hash); raw?.fill(0); if (abortListener) signal.removeEventListener("abort", abortListener); }
   }

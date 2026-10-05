@@ -16,14 +16,17 @@ import { assetMetadataFingerprint } from "../apps/api/src/assetMetadata";
 import { SqliteRunKernel } from "../apps/api/src/sqliteRunKernel";
 import { SqliteRunKernelStateStore } from "../apps/api/src/sqliteRunKernelStore";
 import { at, connection, principal, setupImageTask, sha } from "./helpers/image-task-fixture";
+import { ownedProductionNetwork } from "./helpers/production-network-fixture";
+import type { ProductionImageCredentialNetworkOptions } from "../apps/api/src/productionImageCredentialNetwork";
 
 const sharp = createRequire(new URL("../apps/api/package.json", import.meta.url))("sharp");
 let source: Buffer, mask: Buffer;
 const owned: ReturnType<typeof setupImageTask>[] = [], connections: SqliteRunKernelStateStore[] = [];
 const children: ChildProcess[] = [];
+const networks: Awaited<ReturnType<typeof ownedProductionNetwork>>[] = [];
 beforeAll(async () => { const png = (p: number[]) => sharp(Buffer.from(p), { raw: { width: 2, height: 1, channels: 4 } }).png().toBuffer();
   source = await png([10,20,30,255,40,50,60,255]); mask = await png([0,0,0,0,255,255,255,255]); });
-afterEach(() => { vi.restoreAllMocks(); children.splice(0).forEach(c => { if (c.exitCode === null) c.kill(); }); connections.splice(0).forEach(c => c.close()); owned.splice(0).forEach(f => f.cleanup()); });
+afterEach(async () => { await new Promise(resolve => setImmediate(resolve)); vi.restoreAllMocks(); networks.splice(0).forEach(n => n.cleanup()); children.splice(0).forEach(c => { if (c.exitCode === null) c.kill(); }); connections.splice(0).forEach(c => c.close()); owned.splice(0).forEach(f => f.cleanup()); });
 function fixture(opts: { manual?: boolean; cap?: number; protocol?: "openai" | "openai-compatible"; encoding?: "json-images" | "multipart-image-array" | "multipart-image-single"; production?: boolean; timeout?: number; enabled?: boolean; lease?: boolean; quota?: number; start?: boolean; startTimeout?: number; response?: boolean; send?: (c: any) => Promise<any>; kernel?: Partial<RunKernelOptions> } = {}) {
   let service: LockedImageProductionPreparationHarness | LockedProductionImagePreparations;
   let leasePolicy: LockedProductionImageLeasePolicy, leaseAllowed: unknown = true;
@@ -71,7 +74,12 @@ function fixture(opts: { manual?: boolean; cap?: number; protocol?: "openai" | "
     parameters: { prompt: "原人工锁区指令", n: 1, size: { width: 2, height: 1 }, quality: "auto", background: "auto", outputFormat: "png" } });
   const prepare = async (action = "locked-owned") => { const v = await service.createPreparation(principal, select(action)); return f.store.loadLockedProductionImagePreparation(principal.tenantId, "project-a", v.mode, v.id)!; };
   const confirm = (p: Awaited<ReturnType<typeof prepare>>, actor = principal, expected: unknown = lockedExpected(p), signal?: AbortSignal) => service.confirmPreparation(actor, "project-a", p.id, expected, { signal });
-  return { ...f, reconstruction, rebuildOptions, send: rebuildOptions.fixtureTransport.send, responseAllow: (v: unknown) => { responseAllowed = v; }, startAllow: (v: unknown) => { startAllowed = v; }, service, options, authorizer, config, select, prepare, confirm, pricePort, leasePolicy, leaseOptions, leaseGate, leaseAllow: (v: unknown) => { leaseAllowed = v; }, deny: (p: string) => denied.add(p), policy: (p: unknown) => { policy = p; }, allow: (v: unknown) => { allowed = v; } };
+  const connectNetwork = (credentialNetwork: ProductionImageCredentialNetworkOptions) => {
+    const networkOptions = { ...rebuildOptions, fixtureTransport: undefined, credentialNetwork };
+    reconstruction = opts.production ? new LockedProductionImageTaskReconstruction(networkOptions) : new LockedImageProductionReconstructionHarness(networkOptions);
+    return reconstruction;
+  };
+  return { ...f, reconstruction, connectNetwork, rebuildOptions, send: rebuildOptions.fixtureTransport.send, responseAllow: (v: unknown) => { responseAllowed = v; }, startAllow: (v: unknown) => { startAllowed = v; }, service, options, authorizer, config, select, prepare, confirm, pricePort, leasePolicy, leaseOptions, leaseGate, leaseAllow: (v: unknown) => { leaseAllowed = v; }, deny: (p: string) => denied.add(p), policy: (p: unknown) => { policy = p; }, allow: (v: unknown) => { allowed = v; } };
 }
 async function unchanged(f: ReturnType<typeof fixture>, action: () => unknown) {
   const s = f.store.load(), c = f.store.loadCatalog(); await expect(Promise.resolve().then(action)).rejects.toThrow(); expect(f.store.load()).toEqual(s); expect(f.store.loadCatalog()).toEqual(c);
@@ -80,6 +88,47 @@ async function unchanged(f: ReturnType<typeof fixture>, action: () => unknown) {
 
 
 function response() { return { status: 200, contentType: "application/json", requestId: "owned-response", body: Buffer.from(JSON.stringify({ created: 1, data: [{ b64_json: source.toString("base64") }] })) }; }
+describe("protected v2 credential/network continuation (owned local drivers only)", () => {
+  for (const protocol of ["openai", "openai-compatible"] as const) for (const manual of [false, true])
+    it(protocol + " manual=" + manual + " keeps the complete v2 identity and one original response", async () => {
+      const f = await ready({ protocol, manual }), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n);
+      const core = f.connectNetwork(n.options);
+      n.hooks.write = () => { const b = f.store.load()!.batches[0]; expect(b.lockedProductionImageAttempt?.state).toBe("attempted"); expect(b.lockedProductionImageResult).toBeUndefined(); };
+      await core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input);
+      const b = f.store.load()!.batches[0];
+      expect(b.lockedProductionImageExecution?.schemaVersion).toBe(2); expect(b.lockedProductionImageExecution?.preparation.protectionPolicy).toEqual(f.preparation.protectionPolicy);
+      expect(b.lockedProductionImageResult?.kind).toBe("returned"); expect(b.lockedProductionImageAttempt?.transport).toBe("contract-fixture");
+      expect(b.aggregate.jobs[0].estimatedCostMinor).toBe(manual ? null : 25); expect(b.aggregate.jobs[0].actualCostMinor).toBeUndefined(); expect(b.reservedMinor).toBe(40);
+      expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1); expect(n.options.credentials.rootKeys.withRootKey).toHaveBeenCalledTimes(1);
+      expect(n.options.credentialVersion).toHaveBeenCalledWith(expect.objectContaining({ actorId: principal.actorId,
+        requestFingerprint: b.lockedProductionImageAttempt!.requestFingerprint, payloadChecksumSha256: b.lockedProductionImageAttempt!.payloadChecksumSha256 }));
+      expect(sha(n.captures[0].sentBody!)).toBe(b.lockedProductionImageAttempt!.payloadChecksumSha256);
+      expect(JSON.stringify(b)).not.toContain(n.secret.toString()); expect(b.productionImageExecution).toBeUndefined();
+    });
+  it("committed history never consumes another root or sends another request", async () => {
+    const f = await ready(), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n); const core = f.connectNetwork(n.options);
+    await core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input); const saved = f.store.load(); n.options.credentials.rootKeys.withRootKey.mockClear();
+    expect((await core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input)).started).toBe(false);
+    expect(f.store.load()).toEqual(saved); expect(n.options.credentials.rootKeys.withRootKey).not.toHaveBeenCalled(); expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1);
+  });
+  it("TLS-stage withdrawal blocks body write and retains the original attempted reservation", async () => {
+    const f = await ready(), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n); const core = f.connectNetwork(n.options);
+    n.hooks.tls = () => f.responseAllow(false);
+    await expect(core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input)).rejects.toThrow();
+    expect(n.captures[0].sentBody).toBeUndefined(); const b = f.store.load()!.batches[0]; expect(b.lockedProductionImageAttempt).toBeDefined();
+    expect(b.lockedProductionImageResult).toBeUndefined(); expect(b.reservedMinor).toBe(40); expect(b.aggregate.jobs[0].actualCostMinor).toBeUndefined();
+  });
+  it("default/mixed/native-fixture configurations fail before private state, root or DNS reads", async () => {
+    const f = await ready(), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n); const read = vi.spyOn(f.store, "load");
+    const args = [principal, "project-a", f.v.batchId, f.v.jobId, f.input] as const;
+    await expect(new LockedProductionImageTaskReconstruction().executeNative(...args)).rejects.toThrow();
+    await expect(new LockedImageProductionReconstructionHarness().executeNetworkFixture(...args)).rejects.toThrow();
+    expect(() => new LockedProductionImageTaskReconstruction({ ...f.rebuildOptions, fixtureTransport: undefined, credentialNetwork: n.options })).toThrow();
+    expect(() => new LockedImageProductionReconstructionHarness({ ...f.rebuildOptions, credentialNetwork: n.options })).toThrow();
+    const core = f.connectNetwork(n.options); await expect(core.executeNative(...args)).rejects.toThrow(); await expect(core.executeFixture(...args)).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled(); expect(n.options.credentials.rootKeys.withRootKey).not.toHaveBeenCalled(); expect(n.options.localDrivers!.createResolver).not.toHaveBeenCalled();
+  });
+});
 describe("protected response rollback and recovery boundaries",()=>{
   for(const phase of ["attempt","result"]) for(const failure of ["fault","revoke","clock","cancel","catalog","capacity"]) it(phase+" actual task SQL after-write "+failure+" rolls back",async()=>{
     const f=await ready(), abort=new AbortController(), save=f.store.save.bind(f.store); let triggered=false;

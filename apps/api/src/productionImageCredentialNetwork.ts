@@ -1,4 +1,4 @@
-import type { ConfirmedProductionImageExecution } from "@canvas/contracts";
+import type { ConfirmedProductionImageExecution, ConfirmedLockedProductionImageExecution } from "@canvas/contracts";
 import { imageSnapshotFingerprint as fp } from "./imageProviderContract";
 import { EncryptedImageCredentials, type EncryptedImageCredentialOptions } from "./encryptedImageCredentials";
 import { NativeImageNetworkClient, ImageNetworkDriverHarness, type NativeImageNetworkOptions, type ImageNetworkLocalDrivers } from "./nativeImageNetwork";
@@ -37,7 +37,9 @@ export class ProductionImageCredentialNetwork {
     this.options = { ...options, credentials: { ...options.credentials, writeRoot: { ...options.credentials.writeRoot } },
       network: { ...options.network, allowedTargets: options.network.allowedTargets.map(t => ({ ...t })), additionalDeniedAddresses: options.network.additionalDeniedAddresses?.slice() } };
   }
-  async send(e: ConfirmedProductionImageExecution, wire: Wire, actorId: string, signal: AbortSignal,
+  // Keep the complete v2 identity; never relabel it as a v1/none execution.
+  // Both callers must supply their own actual SQL-backed live attempt guards.
+  async send(e: ConfirmedProductionImageExecution | ConfirmedLockedProductionImageExecution, wire: Wire, actorId: string, signal: AbortSignal,
     assertCurrent: () => void, assertHistory: () => void): Promise<ImageProtocolResponse> {
     const o = this.options, connection = e.preparation.connection, request = e.protocol.request;
     if (e.mode !== this.mode || request.tenantId !== o.network.tenantId || !(signal instanceof AbortSignal)) fail();
