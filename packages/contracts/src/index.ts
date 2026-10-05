@@ -950,6 +950,13 @@ export const ProductionImageLeaseEvidenceSchema = RunJobLeaseSchema.extend({
 }).strict().refine((lease) => Date.parse(lease.expiresAt) > Date.parse(lease.leasedAt), { message: "生产租约期限无效" });
 export type ProductionImageLeaseEvidence = z.infer<typeof ProductionImageLeaseEvidenceSchema>;
 
+// Separate v2 policy-bound history. Neither this shape nor a lease is a send permit.
+export const LockedProductionImageLeaseEvidenceSchema = RunJobLeaseSchema.extend({
+  schemaVersion: z.literal(2), mode: z.enum(["production", "production-contract-fixture"]), actorId: IdSchema,
+  executionFingerprint: z.string().regex(/^[a-f0-9]{64}$/), protectionPolicyFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict().refine(l => Date.parse(l.expiresAt) > Date.parse(l.leasedAt), { message: "保护租约期限无效" });
+export type LockedProductionImageLeaseEvidence = z.infer<typeof LockedProductionImageLeaseEvidenceSchema>;
+
 // Private historical evidence only. This shape cannot authorize a start, send,
 // credential read or artifact commit. Actual starts require a private live policy.
 export const ProductionImageDispatchIntentSchema = z.object({
@@ -1106,6 +1113,7 @@ export const RunKernelBudgetStateSchema = z.object({
 export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
   lockedProductionImageExecution: ConfirmedLockedProductionImageExecutionSchema.optional(),
+  lockedProductionImageLeases: z.array(LockedProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),

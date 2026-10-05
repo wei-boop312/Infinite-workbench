@@ -36,7 +36,7 @@ export class SqliteRunKernel implements RunKernelPort {
   validateProductionBillingSnapshot(snapshot: RunKernelSnapshot): void {
     new InMemoryRunKernel({ ...this.options, budgets: snapshot.budgets, recoverRunningJobsOnRestore: false, restoreValidationOnly: true,
       stateStore: { load: () => structuredClone(snapshot), save: () => { throw new Error("只读核账快照不得保存"); } } });
-    for (const stored of snapshot.batches) for (const lease of stored.productionImageLeases ?? []) {
+    for (const stored of snapshot.batches) for (const lease of [...stored.productionImageLeases ?? [], ...stored.lockedProductionImageLeases ?? []]) {
       if (Date.parse(lease.expiresAt) - Date.parse(lease.leasedAt) !== (this.options.leaseDurationMs ?? 30_000)) throw new Error("原租约期限与实际内核配置不一致");
     }
     for (const stored of snapshot.batches.filter(b => b.productionImageExecution)) {
@@ -73,6 +73,15 @@ export class SqliteRunKernel implements RunKernelPort {
   claimProductionImageBatch: InMemoryRunKernel["claimProductionImageBatch"] = (p, project, batch, input) => this.productionLeaseCommand(p, project, batch, "claim", (kernel) => {
     return kernel.claimProductionImageBatch(p, project, batch, input);
   }, (result, kernel) => { for (const lease of result.leases) kernel.inspectProductionImageLease(p, project, batch, lease.jobId, { workerId: lease.workerId, leaseId: lease.leaseId }); });
+  claimLockedProductionImageBatch: InMemoryRunKernel["claimLockedProductionImageBatch"] = (p, project, batch, input) =>
+    this.lockedLeaseCommand(p, project, batch, "claim", k => k.claimLockedProductionImageBatch(p, project, batch, input), (r, k) => {
+      for (const l of r.leases) k.inspectLockedProductionImageLease(p, project, batch, l.jobId, { workerId: l.workerId, leaseId: l.leaseId }); });
+  inspectLockedProductionImageLease: InMemoryRunKernel["inspectLockedProductionImageLease"] = (p, project, batch, job, input) =>
+    this.lockedLeaseCommand(p, project, batch, "inspect", k => k.inspectLockedProductionImageLease(p, project, batch, job, input));
+  reconcileLockedProductionImageBatch: InMemoryRunKernel["reconcileLockedProductionImageBatch"] = (p, project, batch) =>
+    this.lockedLeaseCommand(p, project, batch, "reconcile", k => k.reconcileLockedProductionImageBatch(p, project, batch));
+  cancelLockedProductionImageBatch: InMemoryRunKernel["cancelLockedProductionImageBatch"] = (p, project, batch) =>
+    this.lockedLeaseCommand(p, project, batch, "cancel", k => k.cancelLockedProductionImageBatch(p, project, batch));
   inspectProductionImageLease: InMemoryRunKernel["inspectProductionImageLease"] = (p, project, batch, job, input) => this.productionLeaseCommand(p, project, batch, "inspect",
     (kernel) => kernel.inspectProductionImageLease(p, project, batch, job, input), (_result, kernel) => { kernel.inspectProductionImageLease(p, project, batch, job, input); });
   reconcileProductionImageBatch: InMemoryRunKernel["reconcileProductionImageBatch"] = (p, project, batch) => this.productionLeaseCommand(p, project, batch, "reconcile",
@@ -237,6 +246,37 @@ export class SqliteRunKernel implements RunKernelPort {
         return result;
       });
     } catch (error) { if (error instanceof RunKernelError) throw error; throw new RunKernelError(503, "production_image_lease_unavailable", "生产租约存储或政策不可用"); }
+  }
+
+  private lockedLeaseCommand<T>(principal: RunPrincipal, project: string, batch: string, purpose: import("./lockedProductionImageLeasePolicy").LockedLeasePurpose,
+    action: (kernel: InMemoryRunKernel) => T, after?: (result: T, kernel: InMemoryRunKernel) => void): T {
+    const policy = this.options.lockedProductionImageLeasePolicy, p = structuredClone(principal);
+    if (!policy) throw new RunKernelError(503, "locked_lease_not_configured", "保护租约须显式同库政策");
+    try {
+      const store = this.options.stateStore, clock = this.options.clock, identities = [policy.usesStateStore, policy.authorizeScope, policy.validate], principalFingerprint = imageSnapshotFingerprint(p);
+      const fixed = () => { if (this.options.stateStore !== store || this.options.clock !== clock || this.options.lockedProductionImageLeasePolicy !== policy
+        || imageSnapshotFingerprint(p) !== principalFingerprint
+        || identities.some((f, i) => f !== [policy.usesStateStore, policy.authorizeScope, policy.validate][i])) throw new Error("保护租约配置/身份/端口漂移"); };
+      fixed();
+      this.strictArtifactPolicy(() => policy.usesStateStore(this.options.stateStore));
+      this.strictArtifactPolicy(() => policy.authorizeScope(p, project, purpose));
+      const timeout = policy.timeoutMs ?? 5000;
+      if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30000) throw new Error("保护租约时限无效");
+      let last = this.options.clock?.() ?? Date.now(); const deadline = last + timeout;
+      if (!Number.isSafeInteger(last) || last < 0 || last > 8_640_000_000_000_000 - 30000) throw new Error("保护任务首时钟无效");
+      const guard = () => { fixed(); const now = clock?.() ?? Date.now(); if (!Number.isSafeInteger(now) || now < 0 || now < last || now >= deadline) throw new Error("保护任务事务时钟/期限无效"); last = now; };
+      return this.options.stateStore.transaction(() => {
+        guard(); const result = this.run(action); guard();
+        const actual = this.options.stateStore.load()?.batches.find(b => b.aggregate.batch.id === batch);
+        if (!actual) throw new Error("保护任务缺失"); const fingerprint = imageSnapshotFingerprint(this.options.stateStore.load());
+        const postPurpose = purpose === "claim" && actual.aggregate.jobs[0].status !== "queued" ? "history" : purpose;
+        this.run(k => { k.assertLockedProductionImageTask(p, project, batch, postPurpose); after?.(result, k); }); guard();
+        // Re-read after all trusted post-write callbacks, even if they coherently mutate a valid state.
+        this.run(() => undefined);
+        if (imageSnapshotFingerprint(this.options.stateStore.load()) !== fingerprint) throw new Error("保护任务实际写后漂移");
+        return result;
+      });
+    } catch (e) { if (e instanceof RunKernelError) throw e; throw new RunKernelError(503, "locked_lease_unavailable", "保护任务存储/政策不可用，请保留原编号核对"); }
   }
 
   private run<T>(action: (kernel: InMemoryRunKernel) => T, pendingArtifact?: { principal: RunPrincipal; record: ProductionImageArtifact }): T {

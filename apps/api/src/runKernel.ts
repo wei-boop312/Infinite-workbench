@@ -17,6 +17,7 @@ import {
   type ConfirmedProductionImageExecution,
   type ConfirmedLockedProductionImageExecution,
   ProductionImageLeaseEvidenceSchema, type ProductionImageLeaseEvidence,
+  LockedProductionImageLeaseEvidenceSchema, type LockedProductionImageLeaseEvidence,
   type ProductionImageDispatchIntent,
   type ProductionImageAttempt, type ProductionImageResult,
   type ProductionImageArtifact,
@@ -42,6 +43,7 @@ import {
 } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
 import type { ProductionImageLeasePolicy, ProductionImageLeasePurpose } from "./productionImageLeasePolicy";
+import type { LockedProductionImageLeasePolicy, LockedLeasePurpose } from "./lockedProductionImageLeasePolicy";
 import { assertProductionConfirmation, productionConfirmationKey } from "./productionImageConfirmationIntegrity";
 import { assertLockedConfirmation, assertLockedConfirmationState, lockedConfirmationKey } from "./lockedProductionImageProtocol";
 import { assertProductionDispatchIntent } from "./productionImageDispatchIntentIntegrity";
@@ -130,6 +132,7 @@ type BudgetState = ProjectBudgetConfig & {
 type StoredBatch = {
   aggregate: RunBatchAggregate;
   lockedProductionImageExecution?: ConfirmedLockedProductionImageExecution;
+  lockedProductionImageLeases?: LockedProductionImageLeaseEvidence[];
   productionImageExecution?: ConfirmedProductionImageExecution;
   productionImageLeases?: ProductionImageLeaseEvidence[];
   productionImageDispatchIntent?: ProductionImageDispatchIntent;
@@ -184,6 +187,7 @@ export type RunKernelOptions = {
   validateProductionImageConfirmation?: (principal: RunPrincipal, execution: ConfirmedProductionImageExecution) => boolean;
   validateLockedProductionImageConfirmation?: (principal: RunPrincipal, execution: ConfirmedLockedProductionImageExecution) => boolean;
   productionImageLeasePolicy?: ProductionImageLeasePolicy;
+  lockedProductionImageLeasePolicy?: LockedProductionImageLeasePolicy;
   productionImageStartPolicy?: ProductionImageStartPolicy;
   productionImageResponsePolicy?: ProductionImageResponsePolicy;
   productionImageArtifactPolicy?: {
@@ -694,6 +698,67 @@ export class InMemoryRunKernel implements RunKernelPort {
     return this.claimValidatedBatch(principal, batchId, ClaimRunJobsRequestSchema.parse(input), "production");
   }
 
+  assertLockedProductionImageTask(p: RunPrincipal, project: string, batch: string, purpose: LockedLeasePurpose, extraBytes = 0) {
+    const policy = this.options.lockedProductionImageLeasePolicy;
+    if (!policy) throw new RunKernelError(503, "locked_lease_not_configured", "保护租约默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(p, project, purpose));
+    const stored = this.requireBatch(p, batch), e = stored.lockedProductionImageExecution;
+    if (!e || e.preparation.projectId !== project) throw new RunKernelError(409, "locked_lease_mode_mismatch", "原保护任务范围不匹配");
+    this.productionPolicyTrue(() => policy.validate(p, structuredClone(e), purpose, extraBytes)); return structuredClone(e);
+  }
+  claimLockedProductionImageBatch(p: RunPrincipal, project: string, batch: string, input: ClaimRunJobsRequest) {
+    const policy = this.options.lockedProductionImageLeasePolicy;
+    if (!policy) throw new RunKernelError(503, "locked_lease_not_configured", "保护租约默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(p, project, "claim")); const s = this.requireBatch(p, batch), j = s.aggregate.jobs[0];
+    if (j && (j.status === "cancelled" || (j.status === "leased" && this.clock() < Date.parse(j.leaseExpiresAt!)))) {
+      this.assertLockedProductionImageTask(p, project, batch, "history"); return { aggregate: this.copy(s.aggregate), leases: [] };
+    }
+    this.assertLockedProductionImageTask(p, project, batch, "claim");
+    return this.claimValidatedBatch(p, batch, ClaimRunJobsRequestSchema.parse(input), "locked");
+  }
+  inspectLockedProductionImageLease(p: RunPrincipal, project: string, batch: string, jobId: string, input: ExecuteRunJobRequest) {
+    const policy = this.options.lockedProductionImageLeasePolicy;
+    if (!policy) throw new RunKernelError(503, "locked_lease_not_configured", "保护租约默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(p, project, "inspect"));
+    const stored = this.requireBatch(p, batch), request = ExecuteRunJobRequestSchema.parse(input), j = stored.aggregate.jobs[0], l = stored.lockedProductionImageLeases?.at(-1);
+    // Original claimant identity is checked before any original-input BLOB reads.
+    if (!j || j.id !== jobId || j.status !== "leased" || !l || l.actorId !== p.actorId || l.leaseId !== request.leaseId || l.workerId !== request.workerId
+      || j.leaseId !== request.leaseId || j.leaseOwnerId !== request.workerId) throw new RunKernelError(409, "locked_lease_identity_mismatch", "原领取人/worker/lease不匹配");
+    const execution = this.assertLockedProductionImageTask(p, project, batch, "inspect");
+    return { aggregate: this.copy(stored.aggregate), execution, lease: LockedProductionImageLeaseEvidenceSchema.parse(l) };
+  }
+  reconcileLockedProductionImageBatch(p: RunPrincipal, project: string, batch: string) {
+    this.assertLockedProductionImageTask(p, project, batch, "reconcile"); const s = this.requireBatch(p, batch);
+    const changed = this.recoverLockedProductionImageLease(p, s);
+    this.assertStateConsistent(); if (changed) this.persist(); return this.copy(s.aggregate);
+  }
+  private recoverLockedProductionImageLease(p: RunPrincipal, s: StoredBatch) {
+    const j = s.aggregate.jobs[0]; if (j.status !== "leased" || this.clock() < Date.parse(j.leaseExpiresAt!)) return false;
+    const event = this.audit(s.aggregate.batch, p.actorId, "job-lease-expired", { jobId: j.id, leaseId: j.leaseId!, action: "requeued-before-start" });
+    this.assertLockedProductionImageTask(p, s.aggregate.batch.projectId, s.aggregate.batch.id, "reconcile", Buffer.byteLength(JSON.stringify(event)) + 1);
+    if (this.clock() < Date.parse(event.createdAt)) throw new RunKernelError(409, "locked_lease_clock_invalid", "恢复时钟倒退");
+    const { leaseId: _id, leaseOwnerId: _worker, leasedAt: _at, leaseExpiresAt: _expires, ...unleased } = j;
+    this.replaceJob(s.aggregate, { ...unleased, status: "queued" }); s.aggregate.audit.push(event); return true;
+  }
+  cancelLockedProductionImageBatch(p: RunPrincipal, project: string, batch: string) {
+    this.assertLockedProductionImageTask(p, project, batch, "cancel"); const s = this.requireBatch(p, batch), a = s.aggregate, b = a.batch;
+    if (b.status === "cancelled") return this.copy(a);
+    // Full state validation has proved no intent/attempt/raw/fees. Future states must never inherit this release path.
+    if (b.status !== "queued" || !["queued", "leased"].includes(a.jobs[0].status)) throw new RunKernelError(409, "locked_cancel_not_unsent", "只能取消未启动保护任务");
+    const at = new Date(this.clock()).toISOString(), amount = s.reservedMinor;
+    const event = this.audit(b, p.actorId, "batch-cancelled", { previousStatus: b.status, protectionPolicyFingerprint: imageSnapshotFingerprint(s.lockedProductionImageExecution!.preparation.protectionPolicy) });
+    const release = amount > 0 ? this.audit(b, p.actorId, "budget-released", { releasedMinor: String(amount) }) : undefined;
+    const entry: CostLedger | undefined = amount > 0 ? { id: `ledger-${randomUUID()}`, tenantId: b.tenantId, projectId: b.projectId, batchId: b.id, imageMode: b.imageMode,
+      currency: b.currency, estimatedMinor: b.estimatedCostMinor, reservedMinor: 0, actualMinor: 0, settlement: "released", createdAt: at } : undefined;
+    event.createdAt = at; if (release) release.createdAt = at;
+    this.assertLockedProductionImageTask(p, project, batch, "cancel", Buffer.byteLength(JSON.stringify([event, release, entry])) + 1);
+    if (this.clock() < Date.parse(at)) throw new RunKernelError(409, "locked_lease_clock_invalid", "取消时钟倒退");
+    const budget = this.requireBudget(b.tenantId, project); budget.reservedMinor -= amount; s.reservedMinor = 0; s.jobReservations.clear();
+    if (release && entry) { a.audit.push(release); a.ledger.push(entry); }
+    a.audit.push(event); a.batch = { ...b, status: "cancelled" }; a.jobs[0] = { ...a.jobs[0], status: "cancelled", finishedAt: at };
+    this.assertStateConsistent(); this.persist(); return this.copy(a);
+  }
+
   inspectProductionImageLease(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: ExecuteRunJobRequest) {
     const { stored } = this.productionImageTask(principal, projectId, batchId), lease = ExecuteRunJobRequestSchema.parse(input);
     const job = stored.aggregate.jobs.find((j) => j.id === jobId);
@@ -883,14 +948,14 @@ export class InMemoryRunKernel implements RunKernelPort {
     stored.aggregate.ledger.push(entry); stored.aggregate.audit.push(event); return true;
   }
 
-  private claimValidatedBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest, image: boolean | "production"): RunJobClaimResult {
+  private claimValidatedBatch(principal: RunPrincipal, batchId: string, request: ClaimRunJobsRequest, image: boolean | "production" | "locked"): RunJobClaimResult {
     const stored = this.requireBatch(principal, batchId);
     this.assertAllowed(principal, stored.aggregate.batch.projectId, "run:execute");
     if (image === true) this.requireImageExecution(stored);
     if (stored.aggregate.batch.status === "billing_unknown") {
       throw new RunKernelError(409, "billing_state_unknown", "计费状态未知时禁止继续调度");
     }
-    const recoveredExpired = image === "production" ? this.recoverProductionImageLease(principal, stored) : this.recoverExpiredLeases("system-lease-reaper");
+    const recoveredExpired = image === "production" ? this.recoverProductionImageLease(principal, stored) : image === "locked" ? this.recoverLockedProductionImageLease(principal, stored) : this.recoverExpiredLeases("system-lease-reaper");
     const aggregate = stored.aggregate;
     if (aggregate.batch.status === "billing_unknown") {
       if (recoveredExpired) this.persist();
@@ -905,6 +970,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     }
 
     if (image === "production") this.assertProductionImageTask(principal, aggregate.batch.projectId, batchId, "claim");
+    else if (image === "locked") this.assertLockedProductionImageTask(principal, aggregate.batch.projectId, batchId, "claim");
     else if (image) this.validateImageTask(principal, stored);
     else this.validateBatchInputs(aggregate.batch);
 
@@ -955,7 +1021,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       };
       const event = this.audit(aggregate.batch, principal.actorId, "job-leased", {
         jobId: leased.id, leaseId, workerId: request.workerId, adapterId: leased.adapterId,
-        ...(image === "production" ? { mode: stored.productionImageExecution!.mode, executionFingerprint: stored.requestFingerprint, expiresAt } : {}),
+        ...(image === "production" || image === "locked" ? { mode: (stored.productionImageExecution ?? stored.lockedProductionImageExecution)!.mode, executionFingerprint: stored.requestFingerprint, expiresAt,
+          ...(image === "locked" ? { protectionPolicyFingerprint: imageSnapshotFingerprint(stored.lockedProductionImageExecution!.preparation.protectionPolicy) } : {}) } : {}),
       });
       if (image === "production") {
         const history = stored.productionImageLeases ?? [];
@@ -968,17 +1035,27 @@ export class InMemoryRunKernel implements RunKernelPort {
         if (this.clock() < now || this.clock() >= now + this.leaseDurationMs) throw new RunKernelError(409, "production_image_lease_expired", "最终核验跨过租约期限");
         stored.productionImageLeases = updated;
       }
+      if (image === "locked") {
+        const history = stored.lockedProductionImageLeases ?? [], evidence = LockedProductionImageLeaseEvidenceSchema.parse({ schemaVersion: 2,
+          mode: stored.lockedProductionImageExecution!.mode, actorId: principal.actorId, executionFingerprint: stored.requestFingerprint,
+          protectionPolicyFingerprint: imageSnapshotFingerprint(stored.lockedProductionImageExecution!.preparation.protectionPolicy), jobId: leased.id, batchId,
+          leaseId, workerId: request.workerId, leasedAt, expiresAt }), updated = [...history, evidence];
+        if (updated.length > 512 || Buffer.byteLength(JSON.stringify(updated)) > 512 * 1024) throw new RunKernelError(413, "locked_lease_history_full", "不删除保护租约历史腾空间");
+        event.createdAt = leasedAt; this.assertLockedProductionImageTask(principal, aggregate.batch.projectId, batchId, "claim", Buffer.byteLength(JSON.stringify([evidence, event])) + 4);
+        if (this.clock() < now || this.clock() >= now + this.leaseDurationMs) throw new RunKernelError(409, "locked_lease_expired", "最终核验跨租约期限");
+        stored.lockedProductionImageLeases = updated;
+      }
       this.replaceJob(aggregate, leased);
       leases.push({ jobId: leased.id, batchId, leaseId, workerId: request.workerId, leasedAt, expiresAt });
       aggregate.audit.push(event);
     }
-    if (leases.length > 0 && image !== "production") {
+    if (leases.length > 0 && image !== "production" && image !== "locked") {
       aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "batch-dispatched", {
         count: String(leases.length),
         workerId: request.workerId,
       }));
     }
-    if (throttledBy && image !== "production") {
+    if (throttledBy && image !== "production" && image !== "locked") {
       aggregate.audit.push(this.audit(aggregate.batch, principal.actorId, "dispatch-throttled", {
         reason: throttledBy,
         retryAfterMs: String(retryAfterMs),
@@ -992,7 +1069,11 @@ export class InMemoryRunKernel implements RunKernelPort {
       if (leases.some((l) => this.clock() < Date.parse(l.leasedAt) || this.clock() >= Date.parse(l.expiresAt))) throw new RunKernelError(409, "production_image_lease_expired", "生产租约在提交前到期");
       this.assertStateConsistent();
     }
-    if (leases.length > 0 || (throttledBy && image !== "production") || recoveredExpired) this.persist();
+    if (image === "locked") {
+      this.assertLockedProductionImageTask(principal, aggregate.batch.projectId, batchId, "claim");
+      if (leases.some(l => this.clock() < Date.parse(l.leasedAt) || this.clock() >= Date.parse(l.expiresAt))) throw new RunKernelError(409, "locked_lease_expired", "保护租约提交前到期"); this.assertStateConsistent();
+    }
+    if (leases.length > 0 || (throttledBy && image !== "production" && image !== "locked") || recoveredExpired) this.persist();
     return {
       aggregate: this.copy(stored.aggregate),
       leases,
@@ -1668,6 +1749,7 @@ export class InMemoryRunKernel implements RunKernelPort {
         aggregate,
         productionImageExecution: serialized.productionImageExecution,
         lockedProductionImageExecution: serialized.lockedProductionImageExecution,
+        lockedProductionImageLeases: serialized.lockedProductionImageLeases,
         productionImageLeases: serialized.productionImageLeases,
         productionImageDispatchIntent: serialized.productionImageDispatchIntent,
         productionImageDispatchIntentFingerprint: serialized.productionImageDispatchIntentFingerprint,
@@ -1761,6 +1843,7 @@ export class InMemoryRunKernel implements RunKernelPort {
         aggregate: this.copy(stored.aggregate),
         ...(stored.productionImageExecution ? { productionImageExecution: stored.productionImageExecution } : {}),
         ...(stored.lockedProductionImageExecution ? { lockedProductionImageExecution: stored.lockedProductionImageExecution } : {}),
+        ...(stored.lockedProductionImageLeases ? { lockedProductionImageLeases: stored.lockedProductionImageLeases } : {}),
         ...(stored.productionImageLeases ? { productionImageLeases: stored.productionImageLeases } : {}),
         ...(stored.productionImageDispatchIntent ? { productionImageDispatchIntent: stored.productionImageDispatchIntent } : {}),
         ...(stored.productionImageDispatchIntentFingerprint ? { productionImageDispatchIntentFingerprint: stored.productionImageDispatchIntentFingerprint } : {}),
@@ -1795,13 +1878,15 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (stored.lockedProductionImageExecution) throw new Error("模拟任务不可含锁区确认");
+        if (stored.lockedProductionImageExecution || stored.lockedProductionImageLeases) throw new Error("模拟任务不可含锁区确认/租约");
         if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else if (stored.lockedProductionImageExecution) {
-        assertLockedConfirmationState({ ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] });
+        assertLockedConfirmationState({ ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] }, this.options.restoreValidationOnly ? undefined : this.leaseDurationMs);
+      } else if (stored.lockedProductionImageLeases) {
+        throw new Error("保护租约缺少独立完整确认");
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);
       } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling) {
