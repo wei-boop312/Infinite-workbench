@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CreateImagePreparationSchema, FixtureProductionImagePricingSchema, LockedImagePreparationPolicySchema, LockedProductionImagePreparationRecordSchema,
+  ConfirmLockedProductionImagePreparationSchema, ConfirmedLockedProductionImageExecutionSchema, type ConfirmedLockedProductionImageExecution,
   ProductionImageExecutionRequestSchema, ProductionImagePricingSchema, ProductionImageRequestDraftSchema,
   type CreateImagePreparation, type LockedProductionImagePreparationRecord, type LockedImagePreparationPolicy, type VerifiedImage } from "@canvas/contracts";
 import { imageSnapshotFingerprint, validateLockedProductionImagePreparationRequest } from "./imageProviderContract";
@@ -14,11 +15,15 @@ import type { ImageProviderAuthorizer } from "./imageProviders";
 import type { ObjectStorageAuthorizer } from "./objectStorageGateway";
 import type { RunAuthorizer } from "./runKernel";
 import type { ImagePriceContext, ProductionImagePricePort, FixtureProductionImagePricePort } from "./productionImagePreparations";
+import { assertLockedConfirmation, assertLockedExpectations, lockedConfirmationKey, prepareLockedProductionImageProtocol } from "./lockedProductionImageProtocol";
+import type { TrustedImageBytes } from "./imageRequestPayload";
 
 export interface LockedImagePriceContext extends ImagePriceContext { protectionPolicy: LockedImagePreparationPolicy }
 interface BaseOptions {
   preparationEnabled: true; lockedPreparationEnabled: true; tenantId: string; stateStore: SqliteRunKernelStateStore;
-  runKernel: Pick<SqliteRunKernel, "usesStateStore" | "validateProductionBillingSnapshot">;
+  runKernel: Pick<SqliteRunKernel, "usesStateStore" | "validateProductionBillingSnapshot"> & Partial<Pick<SqliteRunKernel, "stageConfirmedLockedProductionImageBatch">>;
+  lockedConfirmationEnabled?: true;
+  lockedConfirmationPolicy?(scope: { principal: RunPrincipal; projectId: string; write: boolean }): boolean;
   authorizer: ImageProviderAuthorizer; runAuthorizer: RunAuthorizer; assetAuthorizer: ObjectStorageAuthorizer;
   lockedPreparationPolicy(scope: { principal: RunPrincipal; projectId: string; write: boolean }): boolean;
   clock?: () => number; timeoutMs?: number; maxMetadataBytes?: number;
@@ -33,22 +38,27 @@ const unsealed = (r: LockedProductionImagePreparationRecord) => { const { snapsh
 const view = (r: LockedProductionImagePreparationRecord) => ({ schemaVersion: 2 as const, id: r.id, tenantId: r.tenantId, projectId: r.projectId, mode: r.mode,
   status: r.status, protocolPreparation: r.protocolPreparation, executionAuthorized: false as const, realExecutionEnabled: false as const,
   snapshotFingerprint: r.snapshotFingerprint, basisFingerprint: r.basisFingerprint, protectionPolicyFingerprint: imageSnapshotFingerprint(r.protectionPolicy) });
-function reject(code: string, status = 422): never { throw new RunKernelError(status, code, "锁区准备失败，未确认、预留或发送"); }
+function reject(code: string, status = 422): never { throw new RunKernelError(status, code, "锁区流程校验失败，请保留原准备编号只读核对；不授权发送"); }
 function sync<T>(read: () => T): T {
   const value = read();
   if (value && (typeof value === "object" || typeof value === "function") && "then" in value) { void Promise.resolve(value).catch(() => undefined); reject("locked_preparation_async_policy"); }
   return value;
 }
 let activePreparations = 0;
+let activeConfirmations = 0;
 
-// Actual authority-backed v2 preparation only. No confirmation, protocol,
-// task, lease, credentials, network, output, billing or public HTTP entry point.
+// Actual authority-backed v2 preparation and separately enabled confirmation.
+// No lease, credentials, network, output, billing or public HTTP entry point.
 class LockedPreparationCore {
   private readonly options?: Options;
+  private readonly pending = new Map<string, { principal: RunPrincipal; check: () => void }>();
   constructor(private readonly mode: Mode, options?: Options) {
     // Capture configuration identities/functions; mutable callers cannot swap
     // a store/port/policy across the native await.
-    this.options = options && { ...options, authorizer: { ...options.authorizer, allows: options.authorizer.allows.bind(options.authorizer) },
+    this.options = options && { ...options, runKernel: { usesStateStore: options.runKernel.usesStateStore.bind(options.runKernel),
+      validateProductionBillingSnapshot: options.runKernel.validateProductionBillingSnapshot.bind(options.runKernel),
+      stageConfirmedLockedProductionImageBatch: options.runKernel.stageConfirmedLockedProductionImageBatch?.bind(options.runKernel) },
+      authorizer: { ...options.authorizer, allows: options.authorizer.allows.bind(options.authorizer) },
       runAuthorizer: { ...options.runAuthorizer, allows: options.runAuthorizer.allows.bind(options.runAuthorizer) },
       assetAuthorizer: { ...options.assetAuthorizer, allows: options.assetAuthorizer.allows.bind(options.assetAuthorizer) },
       pricePort: { ...options.pricePort, read: options.pricePort.read.bind(options.pricePort), verify: options.pricePort.verify.bind(options.pricePort) } };
@@ -139,6 +149,104 @@ class LockedPreparationCore {
       if (time >= deadline) reject("locked_preparation_expired", 408); this.permit(p, project, false); }; guard();
     return this.database(() => { guard(); const r = this.config().stateStore.loadLockedProductionImagePreparation(p.tenantId, project, this.mode, id);
       if (!r) reject("locked_preparation_not_found", 404); return this.history(p, r, guard); });
+  }
+  private confirmationPermit(p: RunPrincipal, project: string, write: boolean) {
+    const o = this.config();
+    if (o.lockedConfirmationEnabled !== true || typeof o.lockedConfirmationPolicy !== "function"
+      || typeof o.runKernel.stageConfirmedLockedProductionImageBatch !== "function"
+      || sync(() => o.stateStore.supportsProductionImageResponses()) !== true || sync(() => o.stateStore.supportsProductionImageArtifacts()) !== true) reject("locked_confirmation_not_configured", 503);
+    this.permit(p, project, write);
+    if (sync(() => o.lockedConfirmationPolicy!(structuredClone({ principal: p, projectId: project, write }))) !== true
+      || (write && sync(() => o.runAuthorizer.allows(p, project, "run:confirm")) !== true)) reject("locked_confirmation_permission_denied", 403);
+  }
+  private confirmationHistory(p: RunPrincipal, r: LockedProductionImagePreparationRecord, guard: () => void) {
+    this.history(p, r, guard);
+    const snapshot = this.snapshot();
+    const rows = snapshot.batches.filter(s => s.aggregate.batch.tenantId === p.tenantId && s.aggregate.batch.projectId === r.projectId
+      && s.aggregate.batch.idempotencyKey === lockedConfirmationKey({ mode: r.mode, preparation: r }));
+    if (!rows.length) return null;
+    if (rows.length !== 1 || !rows[0].lockedProductionImageExecution) reject("locked_confirmation_history_corrupt", 503);
+    const e = assertLockedConfirmation(rows[0].lockedProductionImageExecution);
+    if (imageSnapshotFingerprint(e.preparation) !== imageSnapshotFingerprint(r)) reject("locked_confirmation_history_corrupt", 503);
+    const raw = this.config().stateStore.supportsProductionImageResponses()
+      ? this.config().stateStore.loadProductionImageResponse(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId) : null;
+    try { if (raw || (this.config().stateStore.supportsProductionImageArtifacts()
+      && this.config().stateStore.loadProductionImageArtifact(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId))) reject("locked_confirmation_history_corrupt", 503); }
+    finally { raw?.body.fill(0); }
+    guard(); const latest = this.config().stateStore.loadLockedProductionImagePreparation(p.tenantId, r.projectId, this.mode, r.id);
+    if (!latest || imageSnapshotFingerprint(latest) !== imageSnapshotFingerprint(r)) reject("locked_confirmation_history_corrupt", 503);
+    const j = rows[0].aggregate.jobs[0], b = rows[0].aggregate.batch;
+    guard(); if (imageSnapshotFingerprint(this.snapshot()) !== imageSnapshotFingerprint(snapshot)) reject("locked_confirmation_history_corrupt", 503);
+    return { schemaVersion: 2 as const, tenantId: p.tenantId, projectId: r.projectId, mode: this.mode, preparationId: r.id,
+      preparationFingerprint: r.snapshotFingerprint, protectionPolicyFingerprint: imageSnapshotFingerprint(r.protectionPolicy),
+      pricingFingerprint: e.protocol.pricingFingerprint, requestFingerprint: e.protocol.requestFingerprint, batchId: b.id, jobId: j.id,
+      executionState: e.executionState, executionAuthorized: false as const, realExecutionEnabled: false as const,
+      confirmedBy: e.confirmedBy, confirmedAt: e.confirmedAt, status: b.status, currency: b.currency, estimatedCostMinor: b.estimatedCostMinor,
+      maxCostMinor: b.maxCostMinor, reservedMinor: rows[0].reservedMinor };
+  }
+  getConfirmation(principal: RunPrincipal, project: string, id: string) {
+    const p = structuredClone(principal); this.confirmationPermit(p, project, false);
+    let last = this.now(); const deadline = last + (this.config().timeoutMs ?? 5000);
+    const guard = () => { const t = this.now(); if (t < last || t >= deadline) reject("locked_confirmation_expired", 408); last = t; this.confirmationPermit(p, project, false); };
+    return this.database(() => { guard(); const r = this.config().stateStore.loadLockedProductionImagePreparation(p.tenantId, project, this.mode, id);
+      if (!r) reject("locked_preparation_not_found", 404); return this.confirmationHistory(p, r, guard); });
+  }
+  authorizeConfirmation(principal: RunPrincipal, incoming: ConfirmedLockedProductionImageExecution): boolean {
+    const live = this.pending.get(imageSnapshotFingerprint(incoming));
+    if (!live || imageSnapshotFingerprint(live.principal) !== imageSnapshotFingerprint(principal)) return false;
+    live.check(); assertLockedConfirmation(incoming); return true;
+  }
+  async confirmPreparation(principal: RunPrincipal, project: string, id: string, expectedInput: unknown, options: { signal?: AbortSignal } = {}) {
+    const p = structuredClone(principal); this.confirmationPermit(p, project, true);
+    const o = this.config(), expected = ConfirmLockedProductionImagePreparationSchema.parse(expectedInput), signal = options.signal;
+    let last = this.now(), closed = false; const timeout = o.timeoutMs ?? 5000, deadline = last + timeout;
+    const guard = () => { if (closed || signal?.aborted) reject("locked_confirmation_cancelled", 408); const t = this.now();
+      if (t < last) reject("locked_preparation_clock_invalid"); last = t; if (t >= deadline) reject("locked_confirmation_expired", 408); this.confirmationPermit(p, project, true); };
+    const capacity = () => { if (o.stateStore.imageMetadataBytes(p.tenantId, project) + imageTaskMetadataBytes(o.stateStore.load(), p.tenantId, project) > (o.maxMetadataBytes ?? 16 * 1024 * 1024)) reject("locked_preparation_metadata_full", 413); };
+    const current = (r: LockedProductionImagePreparationRecord) => {
+      guard(); const stored = o.stateStore.loadLockedProductionImagePreparation(p.tenantId, project, this.mode, id);
+      if (!stored || stored.createdBy !== p.actorId || imageSnapshotFingerprint(stored) !== imageSnapshotFingerprint(r)) reject("locked_confirmation_original_changed");
+      assertLockedExpectations(stored, expected); this.history(p, stored, guard); this.validate(p, stored, guard);
+      if (last >= Date.parse(stored.pricing.quote.expiresAt)) reject("locked_preparation_price_expired");
+      const budget = this.snapshot().budgets.find(b => b.tenantId === p.tenantId && b.projectId === project);
+      if (!budget || budget.currency !== stored.pricing.quote.currency) reject("locked_preparation_budget_currency_mismatch");
+      const context: LockedImagePriceContext = { ...basis(stored), scope: stored.pricing.scope, requestedAt: stored.createdAt, validationAt: new Date(last).toISOString(), purpose: "confirm" };
+      if (sync(() => o.pricePort.verify(structuredClone(context), structuredClone(stored.pricing))) !== true) reject("locked_preparation_price_not_verified");
+      guard(); this.validate(p, stored, guard); if (last >= Date.parse(stored.pricing.quote.expiresAt)) reject("locked_preparation_price_expired"); capacity(); guard();
+    };
+    guard(); const first = this.database(() => { guard(); const r = o.stateStore.loadLockedProductionImagePreparation(p.tenantId, project, this.mode, id);
+      if (!r || r.createdBy !== p.actorId) reject("locked_confirmation_original_changed"); assertLockedExpectations(r, expected);
+      const old = this.confirmationHistory(p, r, guard); if (old) return { r, old }; current(r); return { r, old: null }; });
+    if (first.old) return first.old;
+    if (activeConfirmations >= 2) reject("locked_confirmation_busy", 429); activeConfirmations++;
+    const images: TrustedImageBytes[] = []; let wire: Buffer | undefined;
+    const work = (async () => { try {
+      this.database(() => { current(first.r); const receipts = this.readInputs(p, first.r.selection, guard).receipts;
+        for (const receipt of receipts) { guard(); const raw = o.stateStore.loadVerifiedImageBytes(p.tenantId, project, receipt.asset.id);
+          if (raw) images.push(raw); guard(); if (!raw || imageSnapshotFingerprint(raw.receipt) !== imageSnapshotFingerprint(receipt)) reject("locked_preparation_input_changed"); }
+        current(first.r); });
+      guard(); const prepared = await prepareLockedProductionImageProtocol(first.r, expected, { jobId: `production-image-job-${randomUUID()}`,
+        idempotencyKey: `production-image-execution-${randomUUID()}` }, images, new Date(last).toISOString()); wire = prepared.wire.body; guard();
+      return this.database(() => {
+        guard(); const old = this.confirmationHistory(p, first.r, guard); if (old) return old; current(first.r);
+        const e = ConfirmedLockedProductionImageExecutionSchema.parse({ schemaVersion: 2, mode: this.mode, batchId: `production-image-batch-${randomUUID()}`,
+          executionState: "confirmed-not-dispatchable", executionAuthorized: false, realExecutionEnabled: false, preparation: first.r,
+          protocol: prepared.snapshot, confirmedBy: p.actorId, confirmedAt: new Date(last).toISOString() });
+        assertLockedConfirmation(e);
+        const live = () => { current(first.r); if (!wire || hash(wire) !== e.protocol.payloadChecksumSha256 || wire.length !== e.protocol.payloadByteSize
+          || prepared.wire.contentType !== e.protocol.contentType) reject("locked_confirmation_protocol_changed");
+          if (Buffer.byteLength(JSON.stringify(e)) > 512 * 1024) reject("locked_preparation_metadata_full", 413); };
+        live(); const fingerprint = imageSnapshotFingerprint(e);
+        this.pending.set(fingerprint, { principal: p, check: live });
+        try { o.runKernel.stageConfirmedLockedProductionImageBatch!(p, e); live(); capacity();
+          const result = this.confirmationHistory(p, first.r, guard); if (!result) reject("locked_confirmation_history_corrupt", 503); return result; }
+        finally { this.pending.delete(fingerprint); }
+      });
+    } finally { wire?.fill(0); images.forEach(i => i.body.fill(0)); activeConfirmations--; } })();
+    let timer: ReturnType<typeof setTimeout> | undefined, abort: (() => void) | undefined;
+    const interrupted = new Promise<never>((_, fail) => { timer = setTimeout(() => { closed = true; fail(new RunKernelError(408, "locked_confirmation_expired", "锁区确认期限耗尽")); }, timeout);
+      abort = () => { closed = true; fail(new RunKernelError(408, "locked_confirmation_cancelled", "锁区确认取消")); }; signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort(); });
+    try { return await Promise.race([work, interrupted]); } finally { closed = true; clearTimeout(timer); if (abort) signal?.removeEventListener("abort", abort); }
   }
   async createPreparation(principal: RunPrincipal, input: unknown, options: { signal?: AbortSignal } = {}) {
     const o = this.config(), p = structuredClone(principal);

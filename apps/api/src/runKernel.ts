@@ -15,6 +15,7 @@ import {
   type ImageDispatchIntent,
   type ConfirmedImageExecution,
   type ConfirmedProductionImageExecution,
+  type ConfirmedLockedProductionImageExecution,
   ProductionImageLeaseEvidenceSchema, type ProductionImageLeaseEvidence,
   type ProductionImageDispatchIntent,
   type ProductionImageAttempt, type ProductionImageResult,
@@ -42,6 +43,7 @@ import {
 import type { RunKernelStateStore } from "./runKernelStore";
 import type { ProductionImageLeasePolicy, ProductionImageLeasePurpose } from "./productionImageLeasePolicy";
 import { assertProductionConfirmation, productionConfirmationKey } from "./productionImageConfirmationIntegrity";
+import { assertLockedConfirmation, assertLockedConfirmationState, lockedConfirmationKey } from "./lockedProductionImageProtocol";
 import { assertProductionDispatchIntent } from "./productionImageDispatchIntentIntegrity";
 import { assertProductionImageAttempt } from "./productionImageResponse";
 import { assertProductionImageResult } from "./productionImageResultIntegrity";
@@ -127,6 +129,7 @@ type BudgetState = ProjectBudgetConfig & {
 
 type StoredBatch = {
   aggregate: RunBatchAggregate;
+  lockedProductionImageExecution?: ConfirmedLockedProductionImageExecution;
   productionImageExecution?: ConfirmedProductionImageExecution;
   productionImageLeases?: ProductionImageLeaseEvidence[];
   productionImageDispatchIntent?: ProductionImageDispatchIntent;
@@ -179,6 +182,7 @@ export type RunKernelOptions = {
   validateInputs?: (tenantId: string, request: CreateRunBatchRequest) => void;
   // Service-owned ephemeral confirmation proof; default closed. Not send authority.
   validateProductionImageConfirmation?: (principal: RunPrincipal, execution: ConfirmedProductionImageExecution) => boolean;
+  validateLockedProductionImageConfirmation?: (principal: RunPrincipal, execution: ConfirmedLockedProductionImageExecution) => boolean;
   productionImageLeasePolicy?: ProductionImageLeasePolicy;
   productionImageStartPolicy?: ProductionImageStartPolicy;
   productionImageResponsePolicy?: ProductionImageResponsePolicy;
@@ -500,8 +504,15 @@ export class InMemoryRunKernel implements RunKernelPort {
   }
 
   stageConfirmedProductionImageBatch(principal: RunPrincipal, input: ConfirmedProductionImageExecution): RunBatchAggregate {
-    if (typeof this.options.validateProductionImageConfirmation !== "function") throw new RunKernelError(503, "production_image_confirmation_not_configured", "生产确认政策尚未配置");
-    const e = assertProductionConfirmation(input), r = e.protocol.request, q = r.quote;
+    return this.stageImageConfirmation(principal, input, false);
+  }
+  stageConfirmedLockedProductionImageBatch(principal: RunPrincipal, input: ConfirmedLockedProductionImageExecution): RunBatchAggregate {
+    return this.stageImageConfirmation(principal, input, true);
+  }
+  private stageImageConfirmation(principal: RunPrincipal, input: ConfirmedProductionImageExecution | ConfirmedLockedProductionImageExecution, locked: boolean): RunBatchAggregate {
+    const validate = locked ? this.options.validateLockedProductionImageConfirmation : this.options.validateProductionImageConfirmation;
+    if (typeof validate !== "function") throw new RunKernelError(503, "production_image_confirmation_not_configured", "生产确认政策尚未配置");
+    const e = locked ? assertLockedConfirmation(input) : assertProductionConfirmation(input), r = e.protocol.request, q = r.quote;
     for (const permission of ["run:create", "run:confirm", "run:read"] as const) {
       const allowed = this.options.authorizer.allows(principal, r.projectId, permission);
       if (allowed !== true) {
@@ -510,8 +521,12 @@ export class InMemoryRunKernel implements RunKernelPort {
       }
     }
     if (principal.tenantId !== r.tenantId || principal.actorId !== e.confirmedBy) throw new RunKernelError(403, "production_image_permission_denied", "生产确认身份不匹配");
-    const fingerprint = imageSnapshotFingerprint(e), idempotencyKey = productionConfirmationKey(e);
+    const fingerprint = imageSnapshotFingerprint(e), idempotencyKey = locked ? lockedConfirmationKey(e) : productionConfirmationKey(e as ConfirmedProductionImageExecution);
     const indexKey = `${scopedProjectKey(r.tenantId, r.projectId)}\u0000${idempotencyKey}`;
+    if (locked) {
+      const live = this.options.validateLockedProductionImageConfirmation!(principal, structuredClone(e as ConfirmedLockedProductionImageExecution));
+      if (live !== true) { void Promise.resolve(live).catch(() => undefined); throw new RunKernelError(403, "locked_confirmation_proof_required", "锁区确认需要实际活提交"); }
+    }
     const previous = this.idempotencyIndex.get(indexKey);
     if (previous) {
       const stored = this.batches.get(previous)!;
@@ -519,7 +534,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       return this.copy(stored.aggregate);
     }
     const policy = () => {
-      const value = this.options.validateProductionImageConfirmation!(principal, structuredClone(e));
+      const value = locked ? this.options.validateLockedProductionImageConfirmation!(principal, structuredClone(e as ConfirmedLockedProductionImageExecution))
+        : this.options.validateProductionImageConfirmation!(principal, structuredClone(e as ConfirmedProductionImageExecution));
       if (value !== true) {
         void Promise.resolve(value).catch(() => undefined);
         throw new RunKernelError(403, "production_image_confirmation_proof_required", "需要实际服务端确认准备证据");
@@ -550,7 +566,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     const before = budget.reservedMinor;
     try {
       budget.reservedMinor += q.maxCostMinor;
-      this.batches.set(batch.id, { aggregate, productionImageExecution: e, requestFingerprint: fingerprint, reservedMinor: q.maxCostMinor,
+      this.batches.set(batch.id, { aggregate, ...(locked ? { lockedProductionImageExecution: e as ConfirmedLockedProductionImageExecution } : { productionImageExecution: e as ConfirmedProductionImageExecution }), requestFingerprint: fingerprint, reservedMinor: q.maxCostMinor,
         actualMinor: 0, jobReservations: new Map([[job.id, q.maxCostMinor]]), jobScenarios: new Map() });
       this.idempotencyIndex.set(indexKey, batch.id);
       this.assertStateConsistent(); policy(); this.persist();
@@ -1560,6 +1576,7 @@ export class InMemoryRunKernel implements RunKernelPort {
 
   cancelBatch(principal: RunPrincipal, batchId: string): RunBatchAggregate {
     const stored = this.requireBatch(principal, batchId);
+    if (stored.lockedProductionImageExecution) throw new RunKernelError(503, "locked_task_continuation_closed", "保护任务后续入口尚未接线，保留预留");
     const aggregate = stored.aggregate;
     const batch = aggregate.batch;
     this.assertAllowed(principal, batch.projectId, "run:cancel");
@@ -1650,6 +1667,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       const stored: StoredBatch = {
         aggregate,
         productionImageExecution: serialized.productionImageExecution,
+        lockedProductionImageExecution: serialized.lockedProductionImageExecution,
         productionImageLeases: serialized.productionImageLeases,
         productionImageDispatchIntent: serialized.productionImageDispatchIntent,
         productionImageDispatchIntentFingerprint: serialized.productionImageDispatchIntentFingerprint,
@@ -1742,6 +1760,7 @@ export class InMemoryRunKernel implements RunKernelPort {
       batches: [...this.batches.values()].map((stored) => ({
         aggregate: this.copy(stored.aggregate),
         ...(stored.productionImageExecution ? { productionImageExecution: stored.productionImageExecution } : {}),
+        ...(stored.lockedProductionImageExecution ? { lockedProductionImageExecution: stored.lockedProductionImageExecution } : {}),
         ...(stored.productionImageLeases ? { productionImageLeases: stored.productionImageLeases } : {}),
         ...(stored.productionImageDispatchIntent ? { productionImageDispatchIntent: stored.productionImageDispatchIntent } : {}),
         ...(stored.productionImageDispatchIntentFingerprint ? { productionImageDispatchIntentFingerprint: stored.productionImageDispatchIntentFingerprint } : {}),
@@ -1776,10 +1795,13 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
+        if (stored.lockedProductionImageExecution) throw new Error("模拟任务不可含锁区确认");
         if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
+      } else if (stored.lockedProductionImageExecution) {
+        assertLockedConfirmationState({ ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] });
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);
       } else if (stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling) {
@@ -2062,7 +2084,7 @@ export class InMemoryRunKernel implements RunKernelPort {
     for (const stored of this.batches.values()) {
       // Production expiry is an explicit, independently authorized command.
       // Restore/old mock/local paths must not mutate its leases implicitly.
-      if (stored.productionImageExecution) continue;
+      if (stored.productionImageExecution || stored.lockedProductionImageExecution) continue;
       let batchChanged = false;
       for (const job of this.latestJobs(stored.aggregate.jobs)) {
         if (!["leased", "running"].includes(job.status) || !job.leaseExpiresAt) continue;

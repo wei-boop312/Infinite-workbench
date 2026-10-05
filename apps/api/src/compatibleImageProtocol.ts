@@ -1,4 +1,5 @@
 import type { ImageExecutionRequest, ProductionImageExecutionRequest, ImageProviderConnection } from "@canvas/contracts";
+import { validateLockedProtocolRequest } from "./lockedProductionImageRequest";
 import { ImageProviderContractError, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
 import { MAX_IMAGE_PROTOCOL_REQUEST_BYTES, encodeImageJson, imagePayloadSha256, prepareImagePayloadParts,
   type ImageInputTransform, type ImagePayloadParts, type TrustedImageBytes } from "./imageRequestPayload";
@@ -54,6 +55,9 @@ export async function prepareCompatibleImageRequest(connection: ImageProviderCon
 }
 export async function prepareProductionCompatibleImageRequest(connection: ImageProviderConnection, input: ProductionImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<CompatibleImagePreparedRequest> {
   return buildCompatibleImageRequest(validateProductionImageProviderRequest(connection, input, now), trustedImages);
+}
+export async function prepareLockedProductionCompatibleImageRequest(connection: ImageProviderConnection, input: unknown, trustedImages: readonly TrustedImageBytes[], now: string): Promise<CompatibleImagePreparedRequest> {
+  return buildCompatibleImageRequest(validateLockedProtocolRequest(connection, input, now), trustedImages);
 }
 async function buildCompatibleImageRequest(validated: { connection: ImageProviderConnection; request: ImageExecutionRequest | ProductionImageExecutionRequest; fingerprint: string }, trustedImages: readonly TrustedImageBytes[]): Promise<CompatibleImagePreparedRequest> {
   const config = validated.connection; const request = validated.request;

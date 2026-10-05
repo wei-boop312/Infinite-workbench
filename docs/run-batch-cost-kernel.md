@@ -1,5 +1,7 @@
 # 批次、任务与成本内核
 
+原锁区B2增量见[locked-image-confirmations.md](locked-image-confirmations.md)：SQLite v8/原统一预算不迁移，只追加严格可选lockedProductionImageExecution。完整v2原准备/政策/协议/请求身份与queued任务/审计/账本/max预留同库确认，独立默认关闭活政策及实际SQL写后核验，known/unknown-null保持。旧v1/none/local/mock不改标，旧领取/执行/核账/取消仍拒绝新保护任务，后续仅按原完整保护链接线；默认日常真实执行关闭。2051单元/集成、192Chrome、6构建验收通过，不等于硬锁端到端或项目完成。
+
 阶段 3 的原则是：先用零外网假执行器把付费调用的安全机制做正确，再接任何真实模型。
 
 ## 当前状态流

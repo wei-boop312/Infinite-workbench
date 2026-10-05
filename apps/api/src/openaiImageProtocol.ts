@@ -1,4 +1,5 @@
 import { TextDecoder } from "node:util";
+import { validateLockedProtocolRequest } from "./lockedProductionImageRequest";
 import {
   ImageExecutionRequestSchema, ProductionImageExecutionRequestSchema, ProductionImageTaskIdentitySchema, ImageProviderConnectionSchema, ImageUsageSchema,
   type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome,
@@ -30,6 +31,9 @@ export async function prepareOpenAiImageRequest(connection: ImageProviderConnect
 }
 export async function prepareProductionOpenAiImageRequest(connection: ImageProviderConnection, input: ProductionImageExecutionRequest, trustedImages: readonly TrustedImageBytes[], now: string): Promise<PreparedImageProtocolRequest> {
   return buildOpenAiImageRequest(validateProductionImageProviderRequest(connection, input, now), trustedImages);
+}
+export async function prepareLockedProductionOpenAiImageRequest(connection: ImageProviderConnection, input: unknown, trustedImages: readonly TrustedImageBytes[], now: string): Promise<PreparedImageProtocolRequest> {
+  return buildOpenAiImageRequest(validateLockedProtocolRequest(connection, input, now), trustedImages);
 }
 async function buildOpenAiImageRequest(validated: { connection: ImageProviderConnection; request: ImageExecutionRequest | ProductionImageExecutionRequest; fingerprint: string }, trustedImages: readonly TrustedImageBytes[]): Promise<PreparedImageProtocolRequest> {
   const request = validated.request;

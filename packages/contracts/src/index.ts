@@ -1,7 +1,7 @@
 import { z } from "zod";
 export { LockedImagePixelDraftSchema, type LockedImagePixelDraft } from "./lockedImagePixels.ts";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
-import { FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImagePublicPricingSchema, ProductionImageTaskIdentitySchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
+import { ConfirmProductionImagePreparationSchema, FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImagePublicPricingSchema, ProductionImageTaskIdentitySchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
 import { ProductionImageBillingRecordSchema, ProductionImageBillingSummarySchema } from "./productionImageBilling.ts";
 
 export * from "./imageProviders.ts";
@@ -278,6 +278,48 @@ export const LockedProductionImagePreparationRecordSchema = z.discriminatedUnion
     || Date.parse(p.createdAt) >= Date.parse(p.pricing.quote.expiresAt)) ctx.addIssue({ code: "custom", message: "Locked preparation identity mismatch" });
 });
 export type LockedProductionImagePreparationRecord = z.infer<typeof LockedProductionImagePreparationRecordSchema>;
+
+// Separate task identity; never widen the v1/none confirmation or request.
+export const LockedProductionImageExecutionRequestSchema = ProductionImageExecutionRequestSchema.options[1].extend({
+  schemaVersion: z.literal(2), protectionPolicy: LockedImagePreparationPolicySchema,
+}).strict().superRefine((r, ctx) => {
+  const p = r.protectionPolicy;
+  if (r.protection !== "pixel-exact" || !r.mask || r.tenantId !== p.tenantId || r.projectId !== p.projectId
+    || r.constraintSnapshotId !== p.constraintSnapshotId || r.constraintChecksumSha256 !== p.constraintChecksumSha256
+    || r.parameters.size === "auto" || r.parameters.size.width !== p.outputSpec.width || r.parameters.size.height !== p.outputSpec.height
+    || r.parameters.outputFormat !== p.outputSpec.format || JSON.stringify(r.inputs.map(i => i.assetId)) !== JSON.stringify(p.inputAssetIds)
+    || r.inputs[0]?.checksumSha256 !== p.source.checksumSha256 || r.mask.assetId !== p.mask.asset.id || r.mask.checksumSha256 !== p.mask.checksumSha256)
+    ctx.addIssue({ code: "custom", message: "Locked task policy mismatch" });
+});
+export type LockedProductionImageExecutionRequest = z.infer<typeof LockedProductionImageExecutionRequestSchema>;
+export const ConfirmLockedProductionImagePreparationSchema = ConfirmProductionImagePreparationSchema.extend({
+  schemaVersion: z.literal(2), expectedProtectionPolicyFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export type ConfirmLockedProductionImagePreparation = z.infer<typeof ConfirmLockedProductionImagePreparationSchema>;
+export const PreparedLockedProductionImageProtocolSnapshotSchema = z.object({ ...PreparedProductionImageProtocolSnapshotSchema.shape,
+  schemaVersion: z.literal(2), protocolVersion: z.literal("locked-production-image-protocol-v2"), request: LockedProductionImageExecutionRequestSchema,
+}).strict().superRefine((p, ctx) => {
+  if (!ProductionImageTaskIdentitySchema.safeParse({ jobId: p.request.jobId, idempotencyKey: p.request.idempotencyKey }).success
+    || Date.parse(p.preparedAt) >= Date.parse(p.request.quote.expiresAt)) ctx.addIssue({ code: "custom", message: "Locked protocol identity mismatch" });
+});
+export const ConfirmedLockedProductionImageExecutionSchema = z.object({
+  schemaVersion: z.literal(2), mode: z.enum(["production", "production-contract-fixture"]), batchId: ProductionImageBatchIdSchema,
+  executionState: z.literal("confirmed-not-dispatchable"), executionAuthorized: z.literal(false), realExecutionEnabled: z.literal(false),
+  preparation: LockedProductionImagePreparationRecordSchema, protocol: PreparedLockedProductionImageProtocolSnapshotSchema,
+  confirmedBy: IdSchema, confirmedAt: IsoDateSchema,
+}).strict().superRefine((e, ctx) => {
+  const p = e.preparation, s = e.protocol, r = s.request;
+  const { schemaVersion: _version, protectionPolicy, jobId: _job, idempotencyKey: _key, quote, ...rest } = r;
+  const draft = { schemaVersion: 1, ...rest }, refs = [...r.inputs, ...(r.mask ? [r.mask] : [])];
+  if (e.mode !== p.mode || e.mode !== s.mode || e.confirmedBy !== p.createdBy || s.preparationId !== p.id || s.preparationFingerprint !== p.snapshotFingerprint
+    || JSON.stringify(draft) !== JSON.stringify(p.requestDraft) || JSON.stringify(protectionPolicy) !== JSON.stringify(p.protectionPolicy)
+    || JSON.stringify(quote) !== JSON.stringify(p.pricing.quote) || Date.parse(s.preparedAt) < Date.parse(p.createdAt)
+    || Date.parse(e.confirmedAt) < Date.parse(s.preparedAt) || Date.parse(e.confirmedAt) >= Date.parse(quote.expiresAt)
+    || refs.length !== s.transformedInputs.length || refs.some((ref, i) => { const t = s.transformedInputs[i]; return !t || t.assetId !== ref.assetId
+      || t.originalChecksumSha256 !== ref.checksumSha256 || (ref === r.mask ? t.transform === "exif-srgb-png-v1" : t.transform !== "exif-srgb-png-v1"); }))
+    ctx.addIssue({ code: "custom", message: "Locked confirmation mismatch" });
+});
+export type ConfirmedLockedProductionImageExecution = z.infer<typeof ConfirmedLockedProductionImageExecutionSchema>;
 
 export const ConfirmedProductionImageExecutionSchema = z.object({
   schemaVersion: z.literal(1), mode: z.enum(["production", "production-contract-fixture"]), batchId: ProductionImageBatchIdSchema,
@@ -1063,6 +1105,7 @@ export const RunKernelBudgetStateSchema = z.object({
 
 export const RunKernelStoredBatchSchema = z.object({
   aggregate: RunBatchAggregateSchema,
+  lockedProductionImageExecution: ConfirmedLockedProductionImageExecutionSchema.optional(),
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),

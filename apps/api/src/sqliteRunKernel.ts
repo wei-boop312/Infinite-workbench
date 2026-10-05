@@ -55,6 +55,21 @@ export class SqliteRunKernel implements RunKernelPort {
   createBatch: RunKernelPort["createBatch"] = (...args) => this.run((kernel) => kernel.createBatch(...args));
   stageConfirmedImageBatch: InMemoryRunKernel["stageConfirmedImageBatch"] = (...args) => this.run((kernel) => kernel.stageConfirmedImageBatch(...args));
   stageConfirmedProductionImageBatch: InMemoryRunKernel["stageConfirmedProductionImageBatch"] = (...args) => this.run((kernel) => kernel.stageConfirmedProductionImageBatch(...args));
+  stageConfirmedLockedProductionImageBatch: InMemoryRunKernel["stageConfirmedLockedProductionImageBatch"] = (p, e) => {
+    const check = () => this.strictArtifactPolicy(() => this.options.validateLockedProductionImageConfirmation?.(p, structuredClone(e)));
+    check();
+    return this.options.stateStore.transaction(() => {
+      const result = this.run(k => k.stageConfirmedLockedProductionImageBatch(p, e));
+      const verify = () => {
+        this.run(() => undefined);
+        const actual = this.options.stateStore.load()?.batches.find(b => b.aggregate.batch.id === e.batchId);
+        if (!actual || imageSnapshotFingerprint(actual.lockedProductionImageExecution) !== imageSnapshotFingerprint(e)
+          || actual.requestFingerprint !== imageSnapshotFingerprint(e) || imageSnapshotFingerprint(actual.aggregate) !== imageSnapshotFingerprint(result))
+          throw new Error("实际锁区任务写后漂移");
+      };
+      verify(); check(); verify(); return result;
+    });
+  };
   claimProductionImageBatch: InMemoryRunKernel["claimProductionImageBatch"] = (p, project, batch, input) => this.productionLeaseCommand(p, project, batch, "claim", (kernel) => {
     return kernel.claimProductionImageBatch(p, project, batch, input);
   }, (result, kernel) => { for (const lease of result.leases) kernel.inspectProductionImageLease(p, project, batch, lease.jobId, { workerId: lease.workerId, leaseId: lease.leaseId }); });
@@ -241,6 +256,16 @@ export class SqliteRunKernel implements RunKernelPort {
         let snapshot = this.options.stateStore.load();
         for (const stored of snapshot?.batches ?? []) {
           const batch = stored.aggregate.batch, result = stored.imageFixtureResult;
+          if (stored.lockedProductionImageExecution) {
+            const e = stored.lockedProductionImageExecution;
+            const p = this.options.stateStore.loadLockedProductionImagePreparation(batch.tenantId, batch.projectId, e.mode, e.preparation.id);
+            if (!p || imageSnapshotFingerprint(p) !== imageSnapshotFingerprint(e.preparation)) throw new Error("锁区任务原准备损坏");
+            const raw = this.options.stateStore.supportsProductionImageResponses()
+              ? this.options.stateStore.loadProductionImageResponse(batch.tenantId, batch.projectId, e.mode, e.protocol.request.jobId) : null;
+            try { if (raw || (this.options.stateStore.supportsProductionImageArtifacts()
+              && this.options.stateStore.loadProductionImageArtifact(batch.tenantId, batch.projectId, e.mode, e.protocol.request.jobId))) throw new Error("锁区确认不允许孤立原包或产物"); }
+            finally { raw?.body.fill(0); }
+          }
           if (stored.productionImageExecution) {
             const e = stored.productionImageExecution;
             const preparation = this.options.stateStore.loadProductionImagePreparation(batch.tenantId, batch.projectId, e.mode, e.preparation.id);

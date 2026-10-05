@@ -1,7 +1,8 @@
 import type { RunKernelSnapshot } from "@canvas/contracts";
 export function imageTaskMetadataBytes(snapshot: RunKernelSnapshot | null, tenantId: string, projectId: string): number {
   return (snapshot?.batches ?? []).filter((item) => item.aggregate.batch.tenantId === tenantId && item.aggregate.batch.projectId === projectId)
-    .reduce((total, item) => total + [item.productionImageExecution, item.productionImageLeases, item.productionImageDispatchIntent,
+    .reduce((total, item) => total + [item.productionImageExecution, item.lockedProductionImageExecution,
+      ...(item.lockedProductionImageExecution ? [item.requestFingerprint, item.aggregate.audit, item.aggregate.ledger] : []), item.productionImageLeases, item.productionImageDispatchIntent,
       item.productionImageDispatchIntentFingerprint,
       item.productionImageAttempt, item.productionImageAttemptFingerprint, item.productionImageResult, item.productionImageResultFingerprint,
       item.productionImageArtifact, item.productionImageArtifactFingerprint,
