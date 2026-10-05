@@ -1028,6 +1028,22 @@ export const ProductionImageInterruptedSchema = z.object({
 });
 export const ProductionImageResultSchema = z.discriminatedUnion("kind", [ProductionImageRawResponseSchema, ProductionImageInterruptedSchema]);
 export type ProductionImageResult = z.infer<typeof ProductionImageResultSchema>;
+// Strict protected v2 evidence; old none/local evidence cannot be upgraded.
+const LockedAttemptId = z.string().regex(/^locked-production-image-attempt:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+export const LockedProductionImageAttemptSchema = z.object({ ...ProductionImageAttemptSchema.shape, schemaVersion: z.literal(2), id: LockedAttemptId,
+  protectionPolicyFingerprint: ProductionEvidenceHash }).strict().refine(a => a.transport === (a.mode === "production" ? "native-https" : "contract-fixture"));
+export type LockedProductionImageAttempt = z.infer<typeof LockedProductionImageAttemptSchema>;
+export const LockedProductionImageRawResponseSchema = z.object({ ...ProductionImageRawResponseSchema.shape, schemaVersion: z.literal(2),
+  id: z.string().regex(/^locked-production-image-response:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/), attemptId: LockedAttemptId,
+  protectionPolicyFingerprint: ProductionEvidenceHash }).strict().refine(r => ProductionEvidenceJob.safeParse(r.outcome.jobId).success
+    && r.outcome.billing.state === "unknown" && ["absent", "invalid", "pending-validation"].includes(r.outcome.artifactStatus));
+export type LockedProductionImageRawResponse = z.infer<typeof LockedProductionImageRawResponseSchema>;
+export const LockedProductionImageInterruptedSchema = z.object({ ...ProductionImageInterruptedSchema.shape, schemaVersion: z.literal(2), attemptId: LockedAttemptId,
+  protectionPolicyFingerprint: ProductionEvidenceHash }).strict().refine(r => ProductionEvidenceJob.safeParse(r.outcome.jobId).success && r.outcome.providerStatus === "unknown"
+    && r.outcome.artifactStatus === "absent" && r.outcome.billing.state === "unknown" && r.outcome.usage.source === "unavailable"
+    && ["production-timeout", "production-transport-error", "production-response-invalid", "production-response-save-failed"].includes(r.outcome.failureCode ?? ""));
+export const LockedProductionImageResultSchema = z.discriminatedUnion("kind", [LockedProductionImageRawResponseSchema, LockedProductionImageInterruptedSchema]);
+export type LockedProductionImageResult = z.infer<typeof LockedProductionImageResultSchema>;
 const ProductionOutputMoney = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
 // Decoded but UNCOMMITTED. This shape has no asset/receipt or actual task,
@@ -1125,6 +1141,10 @@ export const RunKernelStoredBatchSchema = z.object({
   lockedProductionImageLeases: z.array(LockedProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   lockedProductionImageDispatchIntent: LockedProductionImageDispatchIntentSchema.optional(),
   lockedProductionImageDispatchIntentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  lockedProductionImageAttempt: LockedProductionImageAttemptSchema.optional(),
+  lockedProductionImageAttemptFingerprint: ProductionEvidenceHash.optional(),
+  lockedProductionImageResult: LockedProductionImageResultSchema.optional(),
+  lockedProductionImageResultFingerprint: ProductionEvidenceHash.optional(),
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),

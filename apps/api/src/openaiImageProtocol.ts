@@ -1,7 +1,7 @@
 import { TextDecoder } from "node:util";
 import { validateLockedProtocolRequest } from "./lockedProductionImageRequest";
 import {
-  ImageExecutionRequestSchema, ProductionImageExecutionRequestSchema, ProductionImageTaskIdentitySchema, ImageProviderConnectionSchema, ImageUsageSchema,
+  ImageExecutionRequestSchema, ProductionImageExecutionRequestSchema, LockedProductionImageExecutionRequestSchema, ProductionImageTaskIdentitySchema, ImageProviderConnectionSchema, ImageUsageSchema,
   type ImageExecutionRequest, type ProductionImageExecutionRequest, type ImageProviderConnection, type ImageProviderOutcome,
 } from "@canvas/contracts";
 import { ImageProviderContractError, imageSnapshotFingerprint, validateImageProviderRequest, validateProductionImageProviderRequest } from "./imageProviderContract";
@@ -61,6 +61,13 @@ export function parseProductionOpenAiImageResponse(input: ProductionImageExecuti
   ProductionImageTaskIdentitySchema.parse({ jobId: request.jobId, idempotencyKey: request.idempotencyKey });
   if (imageSnapshotFingerprint({ connection: ImageProviderConnectionSchema.parse(connection), request }) !== fingerprint) reject("production_image_response_request_changed");
   return parseResponse(request, fingerprint, response);
+}
+export function parseLockedProductionOpenAiImageResponse(input: unknown, fingerprint: string, response: ImageProtocolResponse, connection: ImageProviderConnection, confirmedAt: string): ParsedImageProtocolResponse {
+  const request = LockedProductionImageExecutionRequestSchema.parse(input);
+  const validated = validateLockedProtocolRequest(connection, request, confirmedAt);
+  if (validated.fingerprint !== fingerprint) reject("locked_response_request_changed");
+  // Share envelope algorithms only. The original v2 identity, not a v1 projection hash, remains in every outcome.
+  return parseResponse(validated.request, fingerprint, response);
 }
 function parseResponse(request: ImageExecutionRequest | ProductionImageExecutionRequest, fingerprint: string, response: ImageProtocolResponse): ParsedImageProtocolResponse {
   const extra: Partial<ImageProviderOutcome> = {};

@@ -218,7 +218,7 @@ describe("锁区B2实际同库确认，不是后续运行/产物许可", () => {
     expect(Date.parse(v.confirmedAt)).toBeGreaterThan(Date.parse(p.createdAt)); expect(assertLockedConfirmation(f.store.load()!.batches[0].lockedProductionImageExecution)).toBeTruthy();
   });
   it.each(["raw", "artifact"])("孤立%s不能附着在B2仅queued确认上", async kind => {
-    const f = fixture(), p = await f.prepare(); await f.confirm(p); const getter = kind === "raw" ? "loadProductionImageResponse" : "loadProductionImageArtifact";
+    const f = fixture(), p = await f.prepare(); await f.confirm(p); const getter = kind === "raw" ? "loadLockedProductionImageResponse" : "loadProductionImageArtifact";
     const body = Buffer.from("owned"); vi.spyOn(f.store, getter as any).mockReturnValue(kind === "raw" ? { body, record: {} } : {});
     expect(() => f.service.getConfirmation(principal, "project-a", p.id)).toThrow(); expect(() => f.kernel.getBudget(principal, "project-a")).toThrow();
     if (kind === "raw") expect(body.every(b => b === 0)).toBe(true);

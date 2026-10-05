@@ -16,6 +16,7 @@ import type { ObjectStorageAuthorizer } from "./objectStorageGateway";
 import type { RunAuthorizer } from "./runKernel";
 import type { ImagePriceContext, ProductionImagePricePort, FixtureProductionImagePricePort } from "./productionImagePreparations";
 import { assertLockedConfirmation, assertLockedExpectations, lockedConfirmationKey, prepareLockedProductionImageProtocol } from "./lockedProductionImageProtocol";
+import { assertLockedImageRawResponse } from "./lockedProductionImageResponse";
 import type { TrustedImageBytes } from "./imageRequestPayload";
 
 export interface LockedImagePriceContext extends ImagePriceContext { protectionPolicy: LockedImagePreparationPolicy }
@@ -169,10 +170,18 @@ class LockedPreparationCore {
     const e = assertLockedConfirmation(rows[0].lockedProductionImageExecution);
     if (imageSnapshotFingerprint(e.preparation) !== imageSnapshotFingerprint(r)) reject("locked_confirmation_history_corrupt", 503);
     const raw = this.config().stateStore.supportsProductionImageResponses()
-      ? this.config().stateStore.loadProductionImageResponse(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId) : null;
-    try { if (raw || (this.config().stateStore.supportsProductionImageArtifacts()
-      && this.config().stateStore.loadProductionImageArtifact(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId))) reject("locked_confirmation_history_corrupt", 503); }
+      ? this.config().stateStore.loadLockedProductionImageResponse(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId) : null;
+    try {
+      guard(); const stored = rows[0];
+      if (stored.lockedProductionImageResult?.kind === "returned") {
+        if (!raw || imageSnapshotFingerprint(raw.record) !== stored.lockedProductionImageResultFingerprint) reject("locked_confirmation_history_corrupt", 503);
+        const parsed = assertLockedImageRawResponse(raw.record, e, stored.lockedProductionImageLeases?.at(-1), stored.lockedProductionImageDispatchIntent, stored.lockedProductionImageAttempt, raw.body);
+        parsed.candidate?.body.fill(0); guard();
+      } else if (raw) reject("locked_confirmation_history_corrupt", 503);
+      if (this.config().stateStore.loadProductionImageArtifact(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId)) reject("locked_confirmation_history_corrupt", 503);
+    }
     finally { raw?.body.fill(0); }
+    this.history(p, r, guard); // Re-read current authoritative inputs/constraints after raw getters.
     guard(); const latest = this.config().stateStore.loadLockedProductionImagePreparation(p.tenantId, r.projectId, this.mode, r.id);
     if (!latest || imageSnapshotFingerprint(latest) !== imageSnapshotFingerprint(r)) reject("locked_confirmation_history_corrupt", 503);
     const j = rows[0].aggregate.jobs[0], b = rows[0].aggregate.batch;

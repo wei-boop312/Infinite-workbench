@@ -1,5 +1,7 @@
 # 批次、任务与成本内核
 
+2026-10-05 11:36最新增量：[原锁区B5实际尝试/完整原包](locked-image-attempts.md)最终第二完整2257单元/集成（60文件）、195Chrome、6构建通过，新增74项/1Chrome。独立默认关闭首次新意图活续接，回调前实际attempted写后核验，v2完整原包双表/任务/审计/单笔unknown/max同库事务；实际SQL写后回滚、两OS进程一次调用、历史不补发，确认历史完整原包与最终输入约束只读复查。保护native/输出像素产物/费用/公开cache/canvas/UI与真实关口仍未完成；原B4以下时点只历史，不覆盖本步。
+
 2026-10-05最新增量：[原锁区B4实际重建/意图](locked-image-dispatch-intents.md)首完整2183单元/集成（59文件）、194Chrome、6构建通过，新增60项/1Chrome。独立默认关闭同库原v2确认/政策/原领取身份与实际wire匹配，永久not-connected意图、running与到期unknown-max联合原子保存/恢复；两个OS进程一次启动、SQL写后回滚、历史不重建/报价/补发。尚无保护attempt/raw/供应商输出像素核验/产物/公开cache/canvas或保护UI，整体硬锁、真实关口/阶段4/项目未完成。旧下面时点只历史，不覆盖本步。
 
 原锁区B3增量见[locked-image-leases.md](locked-image-leases.md)：SQLite v8只扩可选lockedProductionImageLeases，与原完整确认/政策/任务/审计计共享元数据，原配置/统一预算不迁移。独立默认关闭领取/检查/未启动恢复/安全取消和写后完整复查，两连接/两个OS进程一次领取/释放；zero-cap清关系、unknown-null保持，释放账本0不是任务测得实费。旧mock/local/production/通用取消费用仍拒绝新分支，发送/产物/费用与保护UI关闭。2123单元/集成、193Chrome、6构建通过不等于硬锁或项目完成；以下B2时点只历史。

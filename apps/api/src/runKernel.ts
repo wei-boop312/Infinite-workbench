@@ -21,6 +21,7 @@ import {
   type ProductionImageDispatchIntent,
   type LockedProductionImageDispatchIntent,
   type ProductionImageAttempt, type ProductionImageResult,
+  type LockedProductionImageAttempt, type LockedProductionImageResult,
   type ProductionImageArtifact,
   ProductionImageBillingRecordSchema, type ProductionImageBillingRecord,
   type ConfirmRunBatchRequest,
@@ -49,6 +50,7 @@ import { assertProductionConfirmation, productionConfirmationKey } from "./produ
 import { assertLockedConfirmation, assertLockedConfirmationState, lockedConfirmationKey } from "./lockedProductionImageProtocol";
 import { assertProductionDispatchIntent } from "./productionImageDispatchIntentIntegrity";
 import { assertLockedDispatchIntent } from "./lockedProductionImageDispatchIntentIntegrity";
+import { assertLockedImageAttempt, assertLockedImageResult } from "./lockedProductionImageResponse";
 import { assertProductionImageAttempt } from "./productionImageResponse";
 import { assertProductionImageResult } from "./productionImageResultIntegrity";
 import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
@@ -137,6 +139,10 @@ type StoredBatch = {
   lockedProductionImageLeases?: LockedProductionImageLeaseEvidence[];
   lockedProductionImageDispatchIntent?: LockedProductionImageDispatchIntent;
   lockedProductionImageDispatchIntentFingerprint?: string;
+  lockedProductionImageAttempt?: LockedProductionImageAttempt;
+  lockedProductionImageAttemptFingerprint?: string;
+  lockedProductionImageResult?: LockedProductionImageResult;
+  lockedProductionImageResultFingerprint?: string;
   productionImageExecution?: ConfirmedProductionImageExecution;
   productionImageLeases?: ProductionImageLeaseEvidence[];
   productionImageDispatchIntent?: ProductionImageDispatchIntent;
@@ -182,6 +188,12 @@ export interface ProductionImageResponsePolicy {
   validateAttempt(p: RunPrincipal, e: ConfirmedProductionImageExecution, l: ProductionImageLeaseEvidence, i: ProductionImageDispatchIntent, a: ProductionImageAttempt): boolean;
   validateResult(p: RunPrincipal, e: ConfirmedProductionImageExecution, l: ProductionImageLeaseEvidence, i: ProductionImageDispatchIntent, a: ProductionImageAttempt, r: ProductionImageResult): boolean;
 }
+export interface LockedProductionImageResponsePolicy {
+  usesStateStore(store: unknown): boolean;
+  authorizeScope(p: RunPrincipal, project: string): boolean;
+  validateAttempt(p: RunPrincipal, e: ConfirmedLockedProductionImageExecution, l: LockedProductionImageLeaseEvidence, i: LockedProductionImageDispatchIntent, a: LockedProductionImageAttempt): boolean;
+  validateResult(p: RunPrincipal, e: ConfirmedLockedProductionImageExecution, l: LockedProductionImageLeaseEvidence, i: LockedProductionImageDispatchIntent, a: LockedProductionImageAttempt, r: LockedProductionImageResult): boolean;
+}
 
 export type RunKernelOptions = {
   authorizer: RunAuthorizer;
@@ -200,6 +212,7 @@ export type RunKernelOptions = {
   lockedProductionImageStartPolicy?: LockedProductionImageStartPolicy;
   productionImageStartPolicy?: ProductionImageStartPolicy;
   productionImageResponsePolicy?: ProductionImageResponsePolicy;
+  lockedProductionImageResponsePolicy?: LockedProductionImageResponsePolicy;
   productionImageArtifactPolicy?: {
     usesStateStore(store: unknown): boolean;
     authorizeScope(p: RunPrincipal, project: string): boolean;
@@ -810,8 +823,8 @@ export class InMemoryRunKernel implements RunKernelPort {
     this.productionPolicyTrue(() => this.options.lockedProductionImageStartPolicy!.validateStart(p, current.execution, current.lease, current.intent));
     if (this.clock() >= Date.parse(current.intent.recordedAt) + this.jobTimeoutMs) throw new RunKernelError(409, "locked_start_expired", "写后任务期限耗尽");
   }
-  private lockedProductionUnknown(s: StoredBatch, p: RunPrincipal, reason: string) {
-    const b = s.aggregate.batch, j = s.aggregate.jobs[0], i = s.lockedProductionImageDispatchIntent, at = new Date(this.clock()).toISOString();
+  private lockedProductionUnknown(s: StoredBatch, p: RunPrincipal, reason: string, observedAt?: string) {
+    const b = s.aggregate.batch, j = s.aggregate.jobs[0], i = s.lockedProductionImageDispatchIntent, at = observedAt ?? new Date(this.clock()).toISOString();
     if (!i || j.status !== "running" || Date.parse(at) < Date.parse(i.recordedAt)) throw new Error("保护未知恢复缺少原意图/时刻");
     const event = { ...this.audit(b, p.actorId, "billing-unknown", { jobId: j.id, lockedProductionImageDispatchIntentId: i.id,
       intentFingerprint: s.lockedProductionImageDispatchIntentFingerprint!, reason }), createdAt: at };
@@ -821,6 +834,57 @@ export class InMemoryRunKernel implements RunKernelPort {
     if (this.clock() < Date.parse(at)) throw new Error("保护恢复时钟倒退");
     this.replaceJob(s.aggregate, { ...j, status: "billing_unknown", failureCode: reason, finishedAt: at }); s.aggregate.audit.push(event); s.aggregate.ledger.push(entry);
     this.refreshBatchStatus(s); return true;
+  }
+  assertLockedImageResponseScope(p: RunPrincipal, project: string) {
+    const policy = this.options.lockedProductionImageResponsePolicy;
+    if (!policy) throw new RunKernelError(503, "locked_response_not_configured", "保护响应默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(structuredClone(p), project));
+  }
+  inspectLockedImageAttempt(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest) {
+    this.assertLockedImageResponseScope(p, project);
+    const c = this.inspectLockedProductionImageStart(p, project, batch, job, input), s = this.requireBatch(p, batch);
+    return { ...c, attempt: s.lockedProductionImageAttempt && structuredClone(s.lockedProductionImageAttempt), result: s.lockedProductionImageResult && structuredClone(s.lockedProductionImageResult) };
+  }
+  beginLockedImageAttempt(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest, incoming: LockedProductionImageAttempt) {
+    const c = this.inspectLockedImageAttempt(p, project, batch, job, input);
+    if (!c.intent || c.attempt || c.aggregate.jobs[0].status !== "running") throw new RunKernelError(409, "locked_attempt_not_live", "只允许首次活续接");
+    const hash = imageSnapshotFingerprint(incoming), a = assertLockedImageAttempt(incoming, hash, c.execution, c.lease, c.intent).attempt;
+    if (Date.parse(a.attemptedAt) > this.clock()) throw new RunKernelError(409, "locked_attempt_clock_invalid", "尝试时间不能晚于实际事务");
+    const s = this.requireBatch(p, batch), event = { ...this.audit(s.aggregate.batch, p.actorId, "production-image-attempted", { jobId: job, attemptId: a.id,
+      attemptFingerprint: hash, intentFingerprint: a.intentFingerprint, transport: a.transport, protectionPolicyFingerprint: a.protectionPolicyFingerprint }), createdAt: a.attemptedAt };
+    this.assertLockedProductionImageTask(p, project, batch, "start-commit", Buffer.byteLength(JSON.stringify([a, event])) + 70);
+    this.productionPolicyTrue(() => this.options.lockedProductionImageResponsePolicy!.validateAttempt(p, c.execution, c.lease, c.intent!, a));
+    s.lockedProductionImageAttempt = a; s.lockedProductionImageAttemptFingerprint = hash; s.aggregate.audit.push(event);
+    this.assertStateConsistent(); this.persist(); return this.copy(s.aggregate);
+  }
+  assertLockedImageAttemptCurrent(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest) {
+    const c = this.inspectLockedImageAttempt(p, project, batch, job, input);
+    if (!c.attempt || c.result || c.aggregate.jobs[0].status !== "running") throw new RunKernelError(409, "locked_attempt_not_live", "保护尝试不再活跃");
+    this.assertLockedProductionImageTask(p, project, batch, "start-commit");
+    this.productionPolicyTrue(() => this.options.lockedProductionImageResponsePolicy!.validateAttempt(p, c.execution, c.lease, c.intent!, c.attempt!));
+    if (this.clock() < Date.parse(c.attempt.attemptedAt) || this.clock() >= Date.parse(c.lease.expiresAt) || this.clock() >= Date.parse(c.execution.protocol.request.quote.expiresAt)
+      || this.clock() >= Date.parse(c.intent!.recordedAt) + this.jobTimeoutMs) throw new RunKernelError(409, "locked_attempt_expired", "保护尝试期限耗尽");
+  }
+  recordLockedImageResult(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest, incoming: LockedProductionImageResult) {
+    const c = this.inspectLockedImageAttempt(p, project, batch, job, input);
+    if (!c.attempt || !c.intent) throw new RunKernelError(409, "locked_attempt_missing", "响应缺少实际保护尝试");
+    const hash = imageSnapshotFingerprint(incoming), r = assertLockedImageResult(incoming, hash, c.execution, c.attempt);
+    // Even identical writes need the live proof. Pure history cannot authorize replay.
+    this.productionPolicyTrue(() => this.options.lockedProductionImageResponsePolicy!.validateResult(p, c.execution, c.lease, c.intent!, c.attempt!, r));
+    if (c.result) { if (imageSnapshotFingerprint(c.result) !== hash) throw new RunKernelError(409, "locked_result_conflict", "原响应不可覆盖"); return c.aggregate; }
+    const at = r.kind === "returned" ? r.receivedAt : r.interruptedAt;
+    if (Date.parse(at) > this.clock()) throw new RunKernelError(409, "locked_result_clock_invalid", "响应时间不能晚于实际提交");
+    const s = this.requireBatch(p, batch), event = { ...this.audit(s.aggregate.batch, p.actorId, r.kind === "returned" ? "production-image-returned" : "production-image-interrupted",
+      { jobId: job, attemptId: r.attemptId, resultFingerprint: hash, kind: r.kind, protectionPolicyFingerprint: r.protectionPolicyFingerprint }), createdAt: at };
+    this.assertLockedProductionImageTask(p, project, batch, "start-history", Buffer.byteLength(JSON.stringify([r, event])) + 70);
+    if (s.aggregate.jobs[0].status === "running") this.lockedProductionUnknown(s, p, r.kind === "returned" ? "locked-response-returned" : r.outcome.failureCode!, at);
+    s.lockedProductionImageResult = r; s.lockedProductionImageResultFingerprint = hash; s.aggregate.audit.push(event);
+    this.refreshBatchStatus(s); this.assertStateConsistent(); this.persist(); return this.copy(s.aggregate);
+  }
+  assertLockedImageResponseCommit(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest) {
+    const c = this.inspectLockedImageAttempt(p, project, batch, job, input);
+    if (!c.attempt || !c.result || c.aggregate.jobs[0].status !== "billing_unknown") throw new RunKernelError(409, "locked_result_missing", "保护响应未保存");
+    this.productionPolicyTrue(() => this.options.lockedProductionImageResponsePolicy!.validateResult(p, c.execution, c.lease, c.intent!, c.attempt!, c.result!));
   }
 
   inspectProductionImageLease(principal: RunPrincipal, projectId: string, batchId: string, jobId: string, input: ExecuteRunJobRequest) {
@@ -1816,6 +1880,10 @@ export class InMemoryRunKernel implements RunKernelPort {
         lockedProductionImageLeases: serialized.lockedProductionImageLeases,
         lockedProductionImageDispatchIntent: serialized.lockedProductionImageDispatchIntent,
         lockedProductionImageDispatchIntentFingerprint: serialized.lockedProductionImageDispatchIntentFingerprint,
+        lockedProductionImageAttempt: serialized.lockedProductionImageAttempt,
+        lockedProductionImageAttemptFingerprint: serialized.lockedProductionImageAttemptFingerprint,
+        lockedProductionImageResult: serialized.lockedProductionImageResult,
+        lockedProductionImageResultFingerprint: serialized.lockedProductionImageResultFingerprint,
         productionImageLeases: serialized.productionImageLeases,
         productionImageDispatchIntent: serialized.productionImageDispatchIntent,
         productionImageDispatchIntentFingerprint: serialized.productionImageDispatchIntentFingerprint,
@@ -1916,6 +1984,10 @@ export class InMemoryRunKernel implements RunKernelPort {
         ...(stored.lockedProductionImageLeases ? { lockedProductionImageLeases: stored.lockedProductionImageLeases } : {}),
         ...(stored.lockedProductionImageDispatchIntent ? { lockedProductionImageDispatchIntent: stored.lockedProductionImageDispatchIntent } : {}),
         ...(stored.lockedProductionImageDispatchIntentFingerprint ? { lockedProductionImageDispatchIntentFingerprint: stored.lockedProductionImageDispatchIntentFingerprint } : {}),
+        ...(stored.lockedProductionImageAttempt ? { lockedProductionImageAttempt: stored.lockedProductionImageAttempt } : {}),
+        ...(stored.lockedProductionImageAttemptFingerprint ? { lockedProductionImageAttemptFingerprint: stored.lockedProductionImageAttemptFingerprint } : {}),
+        ...(stored.lockedProductionImageResult ? { lockedProductionImageResult: stored.lockedProductionImageResult } : {}),
+        ...(stored.lockedProductionImageResultFingerprint ? { lockedProductionImageResultFingerprint: stored.lockedProductionImageResultFingerprint } : {}),
         ...(stored.productionImageLeases ? { productionImageLeases: stored.productionImageLeases } : {}),
         ...(stored.productionImageDispatchIntent ? { productionImageDispatchIntent: stored.productionImageDispatchIntent } : {}),
         ...(stored.productionImageDispatchIntentFingerprint ? { productionImageDispatchIntentFingerprint: stored.productionImageDispatchIntentFingerprint } : {}),
@@ -1950,14 +2022,14 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (stored.lockedProductionImageExecution || stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint) throw new Error("模拟任务不可含锁区确认/租约/意图");
+        if (stored.lockedProductionImageExecution || stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint || stored.lockedProductionImageAttempt || stored.lockedProductionImageAttemptFingerprint || stored.lockedProductionImageResult || stored.lockedProductionImageResultFingerprint) throw new Error("模拟任务不可含锁区证据");
         if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else if (stored.lockedProductionImageExecution) {
         assertLockedConfirmationState({ ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] }, this.options.restoreValidationOnly ? undefined : this.leaseDurationMs, this.options.restoreValidationOnly ? undefined : this.jobTimeoutMs);
-      } else if (stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint) {
+      } else if (stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint || stored.lockedProductionImageAttempt || stored.lockedProductionImageAttemptFingerprint || stored.lockedProductionImageResult || stored.lockedProductionImageResultFingerprint) {
         throw new Error("保护租约缺少独立完整确认");
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);

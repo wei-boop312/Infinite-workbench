@@ -7,6 +7,7 @@ import type { RunKernelStateStore } from "./runKernelStore";
 import { ProductionImageArtifactSchema, type ProductionImageArtifact } from "@canvas/contracts";
 import { LockedProductionImagePreparationRecordSchema, type LockedProductionImagePreparationRecord } from "@canvas/contracts";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
+import { LockedProductionImageRawResponseSchema, type LockedProductionImageRawResponse } from "@canvas/contracts";
 
 type LocalCatalog = ReturnType<typeof LocalRunCatalogSchema.parse>;
 type StateKind = "runs" | "catalog";
@@ -419,6 +420,12 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   // attempt, permissions, transport invocation, asset authorization or billing.
   supportsProductionImageResponses(): boolean { return this.productionResponseStorageEnabled; }
   loadProductionImageResponse(tenantId: string, projectId: string, mode: ProductionImageRawResponse["mode"], jobId: string): { record: ProductionImageRawResponse; body: Buffer } | null {
+    return this.readProductionResponse(tenantId, projectId, mode, jobId, ProductionImageRawResponseSchema);
+  }
+  loadLockedProductionImageResponse(tenantId: string, projectId: string, mode: LockedProductionImageRawResponse["mode"], jobId: string) {
+    return this.readProductionResponse(tenantId, projectId, mode, jobId, LockedProductionImageRawResponseSchema);
+  }
+  private readProductionResponse<T extends ProductionImageRawResponse | LockedProductionImageRawResponse>(tenantId: string, projectId: string, mode: T["mode"], jobId: string, schema: { parse(input: unknown): T }): { record: T; body: Buffer } | null {
     if (!this.productionResponseStorageEnabled) throw new Error("生产原包存储默认关闭");
     if (!["production", "production-contract-fixture"].includes(mode)) throw new Error("生产原包命名空间无效");
     try {
@@ -429,7 +436,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
         if (!row || !marker || row.response_id !== marker.response_id || row.record_sha256 !== marker.record_sha256
           || typeof row.record_bytes !== "number" || row.record_bytes > 512 * 1024 || typeof row.body_bytes !== "number" || row.body_bytes > 32 * 1024 * 1024) throw new Error("生产原包证据丢失或超限");
         const value = this.database.prepare("SELECT record, record_sha256, body FROM production_image_responses WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(tenantId, projectId, mode, jobId)!;
-        const record = ProductionImageRawResponseSchema.parse(this.readImageMetadata(value));
+        const record = schema.parse(this.readImageMetadata(value));
         if (!(value.body instanceof Uint8Array)) throw new Error("生产原包正文缺失");
         const body = Buffer.from(value.body), outcome = record.outcome;
         if (record.id !== row.response_id || record.mode !== mode || outcome.tenantId !== tenantId || outcome.projectId !== projectId || outcome.jobId !== jobId
@@ -439,14 +446,20 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     } catch (error) { throw databaseError(error); }
   }
   saveProductionImageResponse(input: ProductionImageRawResponse, body: Buffer, limits: { maxMetadataBytes?: number; maxProjectBytes?: number } = {}): void {
+    this.writeProductionResponse(ProductionImageRawResponseSchema.parse(input), body, limits);
+  }
+  saveLockedProductionImageResponse(input: LockedProductionImageRawResponse, body: Buffer, afterWrite: () => void, limits: { maxMetadataBytes?: number; maxProjectBytes?: number } = {}): void {
+    this.writeProductionResponse(LockedProductionImageRawResponseSchema.parse(input), body, limits, afterWrite);
+  }
+  private writeProductionResponse(record: ProductionImageRawResponse | LockedProductionImageRawResponse, body: Buffer, limits: { maxMetadataBytes?: number; maxProjectBytes?: number }, afterWrite?: () => void): void {
     if (!this.productionResponseStorageEnabled) throw new Error("生产原包存储默认关闭");
     if (this.depth === 0) throw new Error("必须在事务中保存生产原包");
-    const record = ProductionImageRawResponseSchema.parse(input), metadata = limits.maxMetadataBytes ?? 16 * 1024 * 1024, binary = limits.maxProjectBytes ?? 512 * 1024 * 1024;
+    const metadata = limits.maxMetadataBytes ?? 16 * 1024 * 1024, binary = limits.maxProjectBytes ?? 512 * 1024 * 1024;
     if (!Number.isSafeInteger(metadata) || metadata < 0 || metadata > 16 * 1024 * 1024 || !Number.isSafeInteger(binary) || binary < 0 || binary > 512 * 1024 * 1024
       || !Buffer.isBuffer(body) || body.byteLength !== record.bodyByteSize || createHash("sha256").update(body).digest("hex") !== record.bodyChecksumSha256) throw new Error("生产原包容量或正文不一致");
     const payload = this.imageMetadataPayload(record), { tenantId, projectId, jobId } = record.outcome;
     this.transaction(() => {
-      const existing = this.loadProductionImageResponse(tenantId, projectId, record.mode, jobId);
+      const existing = record.schemaVersion === 2 ? this.loadLockedProductionImageResponse(tenantId, projectId, record.mode, jobId) : this.loadProductionImageResponse(tenantId, projectId, record.mode, jobId);
       if (existing) {
         try { if (JSON.stringify(existing.record) !== payload || !existing.body.equals(body)) throw new Error("生产原包历史不可覆盖"); }
         finally { existing.body.fill(0); }
@@ -457,8 +470,10 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       const hash = createHash("sha256").update(payload).digest("hex");
       this.database.prepare("INSERT INTO production_image_responses(tenant_id, project_id, mode, job_id, response_id, record, record_sha256, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .run(tenantId, projectId, record.mode, jobId, record.id, payload, hash, body);
+      afterWrite?.();
       this.database.prepare("INSERT INTO production_image_response_presence(tenant_id, project_id, mode, job_id, response_id, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
         .run(tenantId, projectId, record.mode, jobId, record.id, hash);
+      afterWrite?.();
     });
   }
   loadImageFixtureResponse(tenantId: string, projectId: string, jobId: string): { record: Extract<ImageFixtureResult, { kind: "returned" }>; body: Buffer } | null {

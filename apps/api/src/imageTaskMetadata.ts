@@ -4,6 +4,7 @@ export function imageTaskMetadataBytes(snapshot: RunKernelSnapshot | null, tenan
     .reduce((total, item) => total + [item.productionImageExecution, item.lockedProductionImageExecution,
       ...(item.lockedProductionImageExecution ? [item.requestFingerprint, item.aggregate.audit, item.aggregate.ledger] : []), item.lockedProductionImageLeases,
       item.lockedProductionImageDispatchIntent, item.lockedProductionImageDispatchIntentFingerprint, item.productionImageLeases, item.productionImageDispatchIntent,
+      item.lockedProductionImageAttempt, item.lockedProductionImageAttemptFingerprint, item.lockedProductionImageResult, item.lockedProductionImageResultFingerprint,
       item.productionImageDispatchIntentFingerprint,
       item.productionImageAttempt, item.productionImageAttemptFingerprint, item.productionImageResult, item.productionImageResultFingerprint,
       item.productionImageArtifact, item.productionImageArtifactFingerprint,
