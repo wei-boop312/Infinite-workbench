@@ -1,85 +1,35 @@
-import { LockedProductionImageTaskReconstruction, LockedImageProductionReconstructionHarness } from "../apps/api/src/lockedProductionImageTaskReconstruction";
-import { createLockedProductionImageLeaseFixturePolicy, createLockedProductionImageLeasePolicy, type LockedProductionImageLeasePolicy } from "../apps/api/src/lockedProductionImageLeasePolicy";
-import type { RunKernelOptions } from "../apps/api/src/runKernel";
+import { LockedImageProductionReconstructionHarness } from "../apps/api/src/lockedProductionImageTaskReconstruction";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { VerifiedImageSchema, ConfirmedProductionImageExecutionSchema, ProductionImageExecutionRequestSchema, ConfirmedLockedProductionImageExecutionSchema } from "../packages/contracts/src/index";
-import { LockedImageProductionPreparationHarness, LockedProductionImagePreparations, type LockedImagePriceContext } from "../apps/api/src/lockedProductionImagePreparations";
+import { ConfirmedProductionImageExecutionSchema, ProductionImageExecutionRequestSchema, ConfirmedLockedProductionImageExecutionSchema } from "../packages/contracts/src/index";
 import { assertLockedConfirmation, lockedExpected } from "../apps/api/src/lockedProductionImageProtocol";
 import * as protocol from "../apps/api/src/lockedProductionImageProtocol";
 import * as decoder from "../apps/api/src/staticImageDecoder";
 import { imageSnapshotFingerprint as fp, validateProductionImageProviderRequest } from "../apps/api/src/imageProviderContract";
-import { assetMetadataFingerprint } from "../apps/api/src/assetMetadata";
 import { SqliteRunKernel } from "../apps/api/src/sqliteRunKernel";
 import { SqliteRunKernelStateStore } from "../apps/api/src/sqliteRunKernelStore";
-import { at, connection, principal, setupImageTask, sha } from "./helpers/image-task-fixture";
-import { ownedProductionNetwork } from "./helpers/production-network-fixture";
-import type { ProductionImageCredentialNetworkOptions } from "../apps/api/src/productionImageCredentialNetwork";
+import { principal, setupImageTask, sha } from "./helpers/image-task-fixture";
+import { createLockedTaskFixture } from "./helpers/locked-production-task-fixture";
+import { once } from "node:events";
 
 const sharp = createRequire(new URL("../apps/api/package.json", import.meta.url))("sharp");
 let source: Buffer, mask: Buffer;
 const owned: ReturnType<typeof setupImageTask>[] = [], connections: SqliteRunKernelStateStore[] = [];
 const children: ChildProcess[] = [];
-const networks: Awaited<ReturnType<typeof ownedProductionNetwork>>[] = [];
 beforeAll(async () => { const png = (p: number[]) => sharp(Buffer.from(p), { raw: { width: 2, height: 1, channels: 4 } }).png().toBuffer();
   source = await png([10,20,30,255,40,50,60,255]); mask = await png([0,0,0,0,255,255,255,255]); });
-afterEach(async () => { await new Promise(resolve => setImmediate(resolve)); vi.restoreAllMocks(); networks.splice(0).forEach(n => n.cleanup()); children.splice(0).forEach(c => { if (c.exitCode === null) c.kill(); }); connections.splice(0).forEach(c => c.close()); owned.splice(0).forEach(f => f.cleanup()); });
-function fixture(opts: { manual?: boolean; cap?: number; protocol?: "openai" | "openai-compatible"; encoding?: "json-images" | "multipart-image-array" | "multipart-image-single"; production?: boolean; timeout?: number; enabled?: boolean; lease?: boolean; quota?: number; start?: boolean; startTimeout?: number; response?: boolean; send?: (c: any) => Promise<any>; kernel?: Partial<RunKernelOptions> } = {}) {
-  let service: LockedImageProductionPreparationHarness | LockedProductionImagePreparations;
-  let leasePolicy: LockedProductionImageLeasePolicy, leaseAllowed: unknown = true;
-  let reconstruction: LockedProductionImageTaskReconstruction | LockedImageProductionReconstructionHarness, startAllowed: unknown = true, responseAllowed: unknown = true;
-  const leaseGate: LockedProductionImageLeasePolicy = { usesStateStore: s => leasePolicy.usesStateStore(s), authorizeScope: (p, project, purpose) => leasePolicy.authorizeScope(p, project, purpose),
-    validate: (p, e, purpose, bytes) => leasePolicy.validate(p, e, purpose, bytes) };
-  const f = setupImageTask({ productionResponses: true, productionArtifacts: true,
-    kernel: { validateLockedProductionImageConfirmation: (p, e) => service.authorizeConfirmation(p, e), ...(opts.lease === false ? {} : { lockedProductionImageLeasePolicy: leaseGate }),
-      ...(opts.start === false ? {} : { lockedProductionImageStartPolicy: { usesStateStore: s => reconstruction.usesStateStore(s), authorizeScope: (p, project) => reconstruction.authorizeScope(p, project), validateStart: (p, e, l, i) => reconstruction.validateStart(p, e, l, i) } }), lockedProductionImageResponsePolicy: { usesStateStore: s => reconstruction.responsePolicy.usesStateStore(s), authorizeScope: (p,project) => reconstruction.responsePolicy.authorizeScope(p,project), validateAttempt: (p,e,l,i,a) => reconstruction.responsePolicy.validateAttempt(p,e,l,i,a), validateResult: (p,e,l,i,a,r) => reconstruction.responsePolicy.validateResult(p,e,l,i,a,r) }, ...opts.kernel } }); owned.push(f);
-  const denied = new Set<string>(); let policy: unknown = true, allowed: unknown = true;
-  const authorizer = { authenticate: () => principal, allows: (p: typeof principal, project: string, permission: string) =>
-    p.tenantId === principal.tenantId && ["writer", "reader"].includes(p.actorId) && project === "project-a" && !denied.has(permission) ? allowed as boolean : false };
-  const base = connection(), config = connection({ protocol: opts.protocol ?? "openai", models: [{ ...base.models[0], sizes: { allowAuto: false, presets: [{ width: 2, height: 1 }] },
-    mask: { mode: "prompt-guidance", polarity: opts.protocol === "openai-compatible" ? "white-edit" : "transparent-edit" } }],
-    ...(opts.protocol === "openai-compatible" ? { compatibility: { version: "owned", editEncoding: opts.encoding ?? "json-images", responseEncoding: "images-b64-json-v1",
-      auth: { scheme: "bearer" }, endpoints: { generate: "/images/generations", edit: "/images/edits" }, extraParameters: [] } } : {}) }); f.register(config);
-  for (const [id, body, purpose] of [["source", source, "source"], ["mask", mask, "mask"]] as const) {
-    const a = { id, projectId: "project-a", kind: "image", purpose, storageKey: `owned:${id}`, originalName: `${id}.png`, mimeType: "image/png", byteSize: body.length,
-      width: 2, height: 1, contentFingerprint: `sha256:${sha(body)}`, createdAt: at, ...(purpose === "mask" ? { sourceAssetId: "source" } : {}) };
-    const r = VerifiedImageSchema.parse({ schemaVersion: 1, id: `receipt-${id}`, tenantId: principal.tenantId, asset: a, checksumSha256: sha(body),
-      registeredMetadataSha256: assetMetadataFingerprint(a as any), decoder: "sharp-full-decode-v1", verifiedBy: "owned", verifiedAt: at,
-      ...(purpose === "mask" ? { sourceChecksumSha256: sha(source) } : {}) });
-    f.store.transaction(() => { f.store.saveVerifiedImage(r, body); const c = f.store.loadCatalog()!; c.projects[0].assets.push(r.asset); f.store.saveCatalog(c); });
+afterEach(async () => {
+  // Await actual process exit before closing/removing its owned SQLite directory.
+  for (const child of children.splice(0)) if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+    const exited = once(child, "exit"); child.kill(); await exited;
   }
-  f.store.transaction(() => { const c = f.store.loadCatalog()!, x = c.projects[0].constraints[0]; x.lockedPaths = ["product.pixels"];
-    x.editableRegions = [{ id: "region", description: "原锁区", maskAssetId: "mask" }]; x.outputSpec = { width: 2, height: 1, format: "png" }; f.store.saveCatalog(c); });
-  const pricePort = { kind: opts.production ? "server-pricing" : "contract-fixture", realExecutionEnabled: false,
-    read: vi.fn((c: LockedImagePriceContext) => ({ schemaVersion: 1, scope: c.scope, quote: { id: "owned-price", version: "owned-v1", currency: "CNY",
-      source: opts.manual ? "manual-budget" : "server-price-table", maxCostMinor: opts.cap ?? 40, ...(opts.manual ? {} : { estimatedCostMinor: 25 }), expiresAt: new Date(f.clock() + 60_000).toISOString() },
-      evidence: { kind: opts.production ? opts.manual ? "server-approved-budget" : "server-verified-price" : "contract-fixture", ...(opts.production ? {} : { realExecutionEnabled: false }),
-        sourceRevision: "owned", evidenceRef: "owned-price", checkedBy: "owned", checkedAt: c.requestedAt } })), verify: vi.fn((): unknown => true) };
-  const options = { preparationEnabled: true as const, lockedPreparationEnabled: true as const, lockedConfirmationEnabled: opts.enabled === false ? undefined : true as const,
-    tenantId: principal.tenantId, stateStore: f.store, runKernel: f.kernel, clock: f.clock, timeoutMs: opts.timeout, pricePort: pricePort as any,
-    authorizer, runAuthorizer: authorizer, assetAuthorizer: authorizer, lockedPreparationPolicy: () => true, lockedConfirmationPolicy: () => policy as boolean };
-  service = opts.production ? new LockedProductionImagePreparations(options) : new LockedImageProductionPreparationHarness(options);
-  const leaseOptions = { lockedLeaseEnabled: true as const, tenantId: principal.tenantId, stateStore: f.store, pricePort: pricePort as any,
-    runAuthorizer: authorizer, providerAuthorizer: authorizer, assetAuthorizer: authorizer, clock: f.clock, maxMetadataBytes: opts.quota,
-    lockedLeasePolicy: () => leaseAllowed as boolean };
-  leasePolicy = opts.production ? createLockedProductionImageLeasePolicy(leaseOptions) : createLockedProductionImageLeaseFixturePolicy(leaseOptions);
-  const rebuildOptions = { lockedReconstructionEnabled: true as const, lockedStartEnabled: true as const, tenantId: principal.tenantId, stateStore: f.store, runKernel: f.kernel,
-    leasePolicy: leaseGate, lockedStartPolicy: () => startAllowed as boolean, clock: f.clock, timeoutMs: opts.startTimeout, lockedResponseEnabled: opts.response === false ? undefined : true as const, lockedResponsePolicy: () => responseAllowed as boolean, fixtureTransport: { mode: "contract-fixture" as const, realExecutionEnabled: false as const, send: vi.fn(opts.send ?? (async () => response())) } };
-  reconstruction = opts.production ? new LockedProductionImageTaskReconstruction(rebuildOptions) : new LockedImageProductionReconstructionHarness(rebuildOptions);
-  const select = (action = "locked-owned") => ({ projectId: "project-a", idempotencyKey: action, connectionId: config.id, connectionRevision: 1, model: config.models[0].model,
-    capabilityVersion: config.models[0].version, constraintSnapshotId: "constraint-a", operation: "edit", inputAssetIds: ["source"], maskAssetId: "mask", protection: "pixel-exact",
-    parameters: { prompt: "原人工锁区指令", n: 1, size: { width: 2, height: 1 }, quality: "auto", background: "auto", outputFormat: "png" } });
-  const prepare = async (action = "locked-owned") => { const v = await service.createPreparation(principal, select(action)); return f.store.loadLockedProductionImagePreparation(principal.tenantId, "project-a", v.mode, v.id)!; };
-  const confirm = (p: Awaited<ReturnType<typeof prepare>>, actor = principal, expected: unknown = lockedExpected(p), signal?: AbortSignal) => service.confirmPreparation(actor, "project-a", p.id, expected, { signal });
-  const connectNetwork = (credentialNetwork: ProductionImageCredentialNetworkOptions) => {
-    const networkOptions = { ...rebuildOptions, fixtureTransport: undefined, credentialNetwork };
-    reconstruction = opts.production ? new LockedProductionImageTaskReconstruction(networkOptions) : new LockedImageProductionReconstructionHarness(networkOptions);
-    return reconstruction;
-  };
-  return { ...f, reconstruction, connectNetwork, rebuildOptions, send: rebuildOptions.fixtureTransport.send, responseAllow: (v: unknown) => { responseAllowed = v; }, startAllow: (v: unknown) => { startAllowed = v; }, service, options, authorizer, config, select, prepare, confirm, pricePort, leasePolicy, leaseOptions, leaseGate, leaseAllow: (v: unknown) => { leaseAllowed = v; }, deny: (p: string) => denied.add(p), policy: (p: unknown) => { policy = p; }, allow: (v: unknown) => { allowed = v; } };
+  vi.restoreAllMocks(); connections.splice(0).forEach(c => c.close()); owned.splice(0).forEach(f => f.cleanup());
+});
+function fixture(opts: Parameters<typeof createLockedTaskFixture>[2] = {}) {
+  const f = createLockedTaskFixture(source, mask, opts); owned.push(f); return f;
 }
 async function unchanged(f: ReturnType<typeof fixture>, action: () => unknown) {
   const s = f.store.load(), c = f.store.loadCatalog(); await expect(Promise.resolve().then(action)).rejects.toThrow(); expect(f.store.load()).toEqual(s); expect(f.store.loadCatalog()).toEqual(c);
@@ -88,47 +38,6 @@ async function unchanged(f: ReturnType<typeof fixture>, action: () => unknown) {
 
 
 function response() { return { status: 200, contentType: "application/json", requestId: "owned-response", body: Buffer.from(JSON.stringify({ created: 1, data: [{ b64_json: source.toString("base64") }] })) }; }
-describe("protected v2 credential/network continuation (owned local drivers only)", () => {
-  for (const protocol of ["openai", "openai-compatible"] as const) for (const manual of [false, true])
-    it(protocol + " manual=" + manual + " keeps the complete v2 identity and one original response", async () => {
-      const f = await ready({ protocol, manual }), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n);
-      const core = f.connectNetwork(n.options);
-      n.hooks.write = () => { const b = f.store.load()!.batches[0]; expect(b.lockedProductionImageAttempt?.state).toBe("attempted"); expect(b.lockedProductionImageResult).toBeUndefined(); };
-      await core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input);
-      const b = f.store.load()!.batches[0];
-      expect(b.lockedProductionImageExecution?.schemaVersion).toBe(2); expect(b.lockedProductionImageExecution?.preparation.protectionPolicy).toEqual(f.preparation.protectionPolicy);
-      expect(b.lockedProductionImageResult?.kind).toBe("returned"); expect(b.lockedProductionImageAttempt?.transport).toBe("contract-fixture");
-      expect(b.aggregate.jobs[0].estimatedCostMinor).toBe(manual ? null : 25); expect(b.aggregate.jobs[0].actualCostMinor).toBeUndefined(); expect(b.reservedMinor).toBe(40);
-      expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1); expect(n.options.credentials.rootKeys.withRootKey).toHaveBeenCalledTimes(1);
-      expect(n.options.credentialVersion).toHaveBeenCalledWith(expect.objectContaining({ actorId: principal.actorId,
-        requestFingerprint: b.lockedProductionImageAttempt!.requestFingerprint, payloadChecksumSha256: b.lockedProductionImageAttempt!.payloadChecksumSha256 }));
-      expect(sha(n.captures[0].sentBody!)).toBe(b.lockedProductionImageAttempt!.payloadChecksumSha256);
-      expect(JSON.stringify(b)).not.toContain(n.secret.toString()); expect(b.productionImageExecution).toBeUndefined();
-    });
-  it("committed history never consumes another root or sends another request", async () => {
-    const f = await ready(), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n); const core = f.connectNetwork(n.options);
-    await core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input); const saved = f.store.load(); n.options.credentials.rootKeys.withRootKey.mockClear();
-    expect((await core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input)).started).toBe(false);
-    expect(f.store.load()).toEqual(saved); expect(n.options.credentials.rootKeys.withRootKey).not.toHaveBeenCalled(); expect(n.options.localDrivers!.request).toHaveBeenCalledTimes(1);
-  });
-  it("TLS-stage withdrawal blocks body write and retains the original attempted reservation", async () => {
-    const f = await ready(), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n); const core = f.connectNetwork(n.options);
-    n.hooks.tls = () => f.responseAllow(false);
-    await expect(core.executeNetworkFixture(principal, "project-a", f.v.batchId, f.v.jobId, f.input)).rejects.toThrow();
-    expect(n.captures[0].sentBody).toBeUndefined(); const b = f.store.load()!.batches[0]; expect(b.lockedProductionImageAttempt).toBeDefined();
-    expect(b.lockedProductionImageResult).toBeUndefined(); expect(b.reservedMinor).toBe(40); expect(b.aggregate.jobs[0].actualCostMinor).toBeUndefined();
-  });
-  it("default/mixed/native-fixture configurations fail before private state, root or DNS reads", async () => {
-    const f = await ready(), n = await ownedProductionNetwork(f.config, f.clock, response()); networks.push(n); const read = vi.spyOn(f.store, "load");
-    const args = [principal, "project-a", f.v.batchId, f.v.jobId, f.input] as const;
-    await expect(new LockedProductionImageTaskReconstruction().executeNative(...args)).rejects.toThrow();
-    await expect(new LockedImageProductionReconstructionHarness().executeNetworkFixture(...args)).rejects.toThrow();
-    expect(() => new LockedProductionImageTaskReconstruction({ ...f.rebuildOptions, fixtureTransport: undefined, credentialNetwork: n.options })).toThrow();
-    expect(() => new LockedImageProductionReconstructionHarness({ ...f.rebuildOptions, credentialNetwork: n.options })).toThrow();
-    const core = f.connectNetwork(n.options); await expect(core.executeNative(...args)).rejects.toThrow(); await expect(core.executeFixture(...args)).rejects.toThrow();
-    expect(read).not.toHaveBeenCalled(); expect(n.options.credentials.rootKeys.withRootKey).not.toHaveBeenCalled(); expect(n.options.localDrivers!.createResolver).not.toHaveBeenCalled();
-  });
-});
 describe("protected response rollback and recovery boundaries",()=>{
   for(const phase of ["attempt","result"]) for(const failure of ["fault","revoke","clock","cancel","catalog","capacity"]) it(phase+" actual task SQL after-write "+failure+" rolls back",async()=>{
     const f=await ready(), abort=new AbortController(), save=f.store.save.bind(f.store); let triggered=false;
