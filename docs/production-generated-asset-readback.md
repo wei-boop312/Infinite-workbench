@@ -1,5 +1,7 @@
 # 6D9A 独立生产谱系与生成原图只读回读
 
+2026-10-14保护增量B9A已独立本地验收，见[locked-production-generated-asset-readback.md](locked-production-generated-asset-readback.md)：严格v2保护观察/谱系与精确原图GET，完整2601单元/集成、200Chrome、6构建通过。原v1-none/local读合同和此处历史不改标，保护浏览器缓存/回流/UI仍待下一步；日常真实执行关闭。
+
 最新增量：6D9C受控回画布已本地验收，最终1841单元/集成、189Chrome、6构建，见[production-generated-result-canvas.md](production-generated-result-canvas.md)。原A+B+C本地底座完成，原只读服务/权限和默认关闭保持；下方A/B时点“未缓存/未回流/下一步回流”仅历史。
 
 最新增量：6D9B浏览器独立原图缓存已本地验收（1800单元/集成、160Chrome、6构建），见[production-generated-asset-cache.md](production-generated-asset-cache.md)。下一步原受控画布回流；以下A时点边界保留为历史，不代表当前尚无浏览器缓存。

@@ -1149,6 +1149,68 @@ export const ProductionGeneratedAssetLineageSchema = z.object({ ...ProductionGen
 export type ProductionGeneratedAssetMetadata = z.infer<typeof ProductionGeneratedAssetMetadataSchema>;
 export type ProductionGeneratedAssetLineage = z.infer<typeof ProductionGeneratedAssetLineageSchema>;
 
+// A public observation of an ALREADY persisted protected artifact. It cannot
+// upgrade v1/none/local data or authorize a write, cache, send or settlement.
+const LockedPublicInput = z.object({
+  assetId: IdSchema, receiptId: IdSchema, checksumSha256: ProductionPublicHash, registeredMetadataSha256: ProductionPublicHash,
+  mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]), byteSize: z.number().int().positive().max(30 * 1024 * 1024),
+  width: z.number().int().positive().max(8192), height: z.number().int().positive().max(8192),
+}).strict().refine(i => i.width * i.height <= 16_000_000);
+export const LockedGeneratedAssetProtectionSchema = z.object({
+  schemaVersion: z.literal(1), observation: z.literal("stored-output-pixel-evidence"),
+  policyVersion: z.literal("locked-image-input-policy-v1"), normalizationVersion: z.literal("auto-orient-srgb-rgba8-v1"),
+  maskPolicy: z.literal("white-alpha255-edit-otherwise-locked-v1"), protectionApplied: z.literal("checked-not-applied"),
+  domain: z.literal("fixed-rgba8-only"), lockedPixelsEqual: z.literal(true),
+  policyFingerprint: ProductionPublicHash, pixelProofFingerprint: ProductionPublicHash,
+  source: LockedPublicInput, mask: z.object({ ...LockedPublicInput.shape, sourceAssetId: IdSchema, sourceChecksumSha256: ProductionPublicHash }).strict(),
+  sourcePixelsSha256: ProductionPublicHash, maskPixelsSha256: ProductionPublicHash, candidatePixelsSha256: ProductionPublicHash,
+  outputChecksumSha256: ProductionPublicHash, lockedPixels: z.number().int().positive(), editablePixels: z.number().int().positive(),
+  policyVerifiedAt: IsoDateSchema, outputValidatedAt: IsoDateSchema,
+}).strict().superRefine((p, ctx) => {
+  if (p.source.assetId === p.mask.assetId || p.mask.sourceAssetId !== p.source.assetId || p.mask.sourceChecksumSha256 !== p.source.checksumSha256
+    || p.mask.mimeType !== "image/png" || p.source.width !== p.mask.width || p.source.height !== p.mask.height
+    || p.lockedPixels + p.editablePixels !== p.source.width * p.source.height || Date.parse(p.policyVerifiedAt) > Date.parse(p.outputValidatedAt))
+    ctx.addIssue({ code: "custom", message: "保护观察的原输入/像素域不一致" });
+});
+export type LockedGeneratedAssetProtection = z.infer<typeof LockedGeneratedAssetProtectionSchema>;
+const LockedGeneratedAssetBase = { ...ProductionGeneratedAssetBase, schemaVersion: z.literal(2), protection: LockedGeneratedAssetProtectionSchema };
+const LockedGeneratedAssetObject = z.object(LockedGeneratedAssetBase).strict();
+function validLockedGeneratedImage(p: z.infer<typeof LockedGeneratedAssetObject>) {
+  const i = p.image.asset, protection = p.protection;
+  return validProductionGeneratedImage(p) && i.sourceAssetId === protection.source.assetId && i.width === protection.source.width && i.height === protection.source.height
+    && p.image.checksumSha256 === protection.outputChecksumSha256 && Date.parse(protection.outputValidatedAt) <= Date.parse(p.image.verifiedAt);
+}
+export const LockedProductionGeneratedAssetMetadataSchema = LockedGeneratedAssetObject.refine(validLockedGeneratedImage);
+export const LockedProductionGeneratedAssetLineageSchema = z.object({
+  ...ProductionGeneratedAssetLineageSchema.shape, ...LockedGeneratedAssetBase,
+  requestDraft: ProductionImageRequestDraftSchema.options[1].extend({ protection: z.literal("pixel-exact") }).strict(),
+}).strict().superRefine((p, ctx) => {
+  const d = p.requestDraft, c = p.constraint, i = p.image.asset, q = p.pricing.quote, b = p.billing, protection = p.protection;
+  const refs = [...d.inputs, ...(d.mask ? [d.mask] : [])], model = p.connection.models.find(m => m.model === d.model);
+  if (!validLockedGeneratedImage(p) || d.tenantId !== p.tenantId || d.projectId !== p.projectId || c.projectId !== p.projectId || c.id !== d.constraintSnapshotId
+    || d.connectionId !== p.connection.id || d.connectionRevision !== p.connection.revision || !model || model.capabilityVersion !== d.capabilityVersion
+    || !model.operations.includes("edit") || !d.mask || !c.lockedPaths.includes("product.pixels") || !c.editableRegions.length
+    || c.editableRegions.some(r => r.maskAssetId !== protection.mask.assetId) || new Set(c.editableRegions.map(r => r.id)).size !== c.editableRegions.length
+    || d.inputs[0]?.assetId !== protection.source.assetId || d.inputs[0]?.checksumSha256 !== protection.source.checksumSha256
+    || d.mask?.assetId !== protection.mask.assetId || d.mask?.checksumSha256 !== protection.mask.checksumSha256
+    || refs.some(r => { const observed = r.assetId === protection.source.assetId ? protection.source : r.assetId === protection.mask.assetId ? protection.mask : undefined;
+      return observed && (r.checksumSha256 !== observed.checksumSha256 || r.width !== observed.width || r.height !== observed.height || r.byteSize !== observed.byteSize || r.mimeType !== observed.mimeType); })
+    || d.parameters.size === "auto" || d.parameters.size.width !== i.width || d.parameters.size.height !== i.height
+    || i.width !== c.outputSpec.width || i.height !== c.outputSpec.height || i.mimeType !== `image/${c.outputSpec.format}` || i.mimeType !== `image/${d.parameters.outputFormat}`
+    || b.currency !== q.currency || b.maxCostMinor !== q.maxCostMinor || b.currentMaxCostMinor < q.maxCostMinor
+    || b.estimatedMinor !== (q.source === "manual-budget" ? null : q.estimatedCostMinor)
+    || (p.mode === "production") === (p.pricing.evidence.kind === "contract-fixture")
+    || Date.parse(protection.policyVerifiedAt) > Date.parse(p.pricing.evidence.checkedAt) || Date.parse(p.confirmedAt) < Date.parse(p.pricing.evidence.checkedAt)
+    || Date.parse(p.confirmedAt) >= Date.parse(q.expiresAt) || Date.parse(p.confirmedAt) > Date.parse(protection.outputValidatedAt)
+    || refs.length !== p.transformedInputs.length || refs.some((r, n) => p.transformedInputs[n]?.assetId !== r.assetId || p.transformedInputs[n]?.originalChecksumSha256 !== r.checksumSha256
+      || (n < d.inputs.length ? p.transformedInputs[n]?.transform !== "exif-srgb-png-v1" : p.transformedInputs[n]?.transform === "exif-srgb-png-v1"))
+    || (b.state === "unknown" ? p.jobStatus !== "billing_unknown" || b.actualMinor !== undefined || b.reservedMinor !== q.maxCostMinor
+      : p.jobStatus !== "succeeded" || b.reservedMinor !== 0 || b.actualMinor === undefined || b.actualMinor > b.currentMaxCostMinor))
+    ctx.addIssue({ code: "custom", message: "保护公开谱系的原任务/约束/金额关系不一致" });
+});
+export type LockedProductionGeneratedAssetMetadata = z.infer<typeof LockedProductionGeneratedAssetMetadataSchema>;
+export type LockedProductionGeneratedAssetLineage = z.infer<typeof LockedProductionGeneratedAssetLineageSchema>;
+
 export const RunKernelBudgetStateSchema = z.object({
   tenantId: IdSchema,
   projectId: IdSchema,
