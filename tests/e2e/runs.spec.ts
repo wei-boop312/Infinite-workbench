@@ -327,6 +327,20 @@ test("保护原图v2谱系与二进制默认无日常路由，不能由缓存或
   expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
 });
 
+test("保护v2公开准备/确认接线不会自动启用日常路由或执行", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["locked-production-image-preparations", "locked-production-image-preparations/fake", "locked-production-image-preparations/fake/confirm", "locked-production-image-preparations/fake/confirmation"]) {
+    expect((await page.request.get(`${base}/${suffix}`, { headers })).status()).toBe(404);
+    expect((await page.request.post(`${base}/${suffix}`, { headers, data: { schemaVersion: 2, expectedSnapshotFingerprint: "a".repeat(64), expectedPricingFingerprint: "b".repeat(64),
+      expectedProtectionPolicyFingerprint: "c".repeat(64), expectedCurrency: "CNY", expectedMaxCostMinor: 40, estimate: { state: "unknown" } } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+});
+
 test("生产公开准备/确认合同不会自动启用日常确认及只读历史路由", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();

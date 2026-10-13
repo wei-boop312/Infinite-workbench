@@ -1,10 +1,12 @@
 import { fork, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { RunKernelSnapshotSchema } from "../packages/contracts/src/index";
 import type { CreateRunBatchRequest, RunBatchAggregate, RunJobClaimResult, RunKernelSnapshot, ReviewBillingOverage } from "../packages/contracts/src/index";
 import { RunKernelError, type RunKernelOptions } from "../apps/api/src/runKernel";
 import { SqliteRunKernel } from "../apps/api/src/sqliteRunKernel";
@@ -63,12 +65,78 @@ async function race(path: string, commands: Record<string, unknown>[]) {
   return Promise.all(processes.map((child) => child.result));
 }
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const child of children.splice(0)) {
     if (child.exitCode !== null) continue;
     await new Promise<void>((resolve) => { child.once("exit", () => resolve()); child.kill(); });
   }
   for (const store of stores.splice(0)) store.close();
   for (const path of directories.splice(0)) rmSync(path, { force: true, recursive: true });
+});
+
+describe("同一同步SQL事务的有界纯JSON解析复用，不缓存权限或实际SQL状态", () => {
+  const cache = (store: SqliteRunKernelStateStore) => (store as any).parsedState as Map<string, unknown>;
+  const database = (store: SqliteRunKernelStateStore) => (store as any).database as DatabaseSync;
+  const rewrite = (store: SqliteRunKernelStateStore, value: unknown) => {
+    const payload = JSON.stringify(value), sha = createHash("sha256").update(payload).digest("hex");
+    database(store).prepare("UPDATE kernel_state SET payload=?, sha256=? WHERE kind='runs'").run(payload, sha);
+  };
+  it("逐次重新读SQL与SHA，只复用相同字节解析，返回值不可污染内部副本", () => {
+    const { store } = setup(), original = store.load(), parse = vi.spyOn(RunKernelSnapshotSchema, "parse"), prepare = vi.spyOn(database(store), "prepare");
+    store.transaction(() => {
+      const first = store.load()!; first.budgets[0].limitMinor = 1;
+      expect(store.load()).toEqual(original); expect(store.load()).toEqual(original);
+      expect(parse).toHaveBeenCalledTimes(1);
+      expect(prepare.mock.calls.filter(([sql]) => sql === "SELECT payload, sha256 FROM kernel_state WHERE kind = ?")).toHaveLength(3);
+      expect(cache(store).size).toBe(1);
+    });
+    expect(cache(store).size).toBe(0); store.load(); expect(parse).toHaveBeenCalledTimes(2);
+  });
+  it("真实写后新字节立即重验，回滚之后不保留未提交解析", () => {
+    const { store } = setup(), original = store.load()!;
+    expect(() => store.transaction(() => {
+      const next = store.load()!; next.budgets[0].limitMinor = 101; store.save(next);
+      expect(store.load()!.budgets[0].limitMinor).toBe(101); throw new Error("owned rollback");
+    })).toThrow();
+    expect(cache(store).size).toBe(0); expect(store.load()).toEqual(original);
+  });
+  it("已经复用后的真实SHA损坏仍拒绝，不返回旧好数据", () => {
+    const { store } = setup();
+    expect(() => store.transaction(() => {
+      store.load(); database(store).prepare("UPDATE kernel_state SET sha256=? WHERE kind='runs'").run("0".repeat(64)); store.load();
+    })).toThrow(SqliteStateStoreError); expect(cache(store).size).toBe(0);
+  });
+  it("部分重算SHA不能绕过当前schema", () => {
+    const { store } = setup();
+    expect(() => store.transaction(() => { const next = store.load()!; next.budgets[0].reservedMinor = -1; rewrite(store, next); store.load(); })).toThrow(SqliteStateStoreError);
+    expect(cache(store).size).toBe(0);
+  });
+  it("删除真实状态行但保留存在标记不能从解析复用假装恢复", () => {
+    const { store } = setup();
+    expect(() => store.transaction(() => { store.load(); database(store).prepare("DELETE FROM kernel_state WHERE kind='runs'").run(); store.load(); })).toThrow(SqliteStateStoreError);
+  });
+  it("目录编号/归属静态规则同样不因旧解析跳过", () => {
+    const { store } = setup(), project = { projectId: "project-a", assets: [], constraints: [] };
+    store.transaction(() => store.saveCatalog({ schemaVersion: 1, projects: [project] }));
+    expect(() => store.transaction(() => { store.loadCatalog(); store.saveCatalog({ schemaVersion: 1, projects: [project, project] }); store.loadCatalog(); })).toThrow(SqliteStateStoreError);
+    expect(store.loadCatalog()!.projects).toHaveLength(1);
+  });
+  it("另一真实SQLite连接提交之后仍读取最新原行，不跨事务复用", () => {
+    const { store, path } = setup(), second = open(path).store;
+    store.transaction(() => store.load()); const next = second.load()!; next.budgets[0].limitMinor = 105;
+    second.transaction(() => second.save(next));
+    store.transaction(() => expect(store.load()!.budgets[0].limitMinor).toBe(105)); expect(cache(store).size).toBe(0);
+  });
+  it("超过512KiB单份纯JSON不进入复用，至多runs/catalog两份且结束清除", () => {
+    const { store } = setup(), catalog = { schemaVersion: 1 as const, projects: Array.from({ length: 6000 }, (_, n) => ({ projectId: `owned-${n}-${"a".repeat(80)}`, assets: [], constraints: [] })) };
+    expect(Buffer.byteLength(JSON.stringify(catalog))).toBeGreaterThan(512 * 1024);
+    store.transaction(() => { store.saveCatalog(catalog); store.load(); store.loadCatalog(); expect(cache(store).size).toBe(1); });
+    expect(cache(store).size).toBe(0);
+  });
+  it("当前解析函数替换不返回旧解析数据", () => {
+    const { store } = setup();
+    expect(() => store.transaction(() => { store.load(); vi.spyOn(RunKernelSnapshotSchema, "parse").mockImplementation(() => { throw new Error("owned schema withdrawal"); }); store.load(); })).toThrow(SqliteStateStoreError);
+  });
 });
 
 describe("本机 SQLite 任务事务", () => {

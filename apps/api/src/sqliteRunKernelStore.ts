@@ -29,6 +29,10 @@ function databaseError(error: unknown): SqliteStateStoreError {
 export class SqliteRunKernelStateStore implements RunKernelStateStore {
   private readonly database: DatabaseSync;
   private depth = 0;
+  // Only immutable JSON parsing is reused within one synchronous SQL
+  // transaction. Every call still reads the actual row and verifies its SHA;
+  // authority, raw/output bytes and task-chain validation are never cached.
+  private readonly parsedState = new Map<StateKind, { payload: string; sha256: string; parse: (value: unknown) => unknown; value: unknown }>();
   private closed = false;
   private readonly productionResponseStorageEnabled: boolean;
   private readonly productionArtifactStorageEnabled: boolean;
@@ -160,13 +164,12 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       catch { /* SQLite can already have rolled back after an I/O error. */ }
       if (error && typeof error === "object" && "errcode" in error) throw databaseError(error);
       throw error;
-    } finally { this.depth -= 1; }
+    } finally { this.depth -= 1; if (!nested) this.parsedState.clear(); }
   }
 
   load(): RunKernelSnapshot | null {
     try {
-      const value = this.read("runs");
-      return value === null ? null : RunKernelSnapshotSchema.parse(value);
+      return this.read("runs", RunKernelSnapshotSchema.parse);
     } catch (error) { throw databaseError(error); }
   }
 
@@ -174,8 +177,11 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
 
   loadCatalog(): LocalCatalog | null {
     try {
-      const value = this.read("catalog");
-      if (value === null) return null;
+      return this.read("catalog", this.parseCatalog);
+    } catch (error) { throw databaseError(error); }
+  }
+
+  private readonly parseCatalog = (value: unknown): LocalCatalog => {
       const catalog = LocalRunCatalogSchema.parse(value);
       if (new Set(catalog.projects.map((project) => project.projectId)).size !== catalog.projects.length
         || catalog.projects.some((project) => new Set(project.assets.map((asset) => asset.id)).size !== project.assets.length
@@ -185,8 +191,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
         throw new Error("数据库项目目录编号或归属无效");
       }
       return catalog;
-    } catch (error) { throw databaseError(error); }
-  }
+  };
 
   saveCatalog(catalog: LocalCatalog): void { this.write("catalog", LocalRunCatalogSchema.parse(catalog)); }
 
@@ -540,12 +545,14 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     if (this.closed) return;
     if (this.depth !== 0) throw new Error("不能在事务中关闭数据库");
     this.database.close();
+    this.parsedState.clear();
     this.closed = true;
   }
 
-  private read(kind: StateKind): unknown | null {
+  private read<T>(kind: StateKind, parse: (value: unknown) => T): T | null {
     const row = this.database.prepare("SELECT payload, sha256 FROM kernel_state WHERE kind = ?").get(kind);
     if (!row) {
+      this.parsedState.delete(kind);
       if (this.database.prepare("SELECT kind FROM state_presence WHERE kind = ?").get(kind)) {
         throw new SqliteStateStoreError("run_state_unavailable", new Error("数据库已初始化的状态行丢失"));
       }
@@ -554,7 +561,13 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     if (typeof row.payload !== "string" || createHash("sha256").update(row.payload).digest("hex") !== row.sha256) {
       throw new SqliteStateStoreError("run_state_unavailable", new Error("数据库状态摘要不一致"));
     }
-    return JSON.parse(row.payload);
+    const reusable = this.depth > 0 && Buffer.byteLength(row.payload, "utf8") <= 512 * 1024;
+    const cached = this.parsedState.get(kind);
+    if (reusable && cached?.payload === row.payload && cached.sha256 === row.sha256 && cached.parse === parse) return structuredClone(cached.value) as T;
+    this.parsedState.delete(kind);
+    const value = parse(JSON.parse(row.payload));
+    if (reusable) { this.parsedState.set(kind, { payload: row.payload, sha256: row.sha256 as string, parse, value }); return structuredClone(value); }
+    return value;
   }
 
   private write(kind: StateKind, value: unknown): void {

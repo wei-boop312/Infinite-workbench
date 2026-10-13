@@ -33,6 +33,8 @@ import { handleProductionGeneratedAssetHttp } from "./productionGeneratedAssetHt
 import type { ProductionGeneratedAssetReadPort } from "./productionGeneratedAssetReads";
 import { handleLockedProductionGeneratedAssetHttp } from "./lockedProductionGeneratedAssetHttp";
 import type { LockedProductionGeneratedAssetReadPort } from "./lockedProductionGeneratedAssetReads";
+import { handleLockedProductionImagePublicHttp } from "./lockedProductionImagePublicHttp";
+import type { LockedProductionImagePublicPort } from "./lockedProductionImagePublic";
 import { acquireGeneratedTransfer } from "./generatedTransferSlots";
 
 const MAX_RUN_BODY_BYTES = 64 * 1024;
@@ -47,6 +49,7 @@ export type ApiServerOptions = {
   productionImagePreparations?: ProductionImagePublicPort;
   productionGeneratedAssets?: ProductionGeneratedAssetReadPort;
   lockedProductionGeneratedAssets?: LockedProductionGeneratedAssetReadPort;
+  lockedProductionImagePreparations?: LockedProductionImagePublicPort;
   generatedAssetReads?: GeneratedAssetReadPort;
   generatedAssetLineages?: GeneratedAssetLineagePort;
 };
@@ -101,6 +104,7 @@ export function createApiServer(options: ApiServerOptions = {}) {
 
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1"), pathname = requestUrl.pathname;
     if (await handleProductionImagePublicHttp(request, response, options.productionImagePreparations)) return;
+    if (await handleLockedProductionImagePublicHttp(request, response, options.lockedProductionImagePreparations)) return;
     if (handleProductionGeneratedAssetHttp(request, response, options.productionGeneratedAssets)) return;
     if (handleLockedProductionGeneratedAssetHttp(request, response, options.lockedProductionGeneratedAssets)) return;
     const generatedLineageMatch = pathname.match(/^\/v1\/projects\/([^/]+)\/generated-assets\/([^/]+)\/lineage$/);
