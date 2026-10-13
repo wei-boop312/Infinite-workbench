@@ -8,6 +8,7 @@ import { prepareLockedProductionCompatibleImageRequest } from "./compatibleImage
 import type { TrustedImageBytes } from "./imageRequestPayload";
 import { assertLockedDispatchIntent } from "./lockedProductionImageDispatchIntentIntegrity";
 import { assertLockedImageAttempt, assertLockedImageResult } from "./lockedProductionImageResponse";
+import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
 
 const hash = imageSnapshotFingerprint;
 function reject(): never { throw new ImageProviderContractError("locked_image_confirmation_corrupt"); }
@@ -56,8 +57,8 @@ export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDura
   const ids = [...r.inputs.map(i => i.assetId), r.mask!.assetId];
   const cancelled = b.status === "cancelled", history = s.lockedProductionImageLeases ?? [], intent = s.lockedProductionImageDispatchIntent;
   const started = ["running", "billing_unknown"].includes(b.status), unknown = b.status === "billing_unknown";
-  const attempt = s.lockedProductionImageAttempt, result = s.lockedProductionImageResult;
-  const allowed = new Set(["aggregate", "lockedProductionImageExecution", "lockedProductionImageLeases", "lockedProductionImageDispatchIntent", "lockedProductionImageDispatchIntentFingerprint", "lockedProductionImageAttempt", "lockedProductionImageAttemptFingerprint", "lockedProductionImageResult", "lockedProductionImageResultFingerprint", "requestFingerprint", "reservedMinor", "actualMinor", "jobReservations", "jobScenarios"]);
+  const attempt = s.lockedProductionImageAttempt, result = s.lockedProductionImageResult, artifact = s.lockedProductionImageArtifact;
+  const allowed = new Set(["aggregate", "lockedProductionImageExecution", "lockedProductionImageLeases", "lockedProductionImageDispatchIntent", "lockedProductionImageDispatchIntentFingerprint", "lockedProductionImageAttempt", "lockedProductionImageAttemptFingerprint", "lockedProductionImageResult", "lockedProductionImageResultFingerprint", "lockedProductionImageArtifact", "lockedProductionImageArtifactFingerprint", "requestFingerprint", "reservedMinor", "actualMinor", "jobReservations", "jobScenarios"]);
   if (Object.entries(s).some(([k, v]) => v !== undefined && !allowed.has(k)) || s.requestFingerprint !== hash(e) || s.actualMinor !== 0
     || s.reservedMinor !== (cancelled ? 0 : q.maxCostMinor) || s.jobScenarios.length
     || (cancelled ? s.jobReservations.length !== 0 : s.jobReservations.length !== 1 || s.jobReservations[0][0] !== r.jobId || s.jobReservations[0][1] !== q.maxCostMinor)
@@ -66,7 +67,7 @@ export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDura
     || b.estimatedCostMinor !== estimate || b.maxCostMinor !== q.maxCostMinor || b.currency !== q.currency || b.createdAt !== e.confirmedAt || b.confirmedAt !== e.confirmedAt || b.confirmedBy !== e.confirmedBy
     || a.jobs.length !== 1 || !j || j.id !== r.jobId || j.batchId !== b.id || j.imageMode !== e.mode || j.executorKind !== "provider" || j.adapterId !== r.adapterId
     || j.idempotencyKey !== r.idempotencyKey || !(started || cancelled ? j.status === b.status : ["queued", "leased"].includes(j.status)) || j.attempt !== 1 || j.outputIndex !== 0 || j.estimatedCostMinor !== estimate || j.createdAt !== e.confirmedAt
-    || hash(b.inputAssetIds) !== hash(ids) || hash(j.inputAssetIds) !== hash(ids) || j.outputAssetIds.length || a.billingOverages.length || a.productionBilling
+    || hash(b.inputAssetIds) !== hash(ids) || hash(j.inputAssetIds) !== hash(ids) || hash(j.outputAssetIds) !== hash(artifact ? [artifact.image.asset.id] : []) || a.billingOverages.length || a.productionBilling
     || [j.providerRequestId, j.retryOf, j.actualCostMinor,
       j.billingResolutionId, j.billingResolvedAt, j.billingResolvedBy, j.billingEvidenceRef].some(v => v !== undefined)) reject();
   if (started ? !intent || !s.lockedProductionImageDispatchIntentFingerprint || j.startedAt !== intent.recordedAt
@@ -89,7 +90,7 @@ export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDura
   const leaseEvents = a.audit.filter(x => x.eventType === "job-leased"), expiries = a.audit.filter(x => x.eventType === "job-lease-expired");
   const cancellations = a.audit.filter(x => x.eventType === "batch-cancelled"), releases = a.audit.filter(x => x.eventType === "budget-released");
   if (a.audit.length !== 4 + history.length + expiries.length + (started ? 1 + (unknown ? 1 : 0) : 0) + (cancelled ? 1 + (q.maxCostMinor > 0 ? 1 : 0) : 0)
-    + (attempt ? 1 : 0) + (result ? 1 : 0) || leaseEvents.length !== history.length || history.length > 512 || Buffer.byteLength(JSON.stringify(history)) > 512 * 1024
+    + (attempt ? 1 : 0) + (result ? 1 : 0) + (artifact ? 1 : 0) || leaseEvents.length !== history.length || history.length > 512 || Buffer.byteLength(JSON.stringify(history)) > 512 * 1024
     || new Set(history.map(x => x.leaseId)).size !== history.length) reject();
   let end = Date.parse(e.confirmedAt), expiryCount = 0;
   for (const [i, lease] of history.entries()) {
@@ -111,6 +112,14 @@ export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDura
   if (starts.length !== (started ? 1 : 0) || unknowns.length !== (unknown ? 1 : 0)) reject();
   const attempts = a.audit.filter(x => x.eventType === "production-image-attempted"), returns = a.audit.filter(x => ["production-image-returned", "production-image-interrupted"].includes(x.eventType));
   if (attempts.length !== (attempt ? 1 : 0) || returns.length !== (result ? 1 : 0)) reject();
+  const artifacts = a.audit.filter(x => x.eventType === "production-image-artifact-verified");
+  if (artifacts.length !== (artifact ? 1 : 0) || !!artifact !== !!s.lockedProductionImageArtifactFingerprint) reject();
+  if (artifact) {
+    assertLockedProductionImageArtifact(s, artifact); const event = artifacts[0];
+    if (!unknown || hash(artifact) !== s.lockedProductionImageArtifactFingerprint || event.actorId !== artifact.committedBy || event.createdAt !== artifact.committedAt
+      || hash(event.metadata) !== hash({ jobId: j.id, artifactFingerprint: hash(artifact), assetId: artifact.image.asset.id,
+        checksumSha256: artifact.image.checksumSha256, protectionPolicyFingerprint: artifact.draft.protectionPolicyFingerprint })) reject();
+  }
   if (attempt) { const x = assertLockedImageAttempt(attempt, s.lockedProductionImageAttemptFingerprint!, e, history.at(-1), intent).attempt, event = attempts[0];
     if (event.actorId !== x.actorId || event.createdAt !== x.attemptedAt || hash(event.metadata) !== hash({ jobId: j.id, attemptId: x.id,
       attemptFingerprint: hash(x), intentFingerprint: x.intentFingerprint, transport: x.transport, protectionPolicyFingerprint: x.protectionPolicyFingerprint })) reject(); }

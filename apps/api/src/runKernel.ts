@@ -22,7 +22,7 @@ import {
   type LockedProductionImageDispatchIntent,
   type ProductionImageAttempt, type ProductionImageResult,
   type LockedProductionImageAttempt, type LockedProductionImageResult,
-  type ProductionImageArtifact,
+  type ProductionImageArtifact, type LockedProductionImageArtifact,
   ProductionImageBillingRecordSchema, type ProductionImageBillingRecord,
   type ConfirmRunBatchRequest,
   type CostLedger,
@@ -54,6 +54,7 @@ import { assertLockedImageAttempt, assertLockedImageResult } from "./lockedProdu
 import { assertProductionImageAttempt } from "./productionImageResponse";
 import { assertProductionImageResult } from "./productionImageResultIntegrity";
 import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
+import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
 import { assertProductionBillingState, productionBillingSummary, productionBillingSnapshot } from "./productionImageBillingIntegrity";
 import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
@@ -143,6 +144,8 @@ type StoredBatch = {
   lockedProductionImageAttemptFingerprint?: string;
   lockedProductionImageResult?: LockedProductionImageResult;
   lockedProductionImageResultFingerprint?: string;
+  lockedProductionImageArtifact?: LockedProductionImageArtifact;
+  lockedProductionImageArtifactFingerprint?: string;
   productionImageExecution?: ConfirmedProductionImageExecution;
   productionImageLeases?: ProductionImageLeaseEvidence[];
   productionImageDispatchIntent?: ProductionImageDispatchIntent;
@@ -217,6 +220,11 @@ export type RunKernelOptions = {
     usesStateStore(store: unknown): boolean;
     authorizeScope(p: RunPrincipal, project: string): boolean;
     validateCommit(p: RunPrincipal, record: ProductionImageArtifact): boolean;
+  };
+  lockedProductionImageArtifactPolicy?: {
+    usesStateStore(store: unknown): boolean;
+    authorizeScope(p: RunPrincipal, project: string): boolean;
+    validateCommit(p: RunPrincipal, record: LockedProductionImageArtifact): boolean;
   };
   productionImageBillingPolicy?: {
     usesStateStore(store: unknown): boolean;
@@ -1042,6 +1050,33 @@ export class InMemoryRunKernel implements RunKernelPort {
     if (!current.attempt || !current.intent || current.result?.kind !== "returned" || current.aggregate.jobs[0].status !== "billing_unknown")
       throw new RunKernelError(409, "production_image_artifact_response_required", "产物须实际保存的当次完整原包");
     return { ...current, artifact: stored.productionImageArtifact ? structuredClone(stored.productionImageArtifact) : undefined };
+  }
+
+  inspectLockedProductionImageArtifact(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest) {
+    const policy = this.options.lockedProductionImageArtifactPolicy;
+    if (!policy) throw new RunKernelError(503, "locked_artifact_not_configured", "保护产物默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(structuredClone(p), project));
+    const c = this.inspectLockedImageAttempt(p, project, batch, job, input), s = this.requireBatch(p, batch);
+    if (!c.intent || !c.attempt || c.result?.kind !== "returned" || c.aggregate.jobs[0].status !== "billing_unknown")
+      throw new RunKernelError(409, "locked_artifact_response_required", "保护产物须实际完整原包和未知费用任务");
+    return { ...c, artifact: s.lockedProductionImageArtifact && structuredClone(s.lockedProductionImageArtifact) };
+  }
+  attachLockedProductionImageArtifact(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest, record: LockedProductionImageArtifact) {
+    const c = this.inspectLockedProductionImageArtifact(p, project, batch, job, input), s = this.requireBatch(p, batch), hash = imageSnapshotFingerprint(record);
+    this.productionPolicyTrue(() => this.options.lockedProductionImageArtifactPolicy!.validateCommit(p, structuredClone(record)));
+    if (c.artifact) {
+      if (imageSnapshotFingerprint(c.artifact) !== hash) throw new RunKernelError(409, "locked_artifact_conflict", "保护产物不能覆盖");
+      return c.aggregate;
+    }
+    assertLockedProductionImageArtifact(s, record);
+    if (Date.parse(record.committedAt) > this.clock()) throw new RunKernelError(409, "locked_artifact_clock_invalid", "保护产物时间不可未来");
+    const event = { ...this.audit(s.aggregate.batch, p.actorId, "production-image-artifact-verified", { jobId: job, artifactFingerprint: hash,
+      assetId: record.image.asset.id, checksumSha256: record.image.checksumSha256, protectionPolicyFingerprint: record.draft.protectionPolicyFingerprint }), createdAt: record.committedAt };
+    this.assertLockedProductionImageTask(p, project, batch, "start-history", Buffer.byteLength(JSON.stringify([record, event])) + 70);
+    this.productionPolicyTrue(() => this.options.lockedProductionImageArtifactPolicy!.validateCommit(p, structuredClone(record)));
+    s.lockedProductionImageArtifact = record; s.lockedProductionImageArtifactFingerprint = hash; s.aggregate.audit.push(event);
+    this.replaceJob(s.aggregate, { ...s.aggregate.jobs[0], outputAssetIds: [record.image.asset.id] });
+    this.assertStateConsistent(); this.persist(); return this.copy(s.aggregate);
   }
 
   attachProductionImageArtifact(p: RunPrincipal, project: string, batch: string, job: string, input: ExecuteRunJobRequest, record: ProductionImageArtifact) {
@@ -1884,6 +1919,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         lockedProductionImageAttemptFingerprint: serialized.lockedProductionImageAttemptFingerprint,
         lockedProductionImageResult: serialized.lockedProductionImageResult,
         lockedProductionImageResultFingerprint: serialized.lockedProductionImageResultFingerprint,
+        lockedProductionImageArtifact: serialized.lockedProductionImageArtifact,
+        lockedProductionImageArtifactFingerprint: serialized.lockedProductionImageArtifactFingerprint,
         productionImageLeases: serialized.productionImageLeases,
         productionImageDispatchIntent: serialized.productionImageDispatchIntent,
         productionImageDispatchIntentFingerprint: serialized.productionImageDispatchIntentFingerprint,
@@ -1988,6 +2025,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         ...(stored.lockedProductionImageAttemptFingerprint ? { lockedProductionImageAttemptFingerprint: stored.lockedProductionImageAttemptFingerprint } : {}),
         ...(stored.lockedProductionImageResult ? { lockedProductionImageResult: stored.lockedProductionImageResult } : {}),
         ...(stored.lockedProductionImageResultFingerprint ? { lockedProductionImageResultFingerprint: stored.lockedProductionImageResultFingerprint } : {}),
+        ...(stored.lockedProductionImageArtifact ? { lockedProductionImageArtifact: stored.lockedProductionImageArtifact } : {}),
+        ...(stored.lockedProductionImageArtifactFingerprint ? { lockedProductionImageArtifactFingerprint: stored.lockedProductionImageArtifactFingerprint } : {}),
         ...(stored.productionImageLeases ? { productionImageLeases: stored.productionImageLeases } : {}),
         ...(stored.productionImageDispatchIntent ? { productionImageDispatchIntent: stored.productionImageDispatchIntent } : {}),
         ...(stored.productionImageDispatchIntentFingerprint ? { productionImageDispatchIntentFingerprint: stored.productionImageDispatchIntentFingerprint } : {}),
@@ -2022,14 +2061,14 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
       if (batch.tool === "product-retouch") {
-        if (stored.lockedProductionImageExecution || stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint || stored.lockedProductionImageAttempt || stored.lockedProductionImageAttemptFingerprint || stored.lockedProductionImageResult || stored.lockedProductionImageResultFingerprint) throw new Error("模拟任务不可含锁区证据");
+        if (stored.lockedProductionImageExecution || stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint || stored.lockedProductionImageAttempt || stored.lockedProductionImageAttemptFingerprint || stored.lockedProductionImageResult || stored.lockedProductionImageResultFingerprint || stored.lockedProductionImageArtifact || stored.lockedProductionImageArtifactFingerprint) throw new Error("模拟任务不可含锁区证据");
         if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
           || stored.imageFixtureResult || stored.imageFixtureResultFingerprint || stored.imageTaskArtifact || stored.imageTaskArtifactFingerprint || stored.imageTaskArtifactFailures
           || stored.productionImageBilling || stored.productionImageBillingFingerprint || stored.aggregate.productionBilling
           || jobs.some((job) => job.executorKind !== "mock")) throw new Error("模拟任务包含供应商执行证据");
       } else if (stored.lockedProductionImageExecution) {
         assertLockedConfirmationState({ ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] }, this.options.restoreValidationOnly ? undefined : this.leaseDurationMs, this.options.restoreValidationOnly ? undefined : this.jobTimeoutMs);
-      } else if (stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint || stored.lockedProductionImageAttempt || stored.lockedProductionImageAttemptFingerprint || stored.lockedProductionImageResult || stored.lockedProductionImageResultFingerprint) {
+      } else if (stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint || stored.lockedProductionImageAttempt || stored.lockedProductionImageAttemptFingerprint || stored.lockedProductionImageResult || stored.lockedProductionImageResultFingerprint || stored.lockedProductionImageArtifact || stored.lockedProductionImageArtifactFingerprint) {
         throw new Error("保护租约缺少独立完整确认");
       } else if (stored.productionImageExecution) {
         this.assertProductionState(stored);

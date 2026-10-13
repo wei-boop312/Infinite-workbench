@@ -7,7 +7,9 @@ import { assertProductionImageRawResponse } from "./productionImageResponse";
 import { assertLockedImageRawResponse } from "./lockedProductionImageResponse";
 import { LockedProductionImageResultSchema, type LockedProductionImageResult } from "@canvas/contracts";
 import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
-import { type ProductionImageArtifact, type ProductionImageBillingRecord } from "@canvas/contracts";
+import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
+import { validateLockedProductionImagePreparationAssetPolicy } from "./imageAssetPolicy";
+import { type ProductionImageArtifact, type LockedProductionImageArtifact, type ProductionImageBillingRecord } from "@canvas/contracts";
 import { InMemoryRunKernel, RunKernelError, type ProjectBudgetConfig, type RunKernelOptions, type RunKernelPort, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
@@ -204,6 +206,93 @@ export class SqliteRunKernel implements RunKernelPort {
     this.strictArtifactPolicy(() => policy.usesStateStore(this.options.stateStore)); this.strictArtifactPolicy(() => policy.authorizeScope(p, project));
     this.productionResponseScope(p, project);
   }
+  private lockedArtifactScope(p: RunPrincipal, project: string): void {
+    const policy = this.options.lockedProductionImageArtifactPolicy;
+    if (!policy || !this.options.stateStore.supportsProductionImageArtifacts() || !this.options.stateStore.supportsProductionImageResponses())
+      throw new RunKernelError(503, "locked_artifact_not_configured", "保护产物默认关闭");
+    this.strictArtifactPolicy(() => policy.usesStateStore(this.options.stateStore));
+    this.strictArtifactPolicy(() => policy.authorizeScope(structuredClone(p), project));
+    this.lockedResponseScope(p, project);
+  }
+  captureLockedArtifactConfiguration(p: RunPrincipal, project: string): () => void {
+    this.lockedArtifactScope(p, project);
+    const refs = () => [this.options.stateStore, this.options.clock,
+      this.options.lockedProductionImageLeasePolicy?.usesStateStore, this.options.lockedProductionImageStartPolicy?.usesStateStore,
+      this.options.lockedProductionImageResponsePolicy?.usesStateStore, this.options.lockedProductionImageArtifactPolicy?.usesStateStore,
+      this.options.lockedProductionImageLeasePolicy, this.options.lockedProductionImageLeasePolicy?.authorizeScope, this.options.lockedProductionImageLeasePolicy?.validate,
+      this.options.lockedProductionImageStartPolicy, this.options.lockedProductionImageStartPolicy?.authorizeScope, this.options.lockedProductionImageStartPolicy?.validateStart,
+      this.options.lockedProductionImageResponsePolicy, this.options.lockedProductionImageResponsePolicy?.authorizeScope,
+      this.options.lockedProductionImageResponsePolicy?.validateAttempt, this.options.lockedProductionImageResponsePolicy?.validateResult,
+      this.options.lockedProductionImageArtifactPolicy, this.options.lockedProductionImageArtifactPolicy?.authorizeScope, this.options.lockedProductionImageArtifactPolicy?.validateCommit];
+    const config = () => imageSnapshotFingerprint({ budgets: this.options.budgets, maxConcurrentJobs: this.options.maxConcurrentJobs,
+      leaseDurationMs: this.options.leaseDurationMs, jobTimeoutMs: this.options.jobTimeoutMs, providerLimits: this.options.providerLimits });
+    const savedRefs = refs(), savedConfig = config();
+    return () => { if (refs().some((v, n) => v !== savedRefs[n]) || config() !== savedConfig) throw new RunKernelError(409, "locked_artifact_configuration_changed", "保护产物实际配置不可漂移"); };
+  }
+  inspectLockedProductionImageArtifact: InMemoryRunKernel["inspectLockedProductionImageArtifact"] = (p, project, batch, job, input) => {
+    this.lockedArtifactScope(p, project);
+    return this.lockedLeaseCommand(p, project, batch, "start-history", k => k.inspectLockedProductionImageArtifact(p, project, batch, job, input));
+  };
+  // Only a live service-owned pending can validate the transient three-write
+  // artifact transaction. Ordinary recovery never ignores incomplete/orphan rows.
+  assertLockedProductionImageArtifactWrite(p: RunPrincipal, record: LockedProductionImageArtifact): void {
+    this.lockedArtifactScope(p, record.projectId); const store = this.options.stateStore, policy = this.options.lockedProductionImageArtifactPolicy!;
+    const captured = { store, policy, lease: this.options.lockedProductionImageLeasePolicy, scope: policy.authorizeScope, commit: policy.validateCommit };
+    const check = () => {
+      if (store !== this.options.stateStore || policy !== this.options.lockedProductionImageArtifactPolicy || captured.lease !== this.options.lockedProductionImageLeasePolicy
+        || captured.scope !== policy.authorizeScope || captured.commit !== policy.validateCommit) throw new Error("保护产物配置漂移");
+      this.lockedArtifactScope(p, record.projectId); this.strictArtifactPolicy(() => policy.validateCommit(p, structuredClone(record)));
+    };
+    check();
+    const snapshot = store.load(); if (!snapshot) throw new Error("保护产物任务缺失");
+    for (const config of this.options.budgets) {
+      const b = snapshot.budgets.find(b => b.tenantId === config.tenantId && b.projectId === config.projectId);
+      if (!b || b.currency !== config.currency || b.limitMinor !== config.limitMinor) throw new Error("保护产物预算配置漂移");
+    }
+    const k = new InMemoryRunKernel({ ...this.options, budgets: snapshot.budgets, recoverRunningJobsOnRestore: false,
+      stateStore: { load: () => snapshot, save: () => { throw new Error("保护产物写后核验不可保存任务"); } } });
+    k.assertLockedProductionImageTask(p, record.projectId, record.batchId, "start-history");
+    const s = snapshot.batches.find(b => b.aggregate.batch.id === record.batchId); if (!s) throw new Error("保护产物任务缺失");
+    assertLockedProductionImageArtifact(s, record);
+    const prep = store.loadLockedProductionImagePreparation(p.tenantId, record.projectId, record.mode, s.lockedProductionImageExecution!.preparation.id);
+    if (imageSnapshotFingerprint(prep) !== imageSnapshotFingerprint(s.lockedProductionImageExecution!.preparation)) throw new Error("保护产物原准备漂移");
+    const raw = store.loadLockedProductionImageResponse(p.tenantId, record.projectId, record.mode, record.jobId);
+    try {
+      if (!raw || imageSnapshotFingerprint(raw.record) !== s.lockedProductionImageResultFingerprint) throw new Error("保护产物原包漂移");
+      const parsed = assertLockedImageRawResponse(raw.record, s.lockedProductionImageExecution, s.lockedProductionImageLeases?.at(-1), s.lockedProductionImageDispatchIntent, s.lockedProductionImageAttempt, raw.body);
+      try { if (!parsed.candidate || parsed.candidate.checksumSha256 !== record.image.checksumSha256 || parsed.candidate.mimeType !== record.image.asset.mimeType
+        || parsed.candidate.body.length !== record.image.asset.byteSize) throw new Error("保护产物不匹配原候选"); } finally { parsed.candidate?.body.fill(0); }
+    } finally { raw?.body.fill(0); }
+    k.assertLockedProductionImageTask(p, record.projectId, record.batchId, "start-history"); check();
+    if (imageSnapshotFingerprint(store.load()) !== imageSnapshotFingerprint(snapshot)) throw new Error("保护产物写后任务漂移");
+  }
+  attachLockedProductionImageArtifact(p: RunPrincipal, project: string, batch: string, job: string,
+    input: Parameters<InMemoryRunKernel["inspectLockedProductionImageArtifact"]>[4], record: LockedProductionImageArtifact) {
+    this.lockedArtifactScope(p, project);
+    return this.options.stateStore.transaction(() => {
+      this.assertLockedProductionImageArtifactWrite(p, record);
+      const saved = this.options.stateStore.loadLockedProductionImageArtifact(p.tenantId, project, record.mode, job);
+      if (!saved || imageSnapshotFingerprint(saved) !== imageSnapshotFingerprint(record)) throw new Error("保护产物须先同库保存完整字节");
+      const result = this.run(k => k.attachLockedProductionImageArtifact(p, project, batch, job, input, record), { principal: p, record });
+      this.assertLockedProductionImageArtifactWrite(p, record); // Actual task SQL write has completed.
+      this.inspectLockedProductionImageArtifact(p, project, batch, job, input); return result;
+    });
+  }
+  finishLockedProductionImageArtifactReadback(p: RunPrincipal, record: LockedProductionImageArtifact) {
+    this.lockedArtifactScope(p, record.projectId);
+    this.strictArtifactPolicy(() => this.options.lockedProductionImageArtifactPolicy!.validateCommit(p, structuredClone(record)));
+    // The final authority callback has returned. Re-read actual evidence without
+    // invoking it again after the final immutable data comparisons.
+    this.run(() => undefined);
+    const { schemaVersion: _version, protectionPolicy: _policy, ...request } = record.request;
+    validateLockedProductionImagePreparationAssetPolicy(this.options.stateStore, { schemaVersion: 1, ...request }, () => undefined);
+    for (const receipt of [record.protectionPolicy.source, record.protectionPolicy.mask]) {
+      const actual = this.options.stateStore.loadVerifiedImage(p.tenantId, record.projectId, receipt.asset.id);
+      if (!actual || imageSnapshotFingerprint(actual) !== imageSnapshotFingerprint(receipt)) throw new Error("保护产物最终原输入收据漂移");
+    }
+    this.run(() => undefined);
+    return { snapshotFingerprint: imageSnapshotFingerprint(this.options.stateStore.load()), catalogFingerprint: imageSnapshotFingerprint(this.options.stateStore.loadCatalog()) };
+  }
   claimImageBatch: InMemoryRunKernel["claimImageBatch"] = (...args) => this.run((kernel) => kernel.claimImageBatch(...args));
   startImageJob: InMemoryRunKernel["startImageJob"] = (...args) => this.run((kernel) => kernel.startImageJob(...args));
   inspectImageLease: InMemoryRunKernel["inspectImageLease"] = (...args) => this.run((kernel) => kernel.inspectImageLease(...args));
@@ -334,7 +423,7 @@ export class SqliteRunKernel implements RunKernelPort {
     } catch (e) { if (e instanceof RunKernelError) throw e; throw new RunKernelError(503, "locked_lease_unavailable", "保护任务存储/政策不可用，请保留原编号核对"); }
   }
 
-  private run<T>(action: (kernel: InMemoryRunKernel) => T, pendingArtifact?: { principal: RunPrincipal; record: ProductionImageArtifact }): T {
+  private run<T>(action: (kernel: InMemoryRunKernel) => T, pendingArtifact?: { principal: RunPrincipal; record: ProductionImageArtifact | LockedProductionImageArtifact }): T {
     try {
       const outcome = this.options.stateStore.transaction(() => {
         const estimate = this.options.unitEstimateMinor ?? 25;
@@ -358,13 +447,29 @@ export class SqliteRunKernel implements RunKernelPort {
             const raw = this.options.stateStore.supportsProductionImageResponses()
               ? this.options.stateStore.loadLockedProductionImageResponse(batch.tenantId, batch.projectId, e.mode, e.protocol.request.jobId) : null;
             try {
+              if (!this.options.stateStore.supportsProductionImageResponses() || !this.options.stateStore.supportsProductionImageArtifacts()) throw new Error("保护原包或产物存储关闭");
+              const record = this.options.stateStore.loadLockedProductionImageArtifact(batch.tenantId, batch.projectId, e.mode, e.protocol.request.jobId);
               if (stored.lockedProductionImageResult?.kind === "returned") {
                 if (!raw || imageSnapshotFingerprint(raw.record) !== stored.lockedProductionImageResultFingerprint) throw new Error("保护原包缺失或不一致");
                 const parsed = assertLockedImageRawResponse(raw.record, e, stored.lockedProductionImageLeases?.at(-1), stored.lockedProductionImageDispatchIntent, stored.lockedProductionImageAttempt, raw.body);
-                parsed.candidate?.body.fill(0);
+                try {
+                  if (stored.lockedProductionImageArtifact) {
+                    if (!record || imageSnapshotFingerprint(record) !== stored.lockedProductionImageArtifactFingerprint
+                      || imageSnapshotFingerprint(record) !== imageSnapshotFingerprint(stored.lockedProductionImageArtifact)) throw new Error("保护产物任务或存储损坏");
+                  } else if (record) {
+                    if (!pendingArtifact || pendingArtifact.record.schemaVersion !== 2 || imageSnapshotFingerprint(record) !== imageSnapshotFingerprint(pendingArtifact.record)) throw new Error("孤立保护产物");
+                    this.strictArtifactPolicy(() => this.options.lockedProductionImageArtifactPolicy?.validateCommit(pendingArtifact.principal, record));
+                  }
+                  if (record) {
+                    assertLockedProductionImageArtifact(stored, record);
+                    const asset = this.options.stateStore.loadCatalog()?.projects.find(p => p.projectId === batch.projectId)?.assets.find(a => a.id === record.image.asset.id);
+                    if (!asset || assetMetadataFingerprint(asset) !== record.image.registeredMetadataSha256 || !parsed.candidate
+                      || parsed.candidate.checksumSha256 !== record.image.checksumSha256 || parsed.candidate.mimeType !== record.image.asset.mimeType
+                      || parsed.candidate.body.length !== record.image.asset.byteSize) throw new Error("保护产物不是原包原字节或目录损坏");
+                  }
+                } finally { parsed.candidate?.body.fill(0); }
               } else if (raw) throw new Error("孤立保护原包");
-              if (!this.options.stateStore.supportsProductionImageResponses() || !this.options.stateStore.supportsProductionImageArtifacts()
-                || this.options.stateStore.loadProductionImageArtifact(batch.tenantId, batch.projectId, e.mode, e.protocol.request.jobId)) throw new Error("保护产物未开放或存储关闭"); }
+              else if (record || stored.lockedProductionImageArtifact) throw new Error("孤立保护产物缺少原包"); }
             finally { raw?.body.fill(0); }
           }
           if (stored.productionImageExecution) {
@@ -393,7 +498,7 @@ export class SqliteRunKernel implements RunKernelPort {
                   } else if (record) {
                     // Only the scoped attach command may observe its uncommitted
                     // row. Recovery/ordinary reads never get this continuation.
-                    if (!pendingArtifact || imageSnapshotFingerprint(record) !== imageSnapshotFingerprint(pendingArtifact.record)) throw new Error("孤立生产产物不能成为任务证据");
+                    if (!pendingArtifact || pendingArtifact.record.schemaVersion !== 1 || imageSnapshotFingerprint(record) !== imageSnapshotFingerprint(pendingArtifact.record)) throw new Error("孤立生产产物不能成为任务证据");
                     assertProductionImageArtifact(stored, record);
                     this.strictArtifactPolicy(() => this.options.productionImageArtifactPolicy?.validateCommit(pendingArtifact.principal, record));
                   }
@@ -434,7 +539,9 @@ export class SqliteRunKernel implements RunKernelPort {
           if (!(error instanceof RunKernelError)) throw error;
           rejection = error;
         }
+        const expected = imageSnapshotFingerprint(snapshot);
         if (modified) this.options.stateStore.save(snapshot);
+        if (pendingArtifact && imageSnapshotFingerprint(this.options.stateStore.load()) !== expected) throw new Error("产物实际任务SQL写后漂移");
         return { value, rejection };
       });
       if (outcome.rejection) throw outcome.rejection;

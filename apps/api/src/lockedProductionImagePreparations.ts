@@ -8,6 +8,7 @@ import { constraintContentChecksum, validateLockedProductionImagePreparationAsse
 import { assetMetadataFingerprint } from "./assetMetadata";
 import { decodeStaticImagePixels } from "./staticImageDecoder";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
+import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
 import { RunKernelError, type RunPrincipal } from "./runKernel";
 import type { SqliteRunKernel } from "./sqliteRunKernel";
 import type { SqliteRunKernelStateStore } from "./sqliteRunKernelStore";
@@ -173,12 +174,23 @@ class LockedPreparationCore {
       ? this.config().stateStore.loadLockedProductionImageResponse(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId) : null;
     try {
       guard(); const stored = rows[0];
+      const artifact = this.config().stateStore.loadLockedProductionImageArtifact(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId); guard();
       if (stored.lockedProductionImageResult?.kind === "returned") {
         if (!raw || imageSnapshotFingerprint(raw.record) !== stored.lockedProductionImageResultFingerprint) reject("locked_confirmation_history_corrupt", 503);
         const parsed = assertLockedImageRawResponse(raw.record, e, stored.lockedProductionImageLeases?.at(-1), stored.lockedProductionImageDispatchIntent, stored.lockedProductionImageAttempt, raw.body);
-        parsed.candidate?.body.fill(0); guard();
+        try {
+          if (!!artifact !== !!stored.lockedProductionImageArtifact || (artifact && (imageSnapshotFingerprint(artifact) !== stored.lockedProductionImageArtifactFingerprint
+            || imageSnapshotFingerprint(artifact) !== imageSnapshotFingerprint(stored.lockedProductionImageArtifact)))) reject("locked_confirmation_history_corrupt", 503);
+          if (artifact) {
+            assertLockedProductionImageArtifact(stored, artifact);
+            const asset = this.config().stateStore.loadCatalog()?.projects.find(p => p.projectId === r.projectId)?.assets.find(a => a.id === artifact.image.asset.id);
+            if (!asset || assetMetadataFingerprint(asset) !== artifact.image.registeredMetadataSha256 || !parsed.candidate
+              || parsed.candidate.checksumSha256 !== artifact.image.checksumSha256 || parsed.candidate.mimeType !== artifact.image.asset.mimeType
+              || parsed.candidate.body.length !== artifact.image.asset.byteSize) reject("locked_confirmation_history_corrupt", 503);
+          }
+        } finally { parsed.candidate?.body.fill(0); } guard();
       } else if (raw) reject("locked_confirmation_history_corrupt", 503);
-      if (this.config().stateStore.loadProductionImageArtifact(p.tenantId, r.projectId, r.mode, e.protocol.request.jobId)) reject("locked_confirmation_history_corrupt", 503);
+      else if (artifact || stored.lockedProductionImageArtifact) reject("locked_confirmation_history_corrupt", 503);
     }
     finally { raw?.body.fill(0); }
     this.history(p, r, guard); // Re-read current authoritative inputs/constraints after raw getters.

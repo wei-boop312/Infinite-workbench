@@ -234,6 +234,20 @@ test("保护凭证/原生HTTPS默认无日常路由，原尝试或SHA不能补�
   expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
 });
 
+test("保护像素产物没有日常核验/提交/历史入口，纯草稿不授权", async ({ page }) => {
+  const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();
+  const headers = { "x-canvas-local": "1" }, base = `/studio-api/v1/projects/${encodeURIComponent(batch.batch.projectId)}`;
+  const before = await (await page.request.get(`${base}/budget`, { headers })).json();
+  for (const suffix of ["validate-output","artifacts","artifact"]) {
+    const path = `${base}/locked-production-image-batches/fake/${suffix}`;
+    expect((await page.request.get(path, { headers })).status()).toBe(404);
+    expect((await page.request.post(path, { headers, data: { schemaVersion: 2, pixelProof: { lockedPixelsEqual: true }, verified: true } })).status()).toBe(404);
+  }
+  expect(await (await page.request.get(`${base}/budget`, { headers })).json()).toEqual(before);
+  expect(await (await page.request.get("/studio-api/health", { headers })).json()).toMatchObject({ realExecutorsEnabled: false });
+});
+
 test("生产同库产物底座没有HTTP提交/谱系/下载入口，保留真实闸门", async ({ page }) => {
   const panel = await prepare(page), created = page.waitForResponse(r => r.url().endsWith("/studio-api/v1/run-batches") && r.request().method() === "POST");
   await panel.getByRole("button", { name: "查看批次预估" }).click(); const batch = await (await created).json();

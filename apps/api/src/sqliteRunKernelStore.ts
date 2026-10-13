@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { GeneratedImageRecordSchema, ImageFixtureResultSchema, ImagePreparationRecordSchema, ProductionImagePreparationRecordSchema, ProductionImageRawResponseSchema, ImageProviderRevisionSchema, LocalRunCatalogSchema, RunKernelSnapshotSchema, VerifiedImageSchema, type ProductionImageRawResponse, type ProductionImagePreparationRecord, type ImageFixtureResult, type GeneratedImageRecord, type ImagePreparationRecord, type ImageProviderRevision, type RunKernelSnapshot, type VerifiedImage } from "@canvas/contracts";
 import type { RunKernelStateStore } from "./runKernelStore";
-import { ProductionImageArtifactSchema, type ProductionImageArtifact } from "@canvas/contracts";
+import { ProductionImageArtifactSchema, type ProductionImageArtifact, LockedProductionImageArtifactSchema, type LockedProductionImageArtifact } from "@canvas/contracts";
 import { LockedProductionImagePreparationRecordSchema, type LockedProductionImagePreparationRecord } from "@canvas/contracts";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 import { LockedProductionImageRawResponseSchema, type LockedProductionImageRawResponse } from "@canvas/contracts";
@@ -380,6 +380,12 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
   }
   supportsProductionImageArtifacts(): boolean { return this.productionArtifactStorageEnabled; }
   loadProductionImageArtifact(tenant: string, project: string, mode: ProductionImageArtifact["mode"], job: string): ProductionImageArtifact | null {
+    return this.readProductionArtifact(tenant, project, mode, job, ProductionImageArtifactSchema);
+  }
+  loadLockedProductionImageArtifact(tenant: string, project: string, mode: LockedProductionImageArtifact["mode"], job: string) {
+    return this.readProductionArtifact(tenant, project, mode, job, LockedProductionImageArtifactSchema);
+  }
+  private readProductionArtifact<T extends ProductionImageArtifact | LockedProductionImageArtifact>(tenant: string, project: string, mode: T["mode"], job: string, schema: { parse(input: unknown): T }): T | null {
     if (!this.productionArtifactStorageEnabled) throw new Error("生产产物存储默认关闭");
     try { return this.transaction(() => {
       const args = [tenant, project, mode, job];
@@ -388,7 +394,7 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
       if (!row && !marker) return null;
       if (!row || !marker || row.asset_id !== marker.asset_id || row.record_sha256 !== marker.record_sha256 || typeof row.bytes !== "number" || row.bytes > 512 * 1024) throw new Error("生产产物证据缺失或超限");
       const value = this.database.prepare("SELECT record, record_sha256 FROM production_image_artifacts WHERE tenant_id = ? AND project_id = ? AND mode = ? AND job_id = ?").get(...args)!;
-      const record = ProductionImageArtifactSchema.parse(this.readImageMetadata(value));
+      const record = schema.parse(this.readImageMetadata(value));
       const sizes = this.database.prepare("SELECT length(body) AS bytes, length(CAST(record AS BLOB)) AS metadata FROM verified_images WHERE tenant_id = ? AND project_id = ? AND asset_id = ?").get(tenant, project, String(row.asset_id));
       if (record.tenantId !== tenant || record.projectId !== project || record.mode !== mode || record.jobId !== job || record.image.asset.id !== row.asset_id
         || !sizes || typeof sizes.bytes !== "number" || sizes.bytes < 1 || sizes.bytes > 20 * 1024 * 1024 || typeof sizes.metadata !== "number" || sizes.metadata > 512 * 1024) throw new Error("生产产物归属或正文容量损坏");
@@ -399,21 +405,28 @@ export class SqliteRunKernelStateStore implements RunKernelStateStore {
     }); } catch (error) { throw databaseError(error); }
   }
   saveProductionImageArtifact(input: ProductionImageArtifact, body: Buffer, limits: { maxMetadataBytes?: number; maxProjectBytes?: number } = {}): void {
+    this.writeProductionArtifact(input, body, ProductionImageArtifactSchema, limits);
+  }
+  saveLockedProductionImageArtifact(input: LockedProductionImageArtifact, body: Buffer, limits: { maxMetadataBytes?: number; maxProjectBytes?: number } = {}, afterWrite: () => void): void {
+    if (typeof afterWrite !== "function") throw new Error("保护产物每次实际写后须复查");
+    this.writeProductionArtifact(input, body, LockedProductionImageArtifactSchema, limits, afterWrite);
+  }
+  private writeProductionArtifact<T extends ProductionImageArtifact | LockedProductionImageArtifact>(input: T, body: Buffer, schema: { parse(input: unknown): T }, limits: { maxMetadataBytes?: number; maxProjectBytes?: number }, afterWrite?: () => void): void {
     if (!this.productionArtifactStorageEnabled || this.depth === 0) throw new Error("生产产物须显式同库同步事务");
-    const r = ProductionImageArtifactSchema.parse(input), payload = this.imageMetadataPayload(r), hash = createHash("sha256").update(payload).digest("hex");
+    const r = schema.parse(input), payload = this.imageMetadataPayload(r), hash = createHash("sha256").update(payload).digest("hex");
     const metadata = limits.maxMetadataBytes ?? 16 * 1024 * 1024, binary = limits.maxProjectBytes ?? 512 * 1024 * 1024;
     if (!Number.isSafeInteger(metadata) || metadata < 0 || metadata > 16 * 1024 * 1024 || !Number.isSafeInteger(binary) || binary < 0 || binary > 512 * 1024 * 1024
       || !Buffer.isBuffer(body) || body.byteLength !== r.image.asset.byteSize || body.byteLength > 20 * 1024 * 1024 || createHash("sha256").update(body).digest("hex") !== r.image.checksumSha256) throw new Error("生产产物容量或字节不一致");
     this.transaction(() => {
-      const existing = this.loadProductionImageArtifact(r.tenantId, r.projectId, r.mode, r.jobId);
+      const existing = this.readProductionArtifact(r.tenantId, r.projectId, r.mode, r.jobId, schema);
       if (existing) { if (JSON.stringify(existing) !== payload) throw new Error("生产产物历史不能覆盖"); return; }
       if (this.localImageBinaryBytes(r.tenantId, r.projectId) + body.length > binary
         || this.imageMetadataBytes(r.tenantId, r.projectId) + imageTaskMetadataBytes(this.load(), r.tenantId, r.projectId) + Buffer.byteLength(payload) > metadata) throw new Error("生产产物共享容量不足");
-      this.saveVerifiedImage(r.image, body);
+      this.saveVerifiedImage(r.image, body); afterWrite?.();
       this.database.prepare("INSERT INTO production_image_artifacts(tenant_id, project_id, mode, job_id, asset_id, record, record_sha256) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(r.tenantId, r.projectId, r.mode, r.jobId, r.image.asset.id, payload, hash);
+        .run(r.tenantId, r.projectId, r.mode, r.jobId, r.image.asset.id, payload, hash); afterWrite?.();
       this.database.prepare("INSERT INTO production_image_artifact_presence(tenant_id, project_id, mode, job_id, asset_id, record_sha256) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(r.tenantId, r.projectId, r.mode, r.jobId, r.image.asset.id, hash);
+        .run(r.tenantId, r.projectId, r.mode, r.jobId, r.image.asset.id, hash); afterWrite?.();
     });
   }
   // Internal raw storage ONLY, default closed. Does not prove actual task,

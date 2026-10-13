@@ -1,6 +1,6 @@
 # 原锁区专项 A：纯完整像素核验草稿
 
-实际链接线设计见[locked-image-task-binding-design.md](locked-image-task-binding-design.md)：旧none历史不能升级，新政策须在原价格/人工确认前冻结、不可变保护证据与原产物同库保存并同步恢复公开缓存回流。该文档仅设计，尚未实施，不改变本A草稿或实际拒绝闸门。
+实际链接线见[locked-image-task-binding-design.md](locked-image-task-binding-design.md)：旧none历史不能升级，新政策须在原价格/人工确认前冻结。2026-10-13原B1–B7已本地验收，当前[不可变保护产物](locked-image-artifacts.md)2371单元/197Chrome/6构建通过；本A仍仅草稿、不是当前任务许可。保护费用/公开缓存回流及UI与真实关口未完成，日常真实执行关闭，不把设计历史或A草稿冒充全部出口。
 
 2026-10-05（上海）。本次来自冻结阶段4第6项专项盘点，不增加产品目标：原`image-provider-contract`与`generated-image-ingestion`已明确把可验证锁区保护留待真实资产回流阶段。6A–6D9完成的不是硬像素保护；旧拒绝闸门不能作为该功能已实现的证据。本次只补独立纯核验原语，实际任务绑定、产物事务接线、生产硬锁区功能及真实供应商验收仍未完成。
 

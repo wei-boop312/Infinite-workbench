@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LockedImagePixelDraftSchema } from "./lockedImagePixels.ts";
 export { LockedImagePixelDraftSchema, type LockedImagePixelDraft } from "./lockedImagePixels.ts";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
 import { ConfirmProductionImagePreparationSchema, FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImagePublicPricingSchema, ProductionImageTaskIdentitySchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
@@ -1082,6 +1083,21 @@ export const ProductionImageArtifactSchema = z.object({
 }).strict();
 export type ProductionImageArtifact = z.infer<typeof ProductionImageArtifactSchema>;
 
+// Separate v2 protected evidence. Neither this shape nor a pure pixel draft is
+// current task, permission, commit, execution or settlement authority.
+export const LockedProductionImageOutputDraftSchema = z.object({
+  ...ProductionImageOutputDraftSchema.shape, schemaVersion: z.literal(2),
+  protectionApplied: z.literal("checked-not-applied"),
+  protectionPolicyFingerprint: ProductionEvidenceHash, pixelProof: LockedImagePixelDraftSchema,
+}).strict();
+export type LockedProductionImageOutputDraft = z.infer<typeof LockedProductionImageOutputDraftSchema>;
+export const LockedProductionImageArtifactSchema = z.object({
+  ...ProductionImageArtifactSchema.shape, schemaVersion: z.literal(2),
+  draft: LockedProductionImageOutputDraftSchema, request: LockedProductionImageExecutionRequestSchema,
+  protectionPolicy: LockedImagePreparationPolicySchema,
+}).strict();
+export type LockedProductionImageArtifact = z.infer<typeof LockedProductionImageArtifactSchema>;
+
 // Independent immutable production read views. Never accepted as send, cache,
 // commit or billing authority, and never coerced into legacy numeric quotes.
 const ProductionGeneratedAssetBase = {
@@ -1145,6 +1161,8 @@ export const RunKernelStoredBatchSchema = z.object({
   lockedProductionImageAttemptFingerprint: ProductionEvidenceHash.optional(),
   lockedProductionImageResult: LockedProductionImageResultSchema.optional(),
   lockedProductionImageResultFingerprint: ProductionEvidenceHash.optional(),
+  lockedProductionImageArtifact: LockedProductionImageArtifactSchema.optional(),
+  lockedProductionImageArtifactFingerprint: ProductionEvidenceHash.optional(),
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),
