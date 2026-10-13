@@ -8,8 +8,9 @@ import { assertLockedImageRawResponse } from "./lockedProductionImageResponse";
 import { LockedProductionImageResultSchema, type LockedProductionImageResult } from "@canvas/contracts";
 import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
 import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
+import { lockedProductionBillingBaseline } from "./lockedProductionImageBillingIntegrity";
 import { validateLockedProductionImagePreparationAssetPolicy } from "./imageAssetPolicy";
-import { type ProductionImageArtifact, type LockedProductionImageArtifact, type ProductionImageBillingRecord } from "@canvas/contracts";
+import { type ProductionImageArtifact, type LockedProductionImageArtifact, type ProductionImageBillingRecord, type LockedProductionImageBillingRecord } from "@canvas/contracts";
 import { InMemoryRunKernel, RunKernelError, type ProjectBudgetConfig, type RunKernelOptions, type RunKernelPort, type RunPrincipal } from "./runKernel";
 import { SqliteRunKernelStateStore, SqliteStateStoreError } from "./sqliteRunKernelStore";
 
@@ -28,9 +29,12 @@ export class SqliteRunKernel implements RunKernelPort {
       unitEstimateMinor: this.options.unitEstimateMinor, unitActualMinor: this.options.unitActualMinor, maxConcurrentJobs: this.options.maxConcurrentJobs,
       projectLimits: this.options.projectLimits, providerLimits: this.options.providerLimits });
     const hash = imageSnapshotFingerprint(configuration()), clock = this.options.clock, authorizer = this.options.authorizer;
+    const billing = this.options.lockedProductionImageBillingPolicy, billingFunctions = billing && [billing.usesStateStore, billing.authorizeScope, billing.validateCommit, billing.validateOriginal];
     return () => {
       if (store !== this.options.stateStore || clock !== this.options.clock || authorizer !== this.options.authorizer || hash !== imageSnapshotFingerprint(configuration()))
         throw new RunKernelError(409, "locked_billing_configuration_changed", "保护核账实际配置已变化");
+      if (billing !== this.options.lockedProductionImageBillingPolicy || billingFunctions?.some((f,i) => f !== [billing!.usesStateStore,billing!.authorizeScope,billing!.validateCommit,billing!.validateOriginal][i]))
+        throw new RunKernelError(409, "locked_billing_configuration_changed", "保护核账实际政策已变化");
     };
   }
 
@@ -49,6 +53,40 @@ export class SqliteRunKernel implements RunKernelPort {
     });
   }
 
+  commitLockedProductionImageBilling(principal: RunPrincipal, incoming: LockedProductionImageBillingRecord) {
+    const p = structuredClone(principal), record = structuredClone(incoming), policy = this.options.lockedProductionImageBillingPolicy;
+    if (!policy) throw new RunKernelError(503, "locked_billing_not_configured", "保护核账默认关闭");
+    const store = this.options.stateStore, functions = [policy.usesStateStore, policy.authorizeScope, policy.validateCommit, policy.validateOriginal];
+    const fixed = this.captureLockedProductionBillingReadConfiguration(store);
+    const check = () => {
+      fixed(); if (this.options.lockedProductionImageBillingPolicy !== policy
+        || functions.some((f, i) => f !== [policy.usesStateStore, policy.authorizeScope, policy.validateCommit, policy.validateOriginal][i])) throw new Error("保护核账政策身份漂移");
+      this.strictArtifactPolicy(() => policy.usesStateStore(store));
+      this.strictArtifactPolicy(() => policy.authorizeScope(structuredClone(p), record.snapshot.projectId, !!record.decision));
+      this.strictArtifactPolicy(() => policy.validateCommit(structuredClone(p), structuredClone(record))); fixed();
+    };
+    check();
+    return store.transaction(() => {
+      const before = store.load()!;
+      const original = imageSnapshotFingerprint(before), catalog = imageSnapshotFingerprint(store.loadCatalog());
+      const unchanged = () => {
+        this.strictArtifactPolicy(() => policy.validateOriginal(structuredClone(p), structuredClone(record))); fixed();
+        if (imageSnapshotFingerprint(store.load()) !== original || imageSnapshotFingerprint(store.loadCatalog()) !== catalog) throw new Error("保护核账原完整状态漂移");
+      };
+      unchanged();
+      let after = before;
+      const memory = new InMemoryRunKernel({ ...this.options, budgets: before.budgets, recoverRunningJobsOnRestore: false,
+        stateStore: { load: () => structuredClone(before), save: next => { after = next; } } });
+      const result = memory.commitLockedProductionImageBilling(p, record);
+      unchanged(); // Includes callbacks invoked by the actual in-memory command.
+      store.save(after); // Actual SQL task/fees/audit/ledger/budget write.
+      const expected = imageSnapshotFingerprint(after); check();
+      this.run(() => undefined); fixed();
+      if (imageSnapshotFingerprint(store.load()) !== expected || imageSnapshotFingerprint(store.loadCatalog()) !== catalog) throw new Error("保护核账实际SQL写后漂移");
+      return result;
+    });
+  }
+
   // Pure validation of a snapshot already loaded by an independently scoped
   // internal service. No SQL reads, writes, lease recovery or task permission.
   validateProductionBillingSnapshot(snapshot: RunKernelSnapshot): void {
@@ -58,7 +96,8 @@ export class SqliteRunKernel implements RunKernelPort {
       if (Date.parse(lease.expiresAt) - Date.parse(lease.leasedAt) !== (this.options.leaseDurationMs ?? 30_000)) throw new Error("原租约期限与实际内核配置不一致");
     }
     for (const stored of snapshot.batches.filter(b => b.productionImageExecution || b.lockedProductionImageExecution)) {
-      const job = stored.aggregate.jobs[0];
+      const original = stored.lockedProductionImageBilling ? lockedProductionBillingBaseline(stored) : stored;
+      const job = original.aggregate.jobs[0];
       if (["production-job-timeout-after-intent", "locked-job-timeout-after-intent"].includes(job.failureCode ?? "")
         && Date.parse(job.finishedAt!) < Date.parse(job.startedAt!) + (this.options.jobTimeoutMs ?? 30_000)) throw new Error("原任务超时早于实际内核期限");
     }

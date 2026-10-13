@@ -9,6 +9,7 @@ import type { TrustedImageBytes } from "./imageRequestPayload";
 import { assertLockedDispatchIntent } from "./lockedProductionImageDispatchIntentIntegrity";
 import { assertLockedImageAttempt, assertLockedImageResult } from "./lockedProductionImageResponse";
 import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
+import { assertLockedProductionBillingState } from "./lockedProductionImageBillingIntegrity";
 
 const hash = imageSnapshotFingerprint;
 function reject(): never { throw new ImageProviderContractError("locked_image_confirmation_corrupt"); }
@@ -52,6 +53,10 @@ export function assertLockedConfirmation(input: unknown) {
 }
 // Closed v2 states; raw is independently re-parsed by the actual SQLite wrapper.
 export function assertLockedConfirmationState(s: RunKernelStoredBatch, leaseDurationMs?: number, jobTimeoutMs?: number) {
+  if (s.lockedProductionImageBilling || s.lockedProductionImageBillingFingerprint || s.aggregate.lockedProductionBilling) {
+    const base = assertLockedProductionBillingState(s);
+    assertLockedConfirmationState(base, leaseDurationMs, jobTimeoutMs); return;
+  }
   const e = assertLockedConfirmation(s.lockedProductionImageExecution), r = e.protocol.request, q = r.quote;
   const a = s.aggregate, b = a.batch, j = a.jobs[0], estimate = q.source === "manual-budget" ? null : q.estimatedCostMinor;
   const ids = [...r.inputs.map(i => i.assetId), r.mask!.assetId];

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ProductionImageBillingSnapshotSchema, ReviewProductionImageBillingSchema } from "./productionImageBilling.ts";
+import { ProductionImageBillingSnapshotSchema, ReviewProductionImageBillingSchema, DecideProductionImageBillingSchema, ProductionImageBillingRecordSchema, ProductionImageBillingSummarySchema } from "./productionImageBilling.ts";
 
 const Hash = z.string().regex(/^[a-f0-9]{64}$/);
 const Id = z.string().min(1).max(160).refine(v => v === v.trim());
@@ -41,3 +41,34 @@ export const LockedProductionImageBillingReviewSchema = z.object({
     ctx.addIssue({ code: "custom", message: "保护核账草稿与原人工期待不一致" });
 });
 export type LockedProductionImageBillingReview = z.infer<typeof LockedProductionImageBillingReviewSchema>;
+
+export const DecideLockedProductionImageBillingSchema = z.object({
+  ...DecideProductionImageBillingSchema.shape, expectedProtectionPolicyFingerprint: Hash,
+}).strict();
+export type DecideLockedProductionImageBilling = z.infer<typeof DecideLockedProductionImageBillingSchema>;
+
+// A is never persisted as a permit. This independent v2 record is committed
+// only by a live service-owned proof in the actual unified task transaction.
+export const LockedProductionImageBillingRecordSchema = z.object({
+  ...ProductionImageBillingRecordSchema.shape, schemaVersion: z.literal(2),
+  snapshot: LockedProductionImageBillingSnapshotSchema, request: ReviewLockedProductionImageBillingSchema,
+  decision: z.object({ request: DecideLockedProductionImageBillingSchema, decidedBy: Id, decidedAt: z.iso.datetime({ offset: true }) }).strict().optional(),
+}).strict().superRefine((v, ctx) => {
+  const over = v.request.actualCostMinor > v.snapshot.reservedMinor;
+  if (v.mode !== v.snapshot.mode || (v.mode === "production" ? v.sourceKind !== "server-billing" : v.sourceKind !== "contract-fixture")
+    || v.request.expectedSnapshotFingerprint !== v.snapshotFingerprint || v.request.expectedProtectionPolicyFingerprint !== v.snapshot.protectionPolicyFingerprint
+    || v.request.expectedCurrency !== v.snapshot.currency || v.request.expectedReservedMinor !== v.snapshot.reservedMinor || v.request.expectedMaxCostMinor !== v.snapshot.maxCostMinor
+    || Date.parse(v.reviewedAt) < Math.max(Date.parse(v.snapshot.unknownAt), Date.parse(v.request.evidence.observedAt))
+    || Date.parse(v.request.evidence.observedAt) < Date.parse(v.snapshot.unknownAt)
+    || (!over && (v.status !== "settled" || v.decision)) || (over && (v.status === "pending" ? !!v.decision : !v.decision))
+    || (v.decision && (v.decision.decidedBy === v.reviewedBy || Date.parse(v.decision.decidedAt) < Date.parse(v.reviewedAt)
+      || v.decision.request.expectedProtectionPolicyFingerprint !== v.snapshot.protectionPolicyFingerprint
+      || v.decision.request.expectedSnapshotFingerprint !== v.snapshotFingerprint || v.decision.request.expectedCurrency !== v.snapshot.currency
+      || v.decision.request.expectedReservedMinor !== v.snapshot.reservedMinor || v.decision.request.expectedActualCostMinor !== v.request.actualCostMinor
+      || v.status !== (v.decision.request.decision === "approve" ? "settled" : "rejected"))))
+    ctx.addIssue({ code: "custom", message: "保护费用、原政策或第二人审批关系不一致" });
+});
+export type LockedProductionImageBillingRecord = z.infer<typeof LockedProductionImageBillingRecordSchema>;
+export const LockedProductionImageBillingSummarySchema = z.object({
+  ...ProductionImageBillingSummarySchema.shape, schemaVersion: z.literal(2), protectionPolicyFingerprint: Hash,
+}).strict();

@@ -6,6 +6,7 @@ export function imageTaskMetadataBytes(snapshot: RunKernelSnapshot | null, tenan
       item.lockedProductionImageDispatchIntent, item.lockedProductionImageDispatchIntentFingerprint, item.productionImageLeases, item.productionImageDispatchIntent,
       item.lockedProductionImageAttempt, item.lockedProductionImageAttemptFingerprint, item.lockedProductionImageResult, item.lockedProductionImageResultFingerprint,
       item.lockedProductionImageArtifact, item.lockedProductionImageArtifactFingerprint,
+      item.lockedProductionImageBilling, item.lockedProductionImageBillingFingerprint, item.aggregate.lockedProductionBilling,
       item.productionImageDispatchIntentFingerprint,
       item.productionImageAttempt, item.productionImageAttemptFingerprint, item.productionImageResult, item.productionImageResultFingerprint,
       item.productionImageArtifact, item.productionImageArtifactFingerprint,

@@ -24,6 +24,7 @@ import {
   type LockedProductionImageAttempt, type LockedProductionImageResult,
   type ProductionImageArtifact, type LockedProductionImageArtifact,
   ProductionImageBillingRecordSchema, type ProductionImageBillingRecord,
+  LockedProductionImageBillingRecordSchema, type LockedProductionImageBillingRecord,
   type ConfirmRunBatchRequest,
   type CostLedger,
   type CreateRunBatchRequest,
@@ -56,6 +57,7 @@ import { assertProductionImageResult } from "./productionImageResultIntegrity";
 import { assertProductionImageArtifact } from "./productionImageArtifactIntegrity";
 import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
 import { assertProductionBillingState, productionBillingSummary, productionBillingSnapshot } from "./productionImageBillingIntegrity";
+import { assertLockedProductionBillingState, lockedProductionBillingSummary, lockedProductionBillingSnapshot } from "./lockedProductionImageBillingIntegrity";
 import { ImageProviderContractError, imageConfirmationFingerprint, imageSnapshotFingerprint, validateImageProviderRequest } from "./imageProviderContract";
 
 export type RunPrincipal = {
@@ -146,6 +148,8 @@ type StoredBatch = {
   lockedProductionImageResultFingerprint?: string;
   lockedProductionImageArtifact?: LockedProductionImageArtifact;
   lockedProductionImageArtifactFingerprint?: string;
+  lockedProductionImageBilling?: LockedProductionImageBillingRecord[];
+  lockedProductionImageBillingFingerprint?: string;
   productionImageExecution?: ConfirmedProductionImageExecution;
   productionImageLeases?: ProductionImageLeaseEvidence[];
   productionImageDispatchIntent?: ProductionImageDispatchIntent;
@@ -230,6 +234,12 @@ export type RunKernelOptions = {
     usesStateStore(store: unknown): boolean;
     authorizeScope(p: RunPrincipal, project: string, approval: boolean): boolean;
     validateCommit(p: RunPrincipal, record: ProductionImageBillingRecord): boolean;
+  };
+  lockedProductionImageBillingPolicy?: {
+    usesStateStore(store: unknown): boolean;
+    authorizeScope(p: RunPrincipal, project: string, approval: boolean): boolean;
+    validateCommit(p: RunPrincipal, record: LockedProductionImageBillingRecord): boolean;
+    validateOriginal(p: RunPrincipal, record: LockedProductionImageBillingRecord): boolean;
   };
   // Synchronous trusted policy only, checked inside the same command transaction.
   // It enables INTERNAL local image lease preparation, never the public mock route.
@@ -1775,6 +1785,51 @@ export class InMemoryRunKernel implements RunKernelPort {
     this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
   }
 
+  commitLockedProductionImageBilling(p: RunPrincipal, incoming: LockedProductionImageBillingRecord): RunBatchAggregate {
+    const record = LockedProductionImageBillingRecordSchema.parse(incoming), s = record.snapshot, stored = this.batches.get(s.batchId), policy = this.options.lockedProductionImageBillingPolicy;
+    if (!policy) throw new RunKernelError(503, "locked_billing_not_configured", "生产核账提交默认关闭");
+    this.productionPolicyTrue(() => policy.authorizeScope(p, s.projectId, !!record.decision));
+    if (!stored || stored.aggregate.batch.tenantId !== p.tenantId || s.tenantId !== p.tenantId || stored.aggregate.batch.projectId !== s.projectId
+      || !stored.lockedProductionImageExecution || stored.aggregate.jobs[0].id !== s.jobId) throw new RunKernelError(409, "locked_billing_task_changed", "核账实际任务不一致");
+    const history = stored.lockedProductionImageBilling ?? [], old = history.find(r => r.request.reviewId === record.request.reviewId);
+    const serialized = { ...stored, jobReservations: [...stored.jobReservations.entries()], jobScenarios: [...stored.jobScenarios.entries()] };
+    const baseline = history.length ? assertLockedProductionBillingState(serialized) : serialized;
+    if (imageSnapshotFingerprint(lockedProductionBillingSnapshot(baseline)) !== record.snapshotFingerprint
+      || imageSnapshotFingerprint(s) !== record.snapshotFingerprint) throw new RunKernelError(409, "locked_billing_task_changed", "完整原核账期待不一致");
+    if (old) {
+      if (!record.decision || old.status !== "pending" || record.decision.request.expectedRecordFingerprint !== imageSnapshotFingerprint(old)
+        || imageSnapshotFingerprint({ ...record, status: "pending", decision: undefined }) !== imageSnapshotFingerprint(old)) throw new RunKernelError(409, "locked_billing_conflict", "核账或审批不可覆写");
+    } else if (record.decision || history.length >= 16 || (history.length && history.at(-1)!.status !== "rejected")
+      || stored.aggregate.jobs[0].status !== "billing_unknown") throw new RunKernelError(409, "locked_billing_conflict", "核账已结算或仍待独立审批");
+    if (p.actorId !== (record.decision?.decidedBy ?? record.reviewedBy)) throw new RunKernelError(403, "locked_billing_permission_denied", "核账操作者不一致");
+    const amount = record.request.actualCostMinor, job = stored.aggregate.jobs[0], batch = stored.aggregate.batch, at = record.decision?.decidedAt ?? record.reviewedAt;
+    const budget = this.requireBudget(batch.tenantId, batch.projectId);
+    if (record.status === "settled" && amount - s.reservedMinor > budget.limitMinor - budget.reservedMinor - budget.spentMinor)
+      throw new RunKernelError(409, "locked_billing_budget_exceeded", "项目预算不足，原预留与待审批记录保持");
+    if (!Number.isSafeInteger(budget.spentMinor + amount)) throw new RunKernelError(409, "locked_billing_amount_invalid", "保护费用整数越界");
+    this.productionPolicyTrue(() => policy.validateCommit(p, structuredClone(record)));
+    const records = old ? history.map(r => r === old ? record : r) : [...history, record];
+    stored.lockedProductionImageBilling = records; stored.lockedProductionImageBillingFingerprint = imageSnapshotFingerprint(records);
+    stored.aggregate.lockedProductionBilling = lockedProductionBillingSummary(records);
+    const event = (type: RunAuditEvent["eventType"], metadata: Record<string, string>) => ({ ...this.audit(batch, p.actorId, type, metadata), createdAt: at });
+    if (!old) stored.aggregate.audit.push(event("locked-billing-reviewed", { jobId: job.id, reviewId: record.request.reviewId, recordFingerprint: imageSnapshotFingerprint(record) }));
+    else stored.aggregate.audit.push(event(record.decision!.request.decision === "approve" ? "locked-billing-approved" : "locked-billing-rejected",
+      { jobId: job.id, reviewId: record.request.reviewId, decisionId: record.decision!.request.decisionId, recordFingerprint: imageSnapshotFingerprint(record) }));
+    if (record.status === "settled") {
+      const resolutionId = record.decision?.request.decisionId ?? record.request.reviewId;
+      budget.reservedMinor -= s.reservedMinor; budget.spentMinor += amount; stored.reservedMinor = 0; stored.actualMinor = amount; stored.jobReservations.clear();
+      this.replaceJob(stored.aggregate, { ...job, status: stored.lockedProductionImageArtifact ? "succeeded" : "failed", actualCostMinor: amount,
+        failureCode: stored.lockedProductionImageArtifact ? undefined : "locked-billing-settled-no-artifact", billingResolutionId: resolutionId,
+        billingResolvedBy: p.actorId, billingResolvedAt: at, billingEvidenceRef: record.request.evidence.evidenceRef });
+      batch.maxCostMinor = Math.max(s.maxCostMinor, amount); batch.status = stored.lockedProductionImageArtifact ? "succeeded" : "failed";
+      stored.aggregate.ledger.push({ id: `ledger-${randomUUID()}`, tenantId: p.tenantId, projectId: batch.projectId, batchId: batch.id, jobId: job.id,
+        imageMode: record.mode, currency: s.currency, estimatedMinor: job.estimatedCostMinor, reservedMinor: 0, actualMinor: amount, settlement: amount ? "settled" : "released", createdAt: at });
+      stored.aggregate.audit.push(event("locked-billing-settled", { jobId: job.id, resolutionId, recordFingerprint: imageSnapshotFingerprint(record),
+        actualMinor: String(amount), releasedMinor: String(Math.max(0, s.reservedMinor - amount)), additionalMinor: String(Math.max(0, amount - s.reservedMinor)) }));
+    }
+    this.assertStateConsistent(); this.persist(); return this.copy(stored.aggregate);
+  }
+
   private finalizeBilling(stored: StoredBatch, job: RunJob, principal: RunPrincipal, request: ResolveBillingUnknownRequest): RunBatchAggregate {
     const batch = stored.aggregate.batch;
     const actualCostMinor = request.resolution === "charged" ? request.actualCostMinor : 0;
@@ -1921,6 +1976,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         lockedProductionImageResultFingerprint: serialized.lockedProductionImageResultFingerprint,
         lockedProductionImageArtifact: serialized.lockedProductionImageArtifact,
         lockedProductionImageArtifactFingerprint: serialized.lockedProductionImageArtifactFingerprint,
+        lockedProductionImageBilling: serialized.lockedProductionImageBilling,
+        lockedProductionImageBillingFingerprint: serialized.lockedProductionImageBillingFingerprint,
         productionImageLeases: serialized.productionImageLeases,
         productionImageDispatchIntent: serialized.productionImageDispatchIntent,
         productionImageDispatchIntentFingerprint: serialized.productionImageDispatchIntentFingerprint,
@@ -2027,6 +2084,8 @@ export class InMemoryRunKernel implements RunKernelPort {
         ...(stored.lockedProductionImageResultFingerprint ? { lockedProductionImageResultFingerprint: stored.lockedProductionImageResultFingerprint } : {}),
         ...(stored.lockedProductionImageArtifact ? { lockedProductionImageArtifact: stored.lockedProductionImageArtifact } : {}),
         ...(stored.lockedProductionImageArtifactFingerprint ? { lockedProductionImageArtifactFingerprint: stored.lockedProductionImageArtifactFingerprint } : {}),
+        ...(stored.lockedProductionImageBilling ? { lockedProductionImageBilling: stored.lockedProductionImageBilling } : {}),
+        ...(stored.lockedProductionImageBillingFingerprint ? { lockedProductionImageBillingFingerprint: stored.lockedProductionImageBillingFingerprint } : {}),
         ...(stored.productionImageLeases ? { productionImageLeases: stored.productionImageLeases } : {}),
         ...(stored.productionImageDispatchIntent ? { productionImageDispatchIntent: stored.productionImageDispatchIntent } : {}),
         ...(stored.productionImageDispatchIntentFingerprint ? { productionImageDispatchIntentFingerprint: stored.productionImageDispatchIntentFingerprint } : {}),
@@ -2060,6 +2119,8 @@ export class InMemoryRunKernel implements RunKernelPort {
       const budgetKey = scopedProjectKey(batch.tenantId, batch.projectId);
       const budget = this.budgets.get(budgetKey);
       if (!budget || budget.currency !== batch.currency) throw new Error("任务内核快照中的批次预算归属无效");
+      if ((stored.lockedProductionImageBilling || stored.lockedProductionImageBillingFingerprint || stored.aggregate.lockedProductionBilling)
+        && !stored.lockedProductionImageExecution) throw new Error("保护费用缺少独立完整保护确认");
       if (batch.tool === "product-retouch") {
         if (stored.lockedProductionImageExecution || stored.lockedProductionImageLeases || stored.lockedProductionImageDispatchIntent || stored.lockedProductionImageDispatchIntentFingerprint || stored.lockedProductionImageAttempt || stored.lockedProductionImageAttemptFingerprint || stored.lockedProductionImageResult || stored.lockedProductionImageResultFingerprint || stored.lockedProductionImageArtifact || stored.lockedProductionImageArtifactFingerprint) throw new Error("模拟任务不可含锁区证据");
         if (batch.imageMode || stored.productionImageExecution || stored.productionImageLeases || stored.productionImageDispatchIntent || stored.productionImageDispatchIntentFingerprint || stored.productionImageAttempt || stored.productionImageAttemptFingerprint || stored.productionImageResult || stored.productionImageResultFingerprint || stored.productionImageArtifact || stored.productionImageArtifactFingerprint || stored.imageExecution || stored.imageDispatchIntent || stored.imageDispatchIntentFingerprint || stored.imageFixtureAttempt || stored.imageFixtureAttemptFingerprint
@@ -2178,13 +2239,13 @@ export class InMemoryRunKernel implements RunKernelPort {
           job.billingEvidenceRef,
         ].filter((value) => value !== undefined).length;
         if ((billingResolutionFieldCount !== 0 && billingResolutionFieldCount !== 4)
-          || (billingResolutionFieldCount === 4 && job.status !== "failed" && !(job.status === "succeeded" && (stored.imageTaskArtifact || stored.productionImageArtifact)))) {
+          || (billingResolutionFieldCount === 4 && job.status !== "failed" && !(job.status === "succeeded" && (stored.imageTaskArtifact || stored.productionImageArtifact || stored.lockedProductionImageArtifact)))) {
           throw new Error("任务内核快照中的计费核账状态不完整");
         }
         if (billingResolutionFieldCount === 4) {
           const resolutionEvent = stored.aggregate.audit.find((event) => event.metadata.jobId === job.id
             && event.metadata.resolutionId === job.billingResolutionId
-            && ["billing-resolved-charged", "billing-resolved-not-charged", "production-billing-settled"].includes(event.eventType));
+            && ["billing-resolved-charged", "billing-resolved-not-charged", "production-billing-settled", "locked-billing-settled"].includes(event.eventType));
           if (!resolutionEvent) throw new Error("任务内核快照缺少计费核账审计");
         }
       }

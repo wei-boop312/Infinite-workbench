@@ -4,6 +4,7 @@ export { LockedImagePixelDraftSchema, type LockedImagePixelDraft } from "./locke
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";
 import { ConfirmProductionImagePreparationSchema, FixtureProductionImagePricingSchema, ProductionImagePricingSchema, ProductionImagePublicPricingSchema, ProductionImageTaskIdentitySchema, ProductionImageRequestDraftSchema, ProductionImageExecutionRequestSchema, PreparedProductionImageProtocolSnapshotSchema, ProductionImageBatchIdSchema } from "./productionImagePricing.ts";
 import { ProductionImageBillingRecordSchema, ProductionImageBillingSummarySchema } from "./productionImageBilling.ts";
+import { LockedProductionImageBillingRecordSchema, LockedProductionImageBillingSummarySchema } from "./lockedProductionImageBilling.ts";
 
 export * from "./imageProviders.ts";
 export * from "./productionImagePricing.ts";
@@ -733,6 +734,10 @@ export const RunAuditEventSchema = z.object({
     "production-billing-approved",
     "production-billing-rejected",
     "production-billing-settled",
+    "locked-billing-reviewed",
+    "locked-billing-approved",
+    "locked-billing-rejected",
+    "locked-billing-settled",
     "image-artifact-verified",
     "image-artifact-rejected",
     "job-succeeded",
@@ -772,6 +777,7 @@ export const RunBatchAggregateSchema = z.object({
   audit: z.array(RunAuditEventSchema),
   billingOverages: z.array(BillingOverageSchema).default([]),
   productionBilling: z.array(ProductionImageBillingSummarySchema).max(16).optional(),
+  lockedProductionBilling: z.array(LockedProductionImageBillingSummarySchema).min(1).max(16).optional(),
 }).strict().refine((a) => a.jobs.every((j) => j.imageMode === a.batch.imageMode) && a.ledger.every((l) => l.imageMode === a.batch.imageMode),
   { message: "聚合的生产命名空间不一致" });
 
@@ -1164,6 +1170,8 @@ export const RunKernelStoredBatchSchema = z.object({
   lockedProductionImageResultFingerprint: ProductionEvidenceHash.optional(),
   lockedProductionImageArtifact: LockedProductionImageArtifactSchema.optional(),
   lockedProductionImageArtifactFingerprint: ProductionEvidenceHash.optional(),
+  lockedProductionImageBilling: z.array(LockedProductionImageBillingRecordSchema).min(1).max(16).optional(),
+  lockedProductionImageBillingFingerprint: ProductionEvidenceHash.optional(),
   productionImageExecution: ConfirmedProductionImageExecutionSchema.optional(),
   productionImageLeases: z.array(ProductionImageLeaseEvidenceSchema).min(1).max(512).optional(),
   productionImageDispatchIntent: ProductionImageDispatchIntentSchema.optional(),

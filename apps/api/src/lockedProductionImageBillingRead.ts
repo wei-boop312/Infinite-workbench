@@ -9,6 +9,7 @@ import { assertLockedProductionImageArtifact } from "./lockedProductionImageArti
 import { assetMetadataFingerprint } from "./assetMetadata";
 import { validateLockedProductionImagePreparationAssetPolicy } from "./imageAssetPolicy";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
+import { assertLockedProductionBillingState, lockedProductionBillingSnapshot } from "./lockedProductionImageBillingIntegrity";
 
 function reject(): never { throw new RunKernelError(409, "locked_billing_evidence_changed", "保护核账证据不一致，原预留保持"); }
 // Internal actual SQL read. Caller supplies independent current permissions and
@@ -18,7 +19,11 @@ export function readLockedProductionBillingEvidence(store: SqliteRunKernelStateS
   mode: LockedProductionImageBillingSnapshot["mode"], check: () => number, metadataLimit: number) {
   check(); const snapshot = store.load(); check(); if (!snapshot) reject(); kernel.validateProductionBillingSnapshot(snapshot);
   const catalog = store.loadCatalog(); check();
-  const s = snapshot.batches.find(s => s.aggregate.batch.id === batch && s.aggregate.batch.tenantId === p.tenantId && s.aggregate.batch.projectId === project),
+  const actual = snapshot.batches.find(s => s.aggregate.batch.id === batch && s.aggregate.batch.tenantId === p.tenantId && s.aggregate.batch.projectId === project);
+  // First validate current actual fees/terminal state/budget, then reconstruct
+  // immutable pre-fee evidence. Never use this projection as current authority.
+  const s = actual && (actual.lockedProductionImageBilling || actual.lockedProductionImageBillingFingerprint || actual.aggregate.lockedProductionBilling
+    ? assertLockedProductionBillingState(actual) : actual),
     e = s?.lockedProductionImageExecution, j = s?.aggregate.jobs[0], l = s?.lockedProductionImageLeases?.at(-1), i = s?.lockedProductionImageDispatchIntent;
   if (!s || !e || e.mode !== mode || !j || j.id !== job || j.status !== "billing_unknown" || !j.finishedAt || !j.failureCode || !l || !i) reject();
   assertLockedConfirmation(e);
@@ -77,8 +82,11 @@ export function readLockedProductionBillingEvidence(store: SqliteRunKernelStateS
     artifactFingerprint: s.lockedProductionImageArtifactFingerprint ?? null, outputAssetIds: j.outputAssetIds, unknownAt: j.finishedAt, unknownReason: j.failureCode,
     currency: q.currency, reservedMinor: s.reservedMinor, maxCostMinor: q.maxCostMinor,
     estimate: q.source === "manual-budget" ? { state: "unknown" } : { state: "known", estimatedCostMinor: q.estimatedCostMinor } });
+  if (fp(view) !== fp(lockedProductionBillingSnapshot(s))) reject();
+  const settledAt = actual?.lockedProductionImageBilling?.at(-1)?.decision?.decidedAt ?? actual?.lockedProductionImageBilling?.at(-1)?.reviewedAt;
+  if (settledAt && check() < Date.parse(settledAt)) reject();
   if (Buffer.byteLength(JSON.stringify(view)) > 512 * 1024) reject();
   const snapshotFingerprint = fp(snapshot), catalogFingerprint = fp(catalog);
   if (fp(store.load()) !== snapshotFingerprint || fp(store.loadCatalog()) !== catalogFingerprint) reject(); check();
-  return { view, snapshotFingerprint, catalogFingerprint };
+  return { view, snapshotFingerprint, catalogFingerprint, records: structuredClone(actual?.lockedProductionImageBilling ?? []) };
 }
