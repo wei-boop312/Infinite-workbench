@@ -177,8 +177,8 @@ const uploadManager = new ResumableUploadManager(mockObjectStorage);
 
 type SaveState = "loading" | "dirty" | "saving" | "saved" | "conflict" | "error";
 
-type ProductionAppProps = { productionImagePreparation?: ProductionImageUiScope; productionGeneratedRead?: ProductionGeneratedReadScope; lockedProductionGeneratedRead?: LockedProductionGeneratedReadScope };
-function CanvasKernel({ productionImagePreparation, productionGeneratedRead, lockedProductionGeneratedRead }: ProductionAppProps) {
+type ProductionAppProps = { productionImagePreparation?: ProductionImageUiScope; productionGeneratedRead?: ProductionGeneratedReadScope; lockedProductionGeneratedRead?: LockedProductionGeneratedReadScope; lockedProductionImagePreparation?: import("@canvas/contracts").LockedProductionImageUiScope };
+function CanvasKernel({ productionImagePreparation, productionGeneratedRead, lockedProductionGeneratedRead, lockedProductionImagePreparation }: ProductionAppProps) {
   const [history, dispatch] = useReducer(historyReducer, initialSnapshot, createHistoryState);
   const [viewport, setViewport] = useState<Viewport>(initialViewport);
   const [importedProjects, setImportedProjects] = useState<ImportedProject[]>(loadImportedProjects);
@@ -1331,7 +1331,7 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead, loc
         />
 
         {runPanelOpen && <Suspense fallback={<aside className="inspector" role="status">正在加载任务面板…</aside>}>
-          <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots} productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead} lockedProductionGeneratedRead={lockedProductionGeneratedRead}
+          <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots} productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead} lockedProductionGeneratedRead={lockedProductionGeneratedRead} lockedProductionImagePreparation={lockedProductionImagePreparation}
             missingOriginalAssetIds={missingOriginalAssetIds} onClose={() => setRunPanelOpen(false)}
             onBatches={rememberRunReferences} onAddResults={addRunResults} onAddGenerated={addGeneratedResult} onAddProduction={addProductionResult} onAddLockedProduction={addLockedProductionResult} onCachedAsset={(asset) => {
               if (asset.projectId === activeProjectIdRef.current) setAssetCatalogRevision((revision) => revision + 1);
@@ -1471,8 +1471,8 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead, loc
   );
 }
 
-export default function App({ productionImagePreparation, productionGeneratedRead, lockedProductionGeneratedRead }: ProductionAppProps = {}) {
+export default function App({ productionImagePreparation, productionGeneratedRead, lockedProductionGeneratedRead, lockedProductionImagePreparation }: ProductionAppProps = {}) {
   // Only trusted host code supplies this optional config. No query, environment,
   // window-global or localStorage switch; the daily main entry omits it.
-  return <ReactFlowProvider><CanvasKernel productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead} lockedProductionGeneratedRead={lockedProductionGeneratedRead} /></ReactFlowProvider>;
+  return <ReactFlowProvider><CanvasKernel productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead} lockedProductionGeneratedRead={lockedProductionGeneratedRead} lockedProductionImagePreparation={lockedProductionImagePreparation} /></ReactFlowProvider>;
 }

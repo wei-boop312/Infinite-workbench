@@ -5,7 +5,7 @@ import { CreateImagePreparationSchema, FixtureProductionImagePricingSchema, Lock
   type CreateImagePreparation, type LockedProductionImagePreparationRecord, type LockedImagePreparationPolicy, type VerifiedImage } from "@canvas/contracts";
 import { imageSnapshotFingerprint, validateLockedProductionImagePreparationRequest } from "./imageProviderContract";
 import { constraintContentChecksum, validateLockedProductionImagePreparationAssetPolicy } from "./imageAssetPolicy";
-import { assetMetadataFingerprint } from "./assetMetadata";
+import { assetMetadataFingerprint, verifiedImageMatchesRegistration } from "./assetMetadata";
 import { decodeStaticImagePixels } from "./staticImageDecoder";
 import { imageTaskMetadataBytes } from "./imageTaskMetadata";
 import { assertLockedProductionImageArtifact } from "./lockedProductionImageArtifactIntegrity";
@@ -118,7 +118,7 @@ class LockedPreparationCore {
       || constraint.outputSpec.format !== s.parameters.outputFormat || constraint.outputSpec.width !== s.parameters.size.width || constraint.outputSpec.height !== s.parameters.size.height
       || Math.max(constraint.outputSpec.width, constraint.outputSpec.height) > 8192 || constraint.outputSpec.width * constraint.outputSpec.height > 16_000_000) reject("locked_preparation_constraint_mismatch");
     const receipts = ids.map((id, index) => { guard(); const r = store.loadVerifiedImage(p.tenantId, s.projectId, id); guard();
-      if (!r || r.registeredMetadataSha256 !== assetMetadataFingerprint(assets[index]!) || r.registeredMetadataSha256 !== assetMetadataFingerprint(r.asset)) reject("locked_preparation_input_changed"); return r; });
+      if (!r || !verifiedImageMatchesRegistration(r, assets[index]!)) reject("locked_preparation_input_changed"); return r; });
     const source = receipts[0], mask = receipts.at(-1)!;
     if (source.asset.purpose !== "source" || source.sourceChecksumSha256 !== undefined || mask.asset.purpose !== "mask" || mask.asset.mimeType !== "image/png"
       || mask.asset.sourceAssetId !== source.asset.id || mask.sourceChecksumSha256 !== source.checksumSha256 || mask.asset.id === source.asset.id

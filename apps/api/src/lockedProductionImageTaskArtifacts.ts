@@ -79,9 +79,12 @@ class LockedArtifactCore {
     const work = (async () => {
       let raw: Buffer | undefined, output: Buffer | undefined, wire: Buffer | undefined;
       const originals: { receipt: import("@canvas/contracts").VerifiedImage; body: Buffer }[] = [];
+      let registeredAssets: { source: import("@canvas/contracts").Asset; mask: import("@canvas/contracts").Asset } | undefined;
       try {
         const initial = o.stateStore.transaction(() => {
           const c = inspect(); if (c.artifact) return c;
+          const policy = c.execution.preparation.protectionPolicy, catalog = o.stateStore.loadCatalog()!.projects.find(v => v.projectId === project)!;
+          registeredAssets = structuredClone({ source: catalog.assets.find(a => a.id === policy.source.asset.id)!, mask: catalog.assets.find(a => a.id === policy.mask.asset.id)! });
           const refs = [...c.execution.protocol.request.inputs, c.execution.protocol.request.mask!];
           if (refs.some(r => r.byteSize > 30 * 1024 * 1024) || refs.reduce((n, r) => n + r.byteSize, 0) > 64 * 1024 * 1024) reject("locked_artifact_inputs_too_large", 413);
           for (const ref of refs) { inspect(); const image = o.stateStore.loadVerifiedImageBytes(p.tenantId, project, ref.assetId);
@@ -107,7 +110,7 @@ class LockedArtifactCore {
           || (e.protocol.request.parameters.background === "transparent" && !decoded.hasTransparency) || (e.protocol.request.parameters.background === "opaque" && decoded.hasTransparency)) reject("locked_artifact_output_invalid", 422);
         const source = originals.find(i => i.receipt.asset.id === policy.source.asset.id)!, mask = originals.find(i => i.receipt.asset.id === policy.mask.asset.id)!;
         // Unlike none-only ingestion, retain actual source/mask originals until the complete comparison finishes.
-        const proof = await verifyLockedImagePixels({ protection: "pixel-exact", source: source.receipt, mask: mask.receipt,
+        const proof = await verifyLockedImagePixels({ protection: "pixel-exact", source: source.receipt, mask: mask.receipt, registeredAssets,
           constraint: e.preparation.constraint, constraintChecksumSha256: e.protocol.request.constraintChecksumSha256,
           sourceBody: source.body, maskBody: mask.body, candidate: { body: output, mimeType: mime, checksumSha256: parsed.candidate.checksumSha256 } },
           { signal: controller.signal, clock, timeoutMs: timeout }); inspect();

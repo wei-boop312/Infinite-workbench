@@ -9,12 +9,15 @@ import ImagePreparationPanel from "./ImagePreparationPanel";
 import ProductionImagePreparationPanel from "./ProductionImagePreparationPanel";
 import ProductionGeneratedAssetPanel from "./ProductionGeneratedAssetPanel";
 import LockedProductionGeneratedAssetPanel from "./LockedProductionGeneratedAssetPanel";
+import LockedProductionImagePreparationPanel from "./LockedProductionImagePreparationPanel";
+import type { LockedProductionImageUiScope } from "@canvas/contracts";
 import GeneratedImageResult from "./GeneratedImageResult";
 import type { ProductionGeneratedAssetClient } from "../runs/productionGeneratedAssetClient";
 import type { LockedProductionGeneratedAssetClient } from "../runs/lockedProductionGeneratedAssetClient";
 import "./RunPanel.css";
 
 type Props = {
+  lockedProductionImagePreparation?: LockedProductionImageUiScope;
   productionImagePreparation?: ProductionImageUiScope;
   productionGeneratedRead?: ProductionGeneratedReadScope;
   lockedProductionGeneratedRead?: LockedProductionGeneratedReadScope;
@@ -61,10 +64,12 @@ export default function RunPanel(props: Props) {
   // Explicit production UI never mounts the legacy aggregate/mock controller.
   // In particular it cannot list execution keys/leases or run legacy actions.
   if (props.productionImagePreparation && props.productionGeneratedRead && (props.productionImagePreparation.tenantId !== props.productionGeneratedRead.tenantId || props.productionImagePreparation.mode !== props.productionGeneratedRead.mode)) throw new Error("可信生产 UI 配置范围不一致。");
-  const scopes = [props.productionImagePreparation, props.productionGeneratedRead, props.lockedProductionGeneratedRead].filter(Boolean);
+  const scopes = [props.productionImagePreparation, props.productionGeneratedRead, props.lockedProductionGeneratedRead, props.lockedProductionImagePreparation].filter(Boolean);
   if (scopes.some(s => s!.tenantId !== scopes[0]!.tenantId || s!.mode !== scopes[0]!.mode)) throw new Error("可信生产 UI 配置范围不一致。");
-  if (props.productionImagePreparation || props.productionGeneratedRead || props.lockedProductionGeneratedRead) return <aside className="run-panel" aria-label="任务与预算" onPointerDown={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+  if (props.productionImagePreparation || props.productionGeneratedRead || props.lockedProductionGeneratedRead || props.lockedProductionImagePreparation) return <aside className="run-panel" aria-label="任务与预算" onPointerDown={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
     <header><div><span>独立生产合同 · 真实执行关闭</span><strong>任务与预算</strong></div><button aria-label="关闭任务面板" onClick={props.onClose}>×</button></header>
+    {props.lockedProductionImagePreparation && <LockedProductionImagePreparationPanel key={`${props.lockedProductionImagePreparation.tenantId}:${props.lockedProductionImagePreparation.mode}:${props.projectId}`}
+      scope={props.lockedProductionImagePreparation} projectId={props.projectId} assets={props.assets} constraints={props.constraints} missingOriginalAssetIds={props.missingOriginalAssetIds} disabled={false} />}
     {props.productionImagePreparation && <ProductionImagePreparationPanel key={`${props.productionImagePreparation.tenantId}:${props.productionImagePreparation.mode}:${props.projectId}`}
       scope={props.productionImagePreparation} projectId={props.projectId} assets={props.assets} constraints={props.constraints} missingOriginalAssetIds={props.missingOriginalAssetIds} disabled={false} />}
     {props.productionGeneratedRead && <ProductionGeneratedAssetPanel key={`${props.productionGeneratedRead.tenantId}:${props.productionGeneratedRead.mode}:${props.projectId}`}

@@ -919,6 +919,16 @@ export const ProductionImageRecoverySchema = z.object({
 }).strict().refine(p => p.stage === "preparing" ? !p.preparationId && !p.preparationFingerprint && !p.pricingFingerprint
   : Boolean(p.preparationId && p.preparationFingerprint && p.pricingFingerprint), { message: "生产只读恢复指针不完整" });
 export type ProductionImageRecovery = z.infer<typeof ProductionImageRecoverySchema>;
+export const LockedProductionImageUiScopeSchema = z.object({ lockedPreparationUiEnabled: z.literal(true), tenantId: IdSchema, mode: ProductionPublicMode }).strict();
+export type LockedProductionImageUiScope = z.infer<typeof LockedProductionImageUiScopeSchema>;
+// Independent v2 READ-ONLY pointer. No selection, monetary value or send permission.
+export const LockedProductionImageRecoverySchema = z.object({
+  schemaVersion: z.literal(2), tenantId: IdSchema, projectId: IdSchema, mode: ProductionPublicMode,
+  actionId: IdSchema, stage: z.enum(["preparing", "prepared", "confirm-submitted"]),
+  preparationId: IdSchema.optional(), preparationFingerprint: ProductionPublicHash.optional(), pricingFingerprint: ProductionPublicHash.optional(), protectionPolicyFingerprint: ProductionPublicHash.optional(),
+}).strict().refine(p => p.stage === "preparing" ? !p.preparationId && !p.preparationFingerprint && !p.pricingFingerprint && !p.protectionPolicyFingerprint
+  : Boolean(p.preparationId && p.preparationFingerprint && p.pricingFingerprint && p.protectionPolicyFingerprint), { message: "保护只读恢复指针不完整" });
+export type LockedProductionImageRecovery = z.infer<typeof LockedProductionImageRecoverySchema>;
 // A read-only recovery pointer; it contains no price or executable authorization.
 export const ImageConfirmationRecoverySchema = z.object({
   schemaVersion: z.literal(1), projectId: IdSchema, preparationId: IdSchema, preparationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),

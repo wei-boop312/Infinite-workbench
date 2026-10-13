@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { ConstraintSnapshotSchema, LockedImagePixelDraftSchema, VerifiedImageSchema, type ConstraintSnapshot, type VerifiedImage, type LockedImagePixelDraft } from "@canvas/contracts";
-import { assetMetadataFingerprint } from "./assetMetadata";
+import { ConstraintSnapshotSchema, LockedImagePixelDraftSchema, VerifiedImageSchema, type ConstraintSnapshot, type VerifiedImage, type LockedImagePixelDraft, type Asset } from "@canvas/contracts";
+import { verifiedImageMatchesRegistration } from "./assetMetadata";
 import { decodeStaticImagePixels, MAX_STATIC_IMAGE_EDGE, MAX_STATIC_IMAGE_PIXELS } from "./staticImageDecoder";
 import { RunKernelError } from "./runKernel";
 
@@ -10,6 +10,7 @@ function reject(code: string, status = 422): never { throw new RunKernelError(st
 export interface LockedImagePixelInput {
   protection: "pixel-exact"; source: VerifiedImage; mask: VerifiedImage; constraint: ConstraintSnapshot;
   constraintChecksumSha256: string; sourceBody: Buffer; maskBody: Buffer;
+  registeredAssets?: { source: Asset; mask: Asset };
   candidate: { body: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp"; checksumSha256: string };
 }
 
@@ -37,7 +38,7 @@ export async function verifyLockedImagePixels(input: LockedImagePixelInput, opti
   const bodies: Buffer[] = [];
   const pixels: Buffer[] = [];
   const work = (async () => { try {
-    const metadata = JSON.stringify({ protection: input.protection, source: input.source, mask: input.mask, constraint: input.constraint, constraintChecksumSha256: input.constraintChecksumSha256 });
+    const metadata = JSON.stringify({ protection: input.protection, source: input.source, mask: input.mask, registeredAssets: input.registeredAssets, constraint: input.constraint, constraintChecksumSha256: input.constraintChecksumSha256 });
     if (Buffer.byteLength(metadata) > 512 * 1024) reject("image_locked_metadata_too_large");
     const frozen = JSON.parse(metadata);
     const source = VerifiedImageSchema.parse(frozen.source), mask = VerifiedImageSchema.parse(frozen.mask), c = ConstraintSnapshotSchema.parse(frozen.constraint);
@@ -48,7 +49,7 @@ export async function verifyLockedImagePixels(input: LockedImagePixelInput, opti
       || source.asset.id === mask.asset.id || source.asset.purpose !== "source" || mask.asset.purpose !== "mask"
       || mask.asset.sourceAssetId !== source.asset.id || mask.sourceChecksumSha256 !== source.checksumSha256
       || mask.asset.mimeType !== "image/png" || source.sourceChecksumSha256 !== undefined
-      || source.registeredMetadataSha256 !== assetMetadataFingerprint(source.asset) || mask.registeredMetadataSha256 !== assetMetadataFingerprint(mask.asset)) reject("image_locked_receipt_mismatch");
+      || !verifiedImageMatchesRegistration(source, frozen.registeredAssets?.source ?? source.asset) || !verifiedImageMatchesRegistration(mask, frozen.registeredAssets?.mask ?? mask.asset)) reject("image_locked_receipt_mismatch");
     if (!c.editableRegions.length || c.editableRegions.some(region => region.maskAssetId !== mask.asset.id)
       || new Set(c.editableRegions.map(region => region.id)).size !== c.editableRegions.length) reject("image_locked_mask_unbound");
     const width = source.asset.width, height = source.asset.height;
