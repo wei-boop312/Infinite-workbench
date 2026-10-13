@@ -20,6 +20,20 @@ export class SqliteRunKernel implements RunKernelPort {
   constructor(private readonly options: Options) { this.run(() => undefined); }
   usesStateStore(store: SqliteRunKernelStateStore): boolean { return this.options.stateStore === store; }
 
+  // No SQL, authority callback or lease policy. An independently scoped billing
+  // reader keeps actual storage/config identities fixed through its final read.
+  captureLockedProductionBillingReadConfiguration(store: SqliteRunKernelStateStore): () => void {
+    if (store !== this.options.stateStore) throw new RunKernelError(403, "locked_billing_store_mismatch", "保护核账必须同一实际存储");
+    const configuration = () => ({ budgets: this.options.budgets, leaseDurationMs: this.options.leaseDurationMs, jobTimeoutMs: this.options.jobTimeoutMs,
+      unitEstimateMinor: this.options.unitEstimateMinor, unitActualMinor: this.options.unitActualMinor, maxConcurrentJobs: this.options.maxConcurrentJobs,
+      projectLimits: this.options.projectLimits, providerLimits: this.options.providerLimits });
+    const hash = imageSnapshotFingerprint(configuration()), clock = this.options.clock, authorizer = this.options.authorizer;
+    return () => {
+      if (store !== this.options.stateStore || clock !== this.options.clock || authorizer !== this.options.authorizer || hash !== imageSnapshotFingerprint(configuration()))
+        throw new RunKernelError(409, "locked_billing_configuration_changed", "保护核账实际配置已变化");
+    };
+  }
+
   commitProductionImageBilling(p: RunPrincipal, record: ProductionImageBillingRecord) {
     const policy = this.options.productionImageBillingPolicy;
     if (!policy) throw new RunKernelError(503, "production_image_billing_not_configured", "生产核账默认关闭");

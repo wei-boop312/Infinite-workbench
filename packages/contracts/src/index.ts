@@ -8,6 +8,7 @@ import { ProductionImageBillingRecordSchema, ProductionImageBillingSummarySchema
 export * from "./imageProviders.ts";
 export * from "./productionImagePricing.ts";
 export * from "./productionImageBilling.ts";
+export * from "./lockedProductionImageBilling.ts";
 
 export const CURRENT_CANVAS_SCHEMA_VERSION = 2 as const;
 
