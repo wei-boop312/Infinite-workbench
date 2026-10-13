@@ -48,7 +48,8 @@ for(const protocol of ["openai","openai-compatible"] as const)for(const manual o
   await f.cache();expect((await cached(page,f.id)).marker).toEqual(c.marker);await f.panel.getByRole("button",{name:"重新核验保护原图缓存"}).click();await expect(f.panel.getByRole("status")).toContainText("已核验");
   await expect(f.panel.getByRole("article")).toContainText(manual?"未知（不是零费用）":"CNY 25 最小单位");await expect(f.panel.getByRole("article")).toContainText("原锁区 1 像素");
   expect(await page.locator(".react-flow__node").count()).toBe(nodes);expect(f.t.store.load()).toEqual(f.before);expect(f.requests.every(r=>r.method==="GET"&&/\/(lineage|content)$/.test(r.path))).toBe(true);
-  await expect(f.panel.getByRole("button",{name:/回画布|确认|执行|核账/})).toHaveCount(0);
+  await expect(f.panel.getByRole("button",{name:/确认|执行|核账/})).toHaveCount(0);
+  await expect(f.panel.getByRole("button",{name:"核验保护原图并回画布",exact:true})).toBeVisible();
   await page.reload();await page.getByRole("button",{name:"资产库 1",exact:true}).click();const library=page.getByRole("complementary",{name:"项目资产库"});await expect(library.locator("img")).toBeVisible();await expect(library.getByRole("button",{name:"添加到画布"})).toBeDisabled();
   expect(f.t.store.load()).toEqual(f.before);
 });

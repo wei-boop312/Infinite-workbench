@@ -1,4 +1,5 @@
 import { assertProductionNodeHistory } from "./productionHistory.ts";
+import { assertLockedProductionNodeHistory } from "./lockedProductionHistory.ts";
 // Portable historical relationships, never a server permission or execution token.
 export type GeneratedCanvasHistory = {
   version: 1;
@@ -49,6 +50,7 @@ export function parseGeneratedCanvasHistory(value: unknown): GeneratedCanvasHist
   return structuredClone(v) as GeneratedCanvasHistory;
 }
 export function assertGeneratedNodeHistory(data: Record<string, unknown>, projectId: string): void {
+  assertLockedProductionNodeHistory(data, projectId);
   assertProductionNodeHistory(data, projectId);
   if (data.generatedHistory === undefined) return;
   const history = parseGeneratedCanvasHistory(data.generatedHistory);

@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { LockedProductionGeneratedReadScopeSchema, type Asset, type LockedProductionGeneratedAssetLineage, type LockedProductionGeneratedReadScope } from "@canvas/contracts";
 import { LockedProductionGeneratedAssetClient } from "../runs/lockedProductionGeneratedAssetClient";
 const amount = (n: number, currency: string) => `${currency} ${n} 最小单位`;
-export default function LockedProductionGeneratedAssetPanel({ scope: input, projectId, onCachedAsset }: {
+export default function LockedProductionGeneratedAssetPanel({ scope: input, projectId, onCachedAsset, onAddLockedProduction }: {
   scope: LockedProductionGeneratedReadScope; projectId: string; onCachedAsset: (asset: Asset) => void;
+  onAddLockedProduction: (client: LockedProductionGeneratedAssetClient, assetId: string, signal: AbortSignal) => Promise<void>;
 }) {
   const scope = LockedProductionGeneratedReadScopeSchema.parse(input), [id, setId] = useState(""), [busy, setBusy] = useState(false);
   const [view, setView] = useState<LockedProductionGeneratedAssetLineage | null>(null), [error, setError] = useState(""), [notice, setNotice] = useState("");
@@ -11,12 +12,14 @@ export default function LockedProductionGeneratedAssetPanel({ scope: input, proj
   useEffect(() => { const c = new AbortController(); abort.current = c; client.current = new LockedProductionGeneratedAssetClient(scope, c.signal);
     return () => { c.abort(); client.current = null; abort.current = null; };
   }, [projectId, scope.tenantId, scope.mode]);
-  const run = async (kind: "lineage" | "cache" | "verify") => {
+  const run = async (kind: "lineage" | "cache" | "verify" | "return") => {
     const api = client.current, signal = abort.current?.signal, assetId = id.trim(); if (!api || !signal || pending.current) return;
     const current = () => client.current === api && !signal.aborted;
     pending.current = true; setBusy(true); setError(""); setNotice(""); setView(null);
     try {
-      if (kind === "cache") { const asset = await api.cache(projectId, assetId); if (!current()) return;
+      if (kind === "return") { await onAddLockedProduction(api, assetId, signal); if (!current()) return;
+        setNotice("保护原图已受控回画布；未生成、核账或释放未知预留。");
+      } else if (kind === "cache") { const asset = await api.cache(projectId, assetId); if (!current()) return;
         onCachedAsset(asset); setNotice("保护原文件已缓存；未生成、结算或回画布。");
       } else { const latest = kind === "verify" ? (await api.verifyCached(projectId, assetId)).view : await api.lineage(projectId, assetId);
         if (!current()) return; setView(latest); setNotice(kind === "verify" ? "保护原图/代理/元数据/独立标记已核验；不是当前执行或费用许可。" : "只读原保护观察；不代表本机已缓存。"); }
@@ -25,10 +28,11 @@ export default function LockedProductionGeneratedAssetPanel({ scope: input, proj
   };
   return <section className="image-preparation" aria-label="保护原图只读缓存">
     <h3>保护原图 · 独立v2只读缓存</h3>
-    <p className="run-hint">仅可信主程序显式配置。只读已保存的保护产物，不生成、核账、释放预留或回画布。{scope.mode === "production-contract-fixture" && " 当前仅自有零费用合同夹具。"}</p>
+    <p className="run-hint">仅可信主程序显式配置。只读已保存的保护产物；回画布另核完整本机原输入和当前权限，不生成、核账或释放预留。{scope.mode === "production-contract-fixture" && " 当前仅自有零费用合同夹具。"}</p>
     <label>原产物编号<input aria-label="保护原图资产编号" maxLength={160} value={id} disabled={busy} onChange={e => { setId(e.target.value); setView(null); setNotice(""); setError(""); }} /></label>
     <div className="run-fields"><button disabled={busy || !id.trim()} onClick={() => void run("lineage")}>只读保护原图谱系</button><button disabled={busy || !id.trim()} onClick={() => void run("cache")}>缓存保护原图</button></div>
     <button disabled={busy || !id.trim()} onClick={() => void run("verify")}>重新核验保护原图缓存</button>
+    <button disabled={busy || !id.trim()} onClick={() => void run("return")}>核验保护原图并回画布</button>
     {error && <p role="alert" className="run-error">{error}</p>}{notice && <p role="status" className="run-hint">{notice}</p>}
     {view && <article className="image-preparation-summary" aria-label="保护原图谱系摘要">
       <strong>{view.image.asset.originalName} · {view.image.asset.width}×{view.image.asset.height} · {view.image.asset.mimeType}</strong>
@@ -40,7 +44,7 @@ export default function LockedProductionGeneratedAssetPanel({ scope: input, proj
       <small>保护政策 {view.protection.policyFingerprint} · 像素证据 {view.protection.pixelProofFingerprint}</small>
       <p className="run-hint">仅固定autoOrient/sRGB/RGBA8域，不代表原编码/ICC/高位深或品牌语义；没有合成或重编码原图。客户端观察、缓存或SHA不是服务器许可。</p>
       <details><summary>原冻结保护、输入与约束</summary><pre>{JSON.stringify({ protection: view.protection, request: view.requestDraft, constraint: view.constraint, transformedInputs: view.transformedInputs }, null, 2)}</pre></details>
-      <p className="run-hint">合法本机副本可离线保留，事后撤权不宣称销毁；普通添加和受保护回画布尚未开放。</p>
+      <p className="run-hint">合法本机副本可离线保留，事后撤权不宣称销毁；普通添加不能绕过独立受控回流。</p>
     </article>}
   </section>;
 }

@@ -2,6 +2,7 @@ import type { CanvasDocument } from "@canvas/contracts";
 import { assertGeneratedNodeHistory } from "./generatedHistory.ts";
 export { parseGeneratedCanvasHistory, type GeneratedCanvasHistory } from "./generatedHistory.ts";
 export { parseProductionCanvasHistory, type ProductionCanvasHistory } from "./productionHistory.ts";
+export { parseLockedProductionCanvasHistory, type LockedProductionCanvasHistory } from "./lockedProductionHistory.ts";
 
 const CURRENT_VERSION = 2;
 const NODE_TYPES = new Set(["image", "video", "text", "constraint", "tool", "output", "group", "note"]);

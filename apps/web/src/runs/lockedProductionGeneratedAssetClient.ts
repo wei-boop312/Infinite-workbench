@@ -62,4 +62,12 @@ export class LockedProductionGeneratedAssetClient {
       life.check(); return { asset: result, view: latest };
     } finally { life.close(); }
   }
+  async result(project: string, asset: string, repository: Pick<typeof assetRepository, "readLockedProductionResult"> = assetRepository) {
+    const life = new ProductionReadLifetime(this.signal, "production-cache");
+    try { const view = await this.readLineage(project, asset, life), snapshot = await life.wait(repository.readLockedProductionResult(view, life.signal));
+      const latest = await this.readLineage(project, asset, life);
+      if (lockedProductionCacheIdentity(latest) !== lockedProductionCacheIdentity(view)) throw new Error("保护回流完整冻结关系漂移。");
+      life.check(); return { ...snapshot, view: latest };
+    } finally { life.close(); }
+  }
 }

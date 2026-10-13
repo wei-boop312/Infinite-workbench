@@ -1,5 +1,7 @@
 # 6D9C 独立生产原图受控回画布
 
+2026-10-14 03:49另增[B9C严格v2保护受控回流](locked-production-generated-result-canvas.md)，2706/256Chrome/6构建全通过。本文旧v1/none合同和记录原义保持，新保护历史/缓存/任务不改标进入旧合同；共享的项目包只对保护引用追加读前类型容量与真实SHA核验，旧none/local包行为不变。
+
 2026-10-05 04:11（上海）6D9C独立生产原图受控回画布已本地验收，入口[production-generated-result-canvas.md](production-generated-result-canvas.md)。最终第二完整pnpm check：1841项单元/集成（54文件）、189项Chrome、6构建全部通过，新增41项/29Chrome；相关105项及2项实际核账Chrome定向通过。原回读/缓存/回流有限A+B+C本地底座完成，不重复6A–6D9/local闭环，不新增最终目标。真实供应商/公网/保险库/真实价格费用/生产会话与原专项、阶段4及完整项目未完成，日常真实执行关闭。
 
 ## 独立受控入口与实际只读链

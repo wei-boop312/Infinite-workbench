@@ -1074,6 +1074,33 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead, loc
     }
   }, [commit, loaded, productionGeneratedRead, projectId, screenToFlowPosition, setFlowViewport]);
 
+  const addLockedProductionResult = useCallback(async (client: import("./runs/lockedProductionGeneratedAssetClient").LockedProductionGeneratedAssetClient, assetId: string, signal: AbortSignal) => {
+    const scope = lockedProductionGeneratedRead, targetProject = projectId;
+    const check = () => {
+      signal.throwIfAborted();
+      if (!loaded || activeProjectIdRef.current !== targetProject || scope?.lockedGeneratedReadUiEnabled !== true
+        || client.scope.tenantId !== scope.tenantId || client.scope.mode !== scope.mode) throw new Error("保护生产回流客户端或当前项目范围已变化；未添加结果。");
+    };
+    check();
+    // Import before the fresh reads: no asynchronous work between final scope /
+    // constraint checks and the single canvas commit.
+    const { buildLockedProductionResultGraph } = await import("./canvas/lockedProductionGeneratedResult"); check();
+    const { view, asset, inputAssets } = await client.result(targetProject, assetId); check();
+    const current = currentRef.current.snapshot, anchor = screenToFlowPosition({ x: window.innerWidth / 3, y: window.innerHeight / 2 });
+    const right = current.nodes.filter(n => !n.parentId).reduce((x, n) => Math.max(x, n.position.x + nodeSize(n).width), anchor.x);
+    const next = buildLockedProductionResultGraph(current, view, targetProject, [...inputAssets, asset], constraintRepository.list(targetProject), { x: right + 80, y: anchor.y });
+    check();
+    if (next === current) { setLastAction("该保护生产原图历史已在画布上；未重复添加或改写历史费用。"); return; }
+    currentRef.current = { ...currentRef.current, snapshot: next };
+    commit(next, "已核验保护生产原图回画布；未生成、结算或释放未知预留");
+    const targets = next.nodes.filter(n => n.id.startsWith(`locked-production-result-${view.jobId}-`)), bounds = getNodesBounds(targets);
+    const pane = document.querySelector(".react-flow")?.getBoundingClientRect();
+    if (pane && pane.width > 0 && pane.height > 0 && bounds.width > 0 && bounds.height > 0) {
+      const focused = getViewportForBounds(bounds, pane.width, pane.height, 0.18, 2, 0.2);
+      if ([focused.x, focused.y, focused.zoom].every(Number.isFinite)) void setFlowViewport(focused, { duration: 200 });
+    }
+  }, [commit, loaded, lockedProductionGeneratedRead, projectId, screenToFlowPosition, setFlowViewport]);
+
   const assetReferenceCounts = useMemo(() => {
     const counts: Record<string, number> = { ...(runReferences?.projectId === projectId ? runReferences.counts : loadRunReferences(projectId)) };
     for (const node of nodes) {
@@ -1081,6 +1108,7 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead, loc
       if (node.data.assetId) counts[node.data.assetId] = (counts[node.data.assetId] ?? 0) + 1;
       for (const id of node.data.generatedHistory?.inputAssetIds ?? []) counts[id] = (counts[id] ?? 0) + 1;
       for (const id of node.data.productionGeneratedHistory?.inputAssetIds ?? []) counts[id] = (counts[id] ?? 0) + 1;
+      for (const id of node.data.lockedProductionGeneratedHistory?.inputAssetIds ?? []) counts[id] = (counts[id] ?? 0) + 1;
     }
     for (const snapshot of constraintSnapshots) {
       for (const region of snapshot.editableRegions) {
@@ -1100,6 +1128,7 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead, loc
     : null;
   const selectedGenerated = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && Boolean(node.data.generatedHistory));
   const selectedProduction = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && Boolean(node.data.productionGeneratedHistory));
+  const selectedLockedProduction = nodes.find((node): node is StudioNode => node.type === "studio" && Boolean(node.selected) && Boolean(node.data.lockedProductionGeneratedHistory));
   const saveConstraintSnapshot = useCallback((draft: ConstraintDraft) => {
     if (!selectedConstraint) return;
     const snapshot = constraintRepository.save(projectId, draft);
@@ -1304,11 +1333,25 @@ function CanvasKernel({ productionImagePreparation, productionGeneratedRead, loc
         {runPanelOpen && <Suspense fallback={<aside className="inspector" role="status">正在加载任务面板…</aside>}>
           <RunPanel key={projectId} projectId={projectId} assets={assets} constraints={constraintSnapshots} productionImagePreparation={productionImagePreparation} productionGeneratedRead={productionGeneratedRead} lockedProductionGeneratedRead={lockedProductionGeneratedRead}
             missingOriginalAssetIds={missingOriginalAssetIds} onClose={() => setRunPanelOpen(false)}
-            onBatches={rememberRunReferences} onAddResults={addRunResults} onAddGenerated={addGeneratedResult} onAddProduction={addProductionResult} onCachedAsset={(asset) => {
+            onBatches={rememberRunReferences} onAddResults={addRunResults} onAddGenerated={addGeneratedResult} onAddProduction={addProductionResult} onAddLockedProduction={addLockedProductionResult} onCachedAsset={(asset) => {
               if (asset.projectId === activeProjectIdRef.current) setAssetCatalogRevision((revision) => revision + 1);
             }} />
         </Suspense>}
 
+        {selectedLockedProduction?.data.lockedProductionGeneratedHistory && !runPanelOpen && <aside className="inspector generated-history-inspector" aria-label="保护生产结果历史">
+          <strong>{selectedLockedProduction.data.lockedProductionGeneratedHistory.evidence === "imported-copy-history" ? "导入副本的保护历史" : "保护结果历史观察"}</strong>
+          <p>不是当前服务器权限、费用账本或新发送许可；自有合同夹具不代表真实供应商。</p>
+          <small>{selectedLockedProduction.data.lockedProductionGeneratedHistory.protocol} · {selectedLockedProduction.data.lockedProductionGeneratedHistory.model} · 原确认项目 {selectedLockedProduction.data.lockedProductionGeneratedHistory.originProjectId}</small>
+          <p>原估价 {selectedLockedProduction.data.lockedProductionGeneratedHistory.estimatedCostMinor === null ? "未知（不是零费用）" : selectedLockedProduction.data.lockedProductionGeneratedHistory.estimatedCostMinor} · 原上限 {selectedLockedProduction.data.lockedProductionGeneratedHistory.maxCostMinor} · 观察时结算上限 {selectedLockedProduction.data.lockedProductionGeneratedHistory.currentMaxCostMinor} · {selectedLockedProduction.data.lockedProductionGeneratedHistory.currency}（最小货币单位）</p>
+          <p>{selectedLockedProduction.data.lockedProductionGeneratedHistory.billingState === "unknown" ? `观察时费用未知，预留 ${selectedLockedProduction.data.lockedProductionGeneratedHistory.reservedMinor}` : `观察时已核账，实费 ${selectedLockedProduction.data.lockedProductionGeneratedHistory.actualMinor}`}</p>
+          <p>原锁区 {selectedLockedProduction.data.lockedProductionGeneratedHistory.protection.lockedPixels} 像素 · 原编辑区 {selectedLockedProduction.data.lockedProductionGeneratedHistory.protection.editablePixels} 像素 · checked-not-applied</p>
+          <small>仅fixedautoOrient/sRGB/RGBA8域，不代表原编码/ICC/高位深或品牌语义；未合成或重编码原图。</small>
+          <small>政策 {selectedLockedProduction.data.lockedProductionGeneratedHistory.protection.policyFingerprint} · 像素证据 {selectedLockedProduction.data.lockedProductionGeneratedHistory.protection.pixelProofFingerprint}</small>
+          <small>原输入/蒙版 {selectedLockedProduction.data.lockedProductionGeneratedHistory.inputAssetIds.join("、")}</small>
+          <small>原图 SHA {selectedLockedProduction.data.lockedProductionGeneratedHistory.checksumSha256}</small>
+          <small>人工确认 {selectedLockedProduction.data.lockedProductionGeneratedHistory.confirmedBy} · {selectedLockedProduction.data.lockedProductionGeneratedHistory.confirmedAt}</small>
+          <small>原任务 {selectedLockedProduction.data.lockedProductionGeneratedHistory.jobId}</small>
+        </aside>}
         {selectedGenerated?.data.generatedHistory && !runPanelOpen && <aside className="inspector generated-history-inspector" aria-label="生成结果历史">
           <strong>{selectedGenerated.data.generatedHistory.evidence === "imported-copy-history" ? "导入副本的生成历史" : "生成结果历史观察"}</strong>
           <p>这是回画布时保存的关系，不是实时账本或当前服务端授权；本地假响应不代表真实供应商生成。</p>

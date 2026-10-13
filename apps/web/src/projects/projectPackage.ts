@@ -1,5 +1,5 @@
 import type { Asset, CanvasDocument, ConstraintSnapshot } from "@canvas/contracts";
-import { migrateCanvasDocumentLight, parseGeneratedCanvasHistory, parseProductionCanvasHistory } from "@canvas/canvas-schema/light";
+import { migrateCanvasDocumentLight, parseGeneratedCanvasHistory, parseProductionCanvasHistory, parseLockedProductionCanvasHistory } from "@canvas/canvas-schema/light";
 
 const MAGIC = "AICPKG01";
 const MAGIC_BYTES = new TextEncoder().encode(MAGIC);
@@ -36,6 +36,24 @@ type PackageSource = {
   constraints: ConstraintSnapshot[];
   assets: Asset[];
 };
+
+function protectedChecksums(document: CanvasDocument): Map<string, string> {
+  const expected = new Map<string, string>();
+  for (const node of document.nodes) {
+    if (node.data.lockedProductionGeneratedHistory === undefined) continue;
+    const h = parseLockedProductionCanvasHistory(node.data.lockedProductionGeneratedHistory);
+    for (const [id, sha] of [[h.assetId, h.checksumSha256], ...h.inputAssetIds.map((id, i) => [id, h.inputChecksums[i]])]) {
+      if (expected.has(id) && expected.get(id) !== sha) throw new Error("保护项目包包含冲突原字节SHA。");
+      expected.set(id, sha);
+    }
+  }
+  return expected;
+}
+async function checkProtectedBytes(blob: Blob, expected?: string): Promise<void> {
+  if (!expected) return;
+  const sha = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer())), b => b.toString(16).padStart(2, "0")).join("");
+  if (sha !== expected) throw new Error("保护项目包原文件实际SHA错配。");
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -137,6 +155,28 @@ function validateReferences(document: CanvasDocument, constraints: ConstraintSna
         || h.inputAssetIds.some((id, i) => assetMap.get(id)?.contentFingerprint !== `sha256:${h.inputChecksums[i]}`)) throw new Error("生产历史原图或输入引用已断裂。");
       if (h.evidence !== "imported-copy-history" && h.originProjectId !== document.projectId) throw new Error("生产历史原确认项目错配。");
     }
+    if (node.data.lockedProductionGeneratedHistory !== undefined) {
+      const h = parseLockedProductionCanvasHistory(node.data.lockedProductionGeneratedHistory), output = assetMap.get(h.assetId), p = h.protection;
+      const source = assetMap.get(h.protectedSourceAssetId), mask = assetMap.get(h.protectedMaskAssetId), constraint = constraints.find(c => c.id === h.constraintSnapshotId);
+      const inputs = h.inputAssetIds.map(id => assetMap.get(id));
+      // Validate declarations before any original getter / arrayBuffer. These
+      // portable observations remain history, not server or cache permission.
+      if (!output || output.kind !== "image" || output.byteSize <= 0 || output.byteSize > 20 * 1024 * 1024
+        || inputs.some((a, i) => !a || a.kind !== "image" || a.byteSize <= 0 || a.byteSize > 30 * 1024 * 1024
+          || !Number.isSafeInteger(a.width) || !Number.isSafeInteger(a.height) || Number(a.width) <= 0 || Number(a.height) <= 0
+          || Number(a.width) > 8192 || Number(a.height) > 8192 || Number(a.width) * Number(a.height) > 16_000_000
+          || (i === inputs.length - 1 ? a.purpose !== "mask" : a.purpose === "mask"))
+        || inputs.reduce((n, a) => n + (a?.byteSize ?? 0), 0) > 64 * 1024 * 1024
+        || !constraint || !["png", "jpeg", "webp"].includes(constraint.outputSpec.format)) throw new Error("保护历史声明类型或容量超限；未读取原文件。");
+      if (!output || output.purpose !== "generated" || output.contentFingerprint !== `sha256:${h.checksumSha256}` || output.sourceAssetId !== h.protectedSourceAssetId
+        || output.mimeType !== `image/${constraint?.outputSpec.format}` || output.width !== p.source.width || output.height !== p.source.height
+        || h.inputAssetIds.some((id, i) => assetMap.get(id)?.contentFingerprint !== `sha256:${h.inputChecksums[i]}`)
+        || !source || !mask || mask.purpose !== "mask" || source.purpose === "mask" || mask.sourceAssetId !== source.id
+        || [ [source, p.source], [mask, p.mask] ].some(([a, original]) => a.width !== original.width || a.height !== original.height || a.mimeType !== original.mimeType || a.byteSize !== original.byteSize)
+        || !constraint?.lockedPaths.includes("product.pixels") || !constraint.editableRegions.length || constraint.editableRegions.some(r => r.maskAssetId !== mask.id)
+        || constraint.outputSpec.width !== p.source.width || constraint.outputSpec.height !== p.source.height
+        || (h.evidence !== "imported-copy-history" && h.originProjectId !== document.projectId)) throw new Error("保护历史原图/输入/蒙版/原约束引用已断裂。");
+    }
   }
 }
 
@@ -208,11 +248,13 @@ export async function createProjectPackage(
   const constraints = source.constraints.map((snapshot) => assertConstraint(snapshot, sourceDocument.projectId));
   const document = removeLegacyPlaceholderReferences(sourceDocument, assets);
   validateReferences(document, constraints, assets);
+  const expected = protectedChecksums(document);
   const binaries: BinaryDescriptor[] = [];
   const parts: Blob[] = [];
   for (const asset of assets) {
     const original = await loadBlob(asset.id, "original");
     if (!original || original.size !== asset.byteSize) throw new Error(`无法读取原文件：${asset.originalName}`);
+    await checkProtectedBytes(original, expected.get(asset.id));
     binaries.push({ assetId: asset.id, role: "original", mimeType: asset.mimeType, byteSize: original.size });
     parts.push(original);
     if (asset.proxyStorageKey) {
@@ -256,6 +298,7 @@ export async function parseProjectPackage(file: Blob): Promise<PortableProject> 
     throw new Error("项目包清单无法解析");
   }
   const manifest = parseManifest(parsed);
+  const expected = protectedChecksums(manifest.document);
   const assetMap = new Map(manifest.assets.map((asset) => [asset.id, { asset } as PortableAsset]));
   let offset = HEADER_PREFIX_BYTES + manifestLength;
   for (const descriptor of manifest.binaries) {
@@ -275,6 +318,7 @@ export async function parseProjectPackage(file: Blob): Promise<PortableProject> 
     if (Boolean(portable.asset.proxyStorageKey) !== Boolean(portable.proxy)) {
       throw new Error(`资产 ${portable.asset.originalName} 的预览索引不完整`);
     }
+    await checkProtectedBytes(portable.original, expected.get(portable.asset.id));
   }
   return {
     projectName: manifest.projectName,
@@ -327,7 +371,7 @@ export function remapProjectPackage(source: PortableProject, documentId: string,
       ...node,
       data: {
         ...node.data,
-        ...(node.data.generatedHistory === undefined && node.data.productionGeneratedHistory === undefined ? {} : { badge: "导入历史副本", subtitle: "离线原图与历史关系 · 非服务端新授权" }),
+        ...(node.data.generatedHistory === undefined && node.data.productionGeneratedHistory === undefined && node.data.lockedProductionGeneratedHistory === undefined ? {} : { badge: "导入历史副本", subtitle: "离线原图与历史关系 · 非服务端新授权" }),
         assetId: node.data.assetId ? assetIds.get(node.data.assetId) : undefined,
         constraintSnapshotId: node.data.constraintSnapshotId
           ? constraintIds.get(node.data.constraintSnapshotId)
@@ -341,6 +385,12 @@ export function remapProjectPackage(source: PortableProject, documentId: string,
           const h = parseProductionCanvasHistory(node.data.productionGeneratedHistory);
           return { ...h, evidence: "imported-copy-history" as const, assetId: assetIds.get(h.assetId),
             inputAssetIds: h.inputAssetIds.map(id => assetIds.get(id)), constraintSnapshotId: constraintIds.get(h.constraintSnapshotId) };
+        })(),
+        lockedProductionGeneratedHistory: node.data.lockedProductionGeneratedHistory === undefined ? undefined : (() => {
+          const h = parseLockedProductionCanvasHistory(node.data.lockedProductionGeneratedHistory);
+          return { ...h, evidence: "imported-copy-history" as const, assetId: assetIds.get(h.assetId),
+            inputAssetIds: h.inputAssetIds.map(id => assetIds.get(id)), constraintSnapshotId: constraintIds.get(h.constraintSnapshotId),
+            protectedSourceAssetId: assetIds.get(h.protectedSourceAssetId), protectedMaskAssetId: assetIds.get(h.protectedMaskAssetId) };
         })(),
       },
     })),

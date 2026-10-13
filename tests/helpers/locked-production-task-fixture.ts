@@ -15,7 +15,7 @@ export function lockedResponse(source: Buffer) {
   return { status: 200, contentType: "application/json", requestId: "owned-response",
     body: Buffer.from(JSON.stringify({ created: 1, data: [{ b64_json: source.toString("base64") }] })) };
 }
-export function createLockedTaskFixture(source: Buffer, mask: Buffer, opts: { baseUrl?: string; priceDurationMs?: number; manual?: boolean; cap?: number; protocol?: "openai" | "openai-compatible"; encoding?: "json-images" | "multipart-image-array" | "multipart-image-single"; production?: boolean; timeout?: number; enabled?: boolean; lease?: boolean; quota?: number; start?: boolean; startTimeout?: number; response?: boolean; send?: (c: any) => Promise<any>; kernel?: Partial<RunKernelOptions> } = {}) {
+export function createLockedTaskFixture(source: Buffer, mask: Buffer, opts: { twoInputs?: boolean; baseUrl?: string; priceDurationMs?: number; manual?: boolean; cap?: number; protocol?: "openai" | "openai-compatible"; encoding?: "json-images" | "multipart-image-array" | "multipart-image-single"; production?: boolean; timeout?: number; enabled?: boolean; lease?: boolean; quota?: number; start?: boolean; startTimeout?: number; response?: boolean; send?: (c: any) => Promise<any>; kernel?: Partial<RunKernelOptions> } = {}) {
   let service: LockedImageProductionPreparationHarness | LockedProductionImagePreparations;
   let leasePolicy: LockedProductionImageLeasePolicy, leaseAllowed: unknown = true;
   let reconstruction: LockedProductionImageTaskReconstruction | LockedImageProductionReconstructionHarness, startAllowed: unknown = true, responseAllowed: unknown = true;
@@ -39,6 +39,11 @@ export function createLockedTaskFixture(source: Buffer, mask: Buffer, opts: { ba
       ...(purpose === "mask" ? { sourceChecksumSha256: sha(source) } : {}) });
     f.store.transaction(() => { f.store.saveVerifiedImage(r, body); const c = f.store.loadCatalog()!; c.projects[0].assets.push(r.asset); f.store.saveCatalog(c); });
   }
+  if (opts.twoInputs) {
+    const original = f.store.loadVerifiedImage(principal.tenantId, "project-a", "source")!, a = { ...original.asset, id: "source-2", storageKey: "owned:source-2", originalName: "source-2.png" };
+    const r = VerifiedImageSchema.parse({ ...original, id: "receipt-source-2", asset: a, registeredMetadataSha256: assetMetadataFingerprint(a) });
+    f.store.transaction(() => { f.store.saveVerifiedImage(r, source); const c = f.store.loadCatalog()!; c.projects[0].assets.push(r.asset); f.store.saveCatalog(c); });
+  }
   f.store.transaction(() => { const c = f.store.loadCatalog()!, x = c.projects[0].constraints[0]; x.lockedPaths = ["product.pixels"];
     x.editableRegions = [{ id: "region", description: "原锁区", maskAssetId: "mask" }]; x.outputSpec = { width: 2, height: 1, format: "png" }; f.store.saveCatalog(c); });
   const pricePort = { kind: opts.production ? "server-pricing" : "contract-fixture", realExecutionEnabled: false,
@@ -58,7 +63,7 @@ export function createLockedTaskFixture(source: Buffer, mask: Buffer, opts: { ba
     leasePolicy: leaseGate, lockedStartPolicy: () => startAllowed as boolean, clock: f.clock, timeoutMs: opts.startTimeout, lockedResponseEnabled: opts.response === false ? undefined : true as const, lockedResponsePolicy: () => responseAllowed as boolean, fixtureTransport: { mode: "contract-fixture" as const, realExecutionEnabled: false as const, send: vi.fn(opts.send ?? (async () => lockedResponse(source))) } };
   reconstruction = opts.production ? new LockedProductionImageTaskReconstruction(rebuildOptions) : new LockedImageProductionReconstructionHarness(rebuildOptions);
   const select = (action = "locked-owned") => ({ projectId: "project-a", idempotencyKey: action, connectionId: config.id, connectionRevision: 1, model: config.models[0].model,
-    capabilityVersion: config.models[0].version, constraintSnapshotId: "constraint-a", operation: "edit", inputAssetIds: ["source"], maskAssetId: "mask", protection: "pixel-exact",
+    capabilityVersion: config.models[0].version, constraintSnapshotId: "constraint-a", operation: "edit", inputAssetIds: opts.twoInputs ? ["source", "source-2"] : ["source"], maskAssetId: "mask", protection: "pixel-exact",
     parameters: { prompt: "原人工锁区指令", n: 1, size: { width: 2, height: 1 }, quality: "auto", background: "auto", outputFormat: "png" } });
   const prepare = async (action = "locked-owned") => { const v = await service.createPreparation(principal, select(action)); return f.store.loadLockedProductionImagePreparation(principal.tenantId, "project-a", v.mode, v.id)!; };
   const confirm = (p: Awaited<ReturnType<typeof prepare>>, actor = principal, expected: unknown = lockedExpected(p), signal?: AbortSignal) => service.confirmPreparation(actor, "project-a", p.id, expected, { signal });

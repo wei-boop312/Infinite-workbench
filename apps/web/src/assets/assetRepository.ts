@@ -398,25 +398,43 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
   }
 
   async readLockedProductionGenerated(input: LockedProductionGeneratedAssetLineage, abortSignal: AbortSignal): Promise<Asset> {
+    return (await this.readLockedProductionSnapshot(input, abortSignal, false)).asset;
+  }
+
+  async readLockedProductionResult(input: LockedProductionGeneratedAssetLineage, abortSignal: AbortSignal): Promise<{ asset: Asset; inputAssets: Asset[] }> {
+    return this.readLockedProductionSnapshot(input, abortSignal, true);
+  }
+
+  private async readLockedProductionSnapshot(input: LockedProductionGeneratedAssetLineage, abortSignal: AbortSignal, includeInputs: boolean): Promise<{ asset: Asset; inputAssets: Asset[] }> {
     const frozen = structuredClone(input); abortSignal.throwIfAborted();
     const { assertLockedProductionLineage, lockedProductionMarkerMatches } = await import("./lockedProductionGeneratedAssetPolicy");
     const { ProductionReadLifetime } = await import("./productionGeneratedAssetPolicy"), life = new ProductionReadLifetime(abortSignal, "production-local-validation");
     try {
       const view = await life.wait(assertLockedProductionLineage(frozen, { lockedGeneratedReadUiEnabled: true, tenantId: frozen.tenantId, mode: frozen.mode }, frozen.projectId, frozen.image.asset.id)), expected = view.image.asset;
+      const refs = includeInputs ? [...view.requestDraft.inputs, ...(view.requestDraft.mask ? [view.requestDraft.mask] : [])] : [];
+      if (refs.some(r => r.byteSize > 30 * 1024 * 1024 || r.width > 8192 || r.height > 8192 || r.width * r.height > 16_000_000)
+        || refs.reduce((n, r) => n + r.byteSize, 0) > 64 * 1024 * 1024) throw new Error("保护回流原输入声明超限；未读取本机原文件。");
       const db = await life.wait(openDatabase(life.signal), value => value.close());
       let asset: Asset | undefined, marker: LockedProductionCacheRecord | undefined, original: BlobRecord | undefined, proxy: BlobRecord | undefined, local: unknown, none: unknown;
+      let inputRecords: Array<[Asset | undefined, BlobRecord | undefined]> = [];
       try {
         life.check(); const tx = db.transaction([ASSET_STORE, BLOB_STORE, GENERATED_CACHE_STORE, PRODUCTION_CACHE_STORE, LOCKED_CACHE_STORE], "readonly"), done = transactionComplete(tx);
         void done.catch(() => undefined); const abort = () => { try { tx.abort(); } catch { /* Read snapshot completed. */ } };
         life.signal.addEventListener("abort", abort, { once: true });
         try {
-          [asset, marker, original, proxy, local, none] = await life.wait(Promise.all([
+          const outputReads = Promise.all([
             requestResult(tx.objectStore(ASSET_STORE).get(expected.id) as IDBRequest<Asset | undefined>),
             requestResult(tx.objectStore(LOCKED_CACHE_STORE).get(expected.id) as IDBRequest<LockedProductionCacheRecord | undefined>),
             requestResult(tx.objectStore(BLOB_STORE).get(`${expected.id}:original`) as IDBRequest<BlobRecord | undefined>),
             requestResult(tx.objectStore(BLOB_STORE).get(`${expected.id}:proxy`) as IDBRequest<BlobRecord | undefined>),
             requestResult(tx.objectStore(GENERATED_CACHE_STORE).get(expected.id)), requestResult(tx.objectStore(PRODUCTION_CACHE_STORE).get(expected.id)),
-          ])); await life.wait(done);
+          ]);
+          const inputReads = Promise.all(refs.map(ref => Promise.all([
+            requestResult(tx.objectStore(ASSET_STORE).get(ref.assetId) as IDBRequest<Asset | undefined>),
+            requestResult(tx.objectStore(BLOB_STORE).get(`${ref.assetId}:original`) as IDBRequest<BlobRecord | undefined>),
+          ])));
+          [[asset, marker, original, proxy, local, none], inputRecords] = await life.wait(Promise.all([outputReads, inputReads]));
+          await life.wait(done);
         } catch (e) { abort(); await done.catch(() => undefined); throw e; }
         finally { life.signal.removeEventListener("abort", abort); }
       } finally { db.close(); }
@@ -430,7 +448,22 @@ export class IndexedDbAssetRepository implements AssetRepositoryPort {
         const bitmap = await life.wait(createImageBitmap(blob), late => late.close());
         try { if (bitmap.width !== width || bitmap.height !== height) throw new Error("保护原图缓存实际尺寸错配。"); } finally { bitmap.close(); }
       }
-      life.check(); return structuredClone(asset);
+      const { AssetSchema } = await life.wait(import("@canvas/contracts")), inputAssets: Asset[] = [];
+      for (const [index, ref] of refs.entries()) {
+        const [metadata, record] = inputRecords[index], a = AssetSchema.parse(metadata), p = view.protection;
+        const bound = ref.assetId === p.source.assetId ? p.source : ref.assetId === p.mask.assetId ? p.mask : undefined;
+        if (a.id !== ref.assetId || a.projectId !== view.projectId || a.kind !== "image" || a.contentFingerprint !== `sha256:${ref.checksumSha256}`
+          || a.mimeType !== ref.mimeType || a.width !== ref.width || a.height !== ref.height || a.byteSize !== ref.byteSize
+          || (index === view.requestDraft.inputs.length ? a.purpose !== "mask" || a.sourceAssetId !== p.source.assetId : a.purpose === "mask")
+          || !record || record.key !== `${ref.assetId}:original` || record.assetId !== ref.assetId || record.role !== "original"
+          || !(record.blob instanceof Blob) || record.blob.type !== ref.mimeType || record.blob.size !== ref.byteSize) throw new Error("保护原输入/蒙版元数据、顺序或完整原文件错配。");
+        if (bound && await life.wait(blobSha256(new Blob([JSON.stringify(a)]))) !== bound.registeredMetadataSha256) throw new Error("保护原输入注册元信息 SHA 错配。");
+        if (await life.wait(blobSha256(record.blob)) !== ref.checksumSha256) throw new Error("保护原输入/蒙版本机实际 SHA 错配。");
+        const bitmap = await life.wait(createImageBitmap(record.blob), late => late.close());
+        try { if (bitmap.width !== ref.width || bitmap.height !== ref.height) throw new Error("保护原输入/蒙版实际完整尺寸错配。"); } finally { bitmap.close(); }
+        inputAssets.push(a);
+      }
+      life.check(); return { asset: structuredClone(asset), inputAssets };
     } finally { life.close(); }
   }
 

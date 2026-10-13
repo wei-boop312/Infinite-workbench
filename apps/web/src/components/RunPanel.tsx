@@ -11,6 +11,7 @@ import ProductionGeneratedAssetPanel from "./ProductionGeneratedAssetPanel";
 import LockedProductionGeneratedAssetPanel from "./LockedProductionGeneratedAssetPanel";
 import GeneratedImageResult from "./GeneratedImageResult";
 import type { ProductionGeneratedAssetClient } from "../runs/productionGeneratedAssetClient";
+import type { LockedProductionGeneratedAssetClient } from "../runs/lockedProductionGeneratedAssetClient";
 import "./RunPanel.css";
 
 type Props = {
@@ -27,6 +28,7 @@ type Props = {
   onCachedAsset: (asset: Asset) => void;
   onAddGenerated: (view: GeneratedAssetLineage, signal: AbortSignal) => Promise<void>;
   onAddProduction: (client: ProductionGeneratedAssetClient, assetId: string, signal: AbortSignal) => Promise<void>;
+  onAddLockedProduction: (client: LockedProductionGeneratedAssetClient, assetId: string, signal: AbortSignal) => Promise<void>;
 };
 type Decision = { kind: "retry" | "billing"; job: RunJob; batch: RunBatchAggregate }
   | { kind: "overage-review"; job: RunJob; batch: RunBatchAggregate; overage: BillingOverage };
@@ -68,7 +70,7 @@ export default function RunPanel(props: Props) {
     {props.productionGeneratedRead && <ProductionGeneratedAssetPanel key={`${props.productionGeneratedRead.tenantId}:${props.productionGeneratedRead.mode}:${props.projectId}`}
       scope={props.productionGeneratedRead} projectId={props.projectId} onCachedAsset={props.onCachedAsset} onAddProduction={props.onAddProduction} />}
     {props.lockedProductionGeneratedRead && <LockedProductionGeneratedAssetPanel key={`${props.lockedProductionGeneratedRead.tenantId}:${props.lockedProductionGeneratedRead.mode}:${props.projectId}`}
-      scope={props.lockedProductionGeneratedRead} projectId={props.projectId} onCachedAsset={props.onCachedAsset} />}
+      scope={props.lockedProductionGeneratedRead} projectId={props.projectId} onCachedAsset={props.onCachedAsset} onAddLockedProduction={props.onAddLockedProduction} />}
   </aside>;
   return <LocalRunPanel {...props} />;
 }
