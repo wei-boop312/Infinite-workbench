@@ -1,0 +1,100 @@
+{
+  "prompt": [
+    0,
+    "29cd4c65-f82f-42f1-88e9-ed5bc500064a",
+    {
+      "1": {
+        "class_type": "LoadImage",
+        "inputs": {
+          "image": "owned-source.png"
+        },
+        "_meta": {
+          "title": "读取原图"
+        }
+      },
+      "2": {
+        "class_type": "ImageScale",
+        "inputs": {
+          "image": [
+            "1",
+            0
+          ],
+          "upscale_method": "lanczos",
+          "width": 256,
+          "height": 256,
+          "crop": "disabled"
+        },
+        "_meta": {
+          "title": "调整图片尺寸"
+        }
+      },
+      "3": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "2",
+            0
+          ],
+          "filename_prefix": "workflow_architect/resize"
+        },
+        "_meta": {
+          "title": "保存结果"
+        }
+      }
+    },
+    {
+      "client_id": "owned-workspace-test",
+      "create_time": 1794166155491
+    },
+    [
+      "3"
+    ]
+  ],
+  "outputs": {
+    "3": {
+      "images": [
+        {
+          "filename": "resize_00001_.png",
+          "subfolder": "workflow_architect",
+          "type": "output"
+        }
+      ]
+    }
+  },
+  "status": {
+    "status_str": "success",
+    "completed": true,
+    "messages": [
+      [
+        "execution_start",
+        {
+          "prompt_id": "29cd4c65-f82f-42f1-88e9-ed5bc500064a",
+          "timestamp": 1794166155491
+        }
+      ],
+      [
+        "execution_cached",
+        {
+          "nodes": [],
+          "prompt_id": "29cd4c65-f82f-42f1-88e9-ed5bc500064a",
+          "timestamp": 1794166155493
+        }
+      ],
+      [
+        "execution_success",
+        {
+          "prompt_id": "29cd4c65-f82f-42f1-88e9-ed5bc500064a",
+          "timestamp": 1794166155530
+        }
+      ]
+    ]
+  },
+  "meta": {
+    "3": {
+      "node_id": "3",
+      "display_node": "3",
+      "parent_node": null,
+      "real_node_id": "3"
+    }
+  }
+}

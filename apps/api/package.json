@@ -12,5 +12,8 @@
     "@canvas/contracts": "workspace:*",
     "@canvas/testing": "workspace:*",
     "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.15"
   }
 }

@@ -1,0 +1,110 @@
+{
+  "id": "aa96cf4c-289e-4b16-9fe0-0e63c1ec0cf1",
+  "projectId": "00000000-0000-4000-8000-000000000001",
+  "state": "prepared_not_submitted",
+  "snapshot": {
+    "schemaVersion": 1,
+    "binding": {
+      "id": "00000000-0000-4000-8000-000000000009",
+      "projectId": "00000000-0000-4000-8000-000000000001",
+      "taskLineId": "00000000-0000-4000-8000-000000000010",
+      "sourceObjectId": "00000000-0000-4000-8000-000000000007",
+      "sourceObjectRevision": 1,
+      "toolObjectId": "00000000-0000-4000-8000-000000000008",
+      "toolObjectRevision": 1,
+      "templateVersionId": "00000000-0000-4000-8000-000000000004",
+      "workflowVersionId": "00000000-0000-4000-8000-000000000002",
+      "workflowHash": "2dfa78513208273fe4146f6e2a9618d8d2cbd26ca0517f0408e9815505e6b01c",
+      "templateHash": "737408b544ef6bb9ca943bdf31e1aa0217bae89e826dcae8cb3f4ccf836c8232",
+      "source": {
+        "id": "00000000-0000-4000-8000-000000000007",
+        "projectId": "00000000-0000-4000-8000-000000000001",
+        "revision": 1,
+        "x": 0,
+        "y": 0,
+        "width": 320,
+        "height": 240,
+        "type": "image",
+        "assetVersionId": "00000000-0000-4000-8000-000000000006"
+      },
+      "tool": {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "projectId": "00000000-0000-4000-8000-000000000001",
+        "revision": 1,
+        "x": 400,
+        "y": 0,
+        "width": 240,
+        "height": 160,
+        "type": "tool",
+        "templateVersionId": "00000000-0000-4000-8000-000000000004"
+      },
+      "asset": {
+        "id": "00000000-0000-4000-8000-000000000006",
+        "projectId": "00000000-0000-4000-8000-000000000001",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "ready",
+        "mime": "image/png"
+      }
+    },
+    "workflow": {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "projectId": "00000000-0000-4000-8000-000000000001",
+      "workflowId": "00000000-0000-4000-8000-000000000003",
+      "version": 1,
+      "nodes": [
+        {
+          "id": "source",
+          "type": "input.asset",
+          "config": {}
+        },
+        {
+          "id": "resize",
+          "type": "comfy.execute",
+          "config": {
+            "templateId": "core_image_resize_v2"
+          }
+        },
+        {
+          "id": "output",
+          "type": "output.asset",
+          "config": {}
+        }
+      ],
+      "edges": [
+        {
+          "source": "source",
+          "sourcePort": "asset",
+          "target": "resize",
+          "targetPort": "asset"
+        },
+        {
+          "source": "resize",
+          "sourcePort": "asset",
+          "target": "output",
+          "targetPort": "asset"
+        }
+      ]
+    },
+    "template": {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "projectId": "00000000-0000-4000-8000-000000000001",
+      "templateId": "00000000-0000-4000-8000-000000000005",
+      "workflowVersionId": "00000000-0000-4000-8000-000000000002",
+      "version": 1,
+      "operation": "image.resize",
+      "parameters": "resize-parameters-v1"
+    },
+    "parameters": {
+      "width": 256,
+      "height": 256
+    },
+    "compilerPin": {
+      "version": "2.15.2",
+      "sourceTreeSha256": "147e8f274d2711b29b1ec523832d4d246ea3877344a3013b8b407c8982419099",
+      "registrySha256": "e522480285d325c1b3fd14223d7937191b72859dbbbb6edee85b2e7ece945b14",
+      "registryKind": "recorded-fixture-not-live"
+    }
+  },
+  "snapshotHash": "ffdb8fee84a5a66e067212d21946b4e7c9a3bc458d32f1e4de37b824eee0a029",
+  "executionAuthorized": false
+}

@@ -1,0 +1,4 @@
+# Preserve retained-source fingerprints and migration checksums across checkouts.
+vendor/** -text
+tests/fixtures/comfy/*.json -text
+db/migrations/*.sql text eol=lf

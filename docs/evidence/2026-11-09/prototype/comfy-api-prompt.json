@@ -1,0 +1,40 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "owned-probe.png"
+    },
+    "_meta": {
+      "title": "读取原图"
+    }
+  },
+  "2": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 256,
+      "height": 256,
+      "crop": "disabled"
+    },
+    "_meta": {
+      "title": "调整图片尺寸"
+    }
+  },
+  "3": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "2",
+        0
+      ],
+      "filename_prefix": "workflow_architect/resize"
+    },
+    "_meta": {
+      "title": "保存结果"
+    }
+  }
+}

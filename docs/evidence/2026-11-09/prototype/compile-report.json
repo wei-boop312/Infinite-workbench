@@ -1,0 +1,325 @@
+{
+  "compiled": {
+    "schema_version": "2.0",
+    "generator_version": "2.15.2",
+    "template_id": "core_image_resize_v2",
+    "concrete_template_id": "core_image_resize_v2",
+    "task_spec": {
+      "schema_version": "2.0",
+      "task": "image_resize",
+      "garment_category": "upper_body",
+      "inputs": {
+        "person_image": false,
+        "garment_image": false,
+        "source_image": true,
+        "mask_image": false
+      },
+      "prompt": {
+        "positive": "Preserve the source; resize only.",
+        "negative": "",
+        "seed": 0,
+        "steps": 24,
+        "cfg": 7,
+        "denoise": 1
+      },
+      "constraints": {
+        "identity_preservation": "normal",
+        "hair_preservation": false,
+        "pose_preservation": "normal",
+        "garment_fidelity": "high",
+        "background_preservation": false,
+        "protect_hands": true
+      },
+      "output": {
+        "width": 256,
+        "height": 256,
+        "format": "png",
+        "upscale": false
+      },
+      "execution": {
+        "profile": "stable",
+        "allow_optional_nodes": true,
+        "low_vram": false
+      }
+    },
+    "api_prompt": {
+      "1": {
+        "class_type": "LoadImage",
+        "inputs": {
+          "image": "owned-probe.png"
+        },
+        "_meta": {
+          "title": "读取原图"
+        }
+      },
+      "2": {
+        "class_type": "ImageScale",
+        "inputs": {
+          "image": [
+            "1",
+            0
+          ],
+          "upscale_method": "lanczos",
+          "width": 256,
+          "height": 256,
+          "crop": "disabled"
+        },
+        "_meta": {
+          "title": "调整图片尺寸"
+        }
+      },
+      "3": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "2",
+            0
+          ],
+          "filename_prefix": "workflow_architect/resize"
+        },
+        "_meta": {
+          "title": "保存结果"
+        }
+      }
+    },
+    "ui_workflow": {
+      "last_node_id": 3,
+      "last_link_id": 2,
+      "nodes": [
+        {
+          "id": 1,
+          "type": "LoadImage",
+          "pos": [
+            80,
+            120
+          ],
+          "size": [
+            220,
+            100
+          ],
+          "flags": {},
+          "order": 0,
+          "mode": 0,
+          "inputs": [],
+          "outputs": [
+            {
+              "name": "IMAGE",
+              "type": "IMAGE",
+              "links": [
+                1
+              ],
+              "slot_index": 0
+            },
+            {
+              "name": "MASK",
+              "type": "MASK",
+              "links": null,
+              "slot_index": 1
+            }
+          ],
+          "properties": {
+            "Node name for S&R": "LoadImage",
+            "workflow_architect_stage": "input",
+            "workflow_architect_missing": false
+          },
+          "widgets_values": [
+            "owned-probe.png"
+          ],
+          "title": "读取原图"
+        },
+        {
+          "id": 2,
+          "type": "ImageScale",
+          "pos": [
+            380,
+            120
+          ],
+          "size": [
+            220,
+            100
+          ],
+          "flags": {},
+          "order": 1,
+          "mode": 0,
+          "inputs": [
+            {
+              "name": "image",
+              "type": "IMAGE",
+              "link": 1
+            }
+          ],
+          "outputs": [
+            {
+              "name": "IMAGE",
+              "type": "IMAGE",
+              "links": [
+                2
+              ],
+              "slot_index": 0
+            }
+          ],
+          "properties": {
+            "Node name for S&R": "ImageScale",
+            "workflow_architect_stage": "preprocessing",
+            "workflow_architect_missing": false
+          },
+          "widgets_values": [
+            "lanczos",
+            256,
+            256,
+            "disabled"
+          ],
+          "title": "调整图片尺寸"
+        },
+        {
+          "id": 3,
+          "type": "SaveImage",
+          "pos": [
+            700,
+            120
+          ],
+          "size": [
+            220,
+            100
+          ],
+          "flags": {},
+          "order": 2,
+          "mode": 0,
+          "inputs": [
+            {
+              "name": "images",
+              "type": "IMAGE",
+              "link": 2
+            }
+          ],
+          "outputs": [
+            {
+              "name": "images",
+              "type": "IMAGE",
+              "links": null,
+              "slot_index": 0
+            }
+          ],
+          "properties": {
+            "Node name for S&R": "SaveImage",
+            "workflow_architect_stage": "output",
+            "workflow_architect_missing": false
+          },
+          "widgets_values": [
+            "workflow_architect/resize"
+          ],
+          "title": "保存结果"
+        }
+      ],
+      "links": [
+        [
+          1,
+          1,
+          0,
+          2,
+          0,
+          "IMAGE"
+        ],
+        [
+          2,
+          2,
+          0,
+          3,
+          0,
+          "IMAGE"
+        ]
+      ],
+      "groups": [
+        {
+          "title": "01 输入",
+          "bounding": [
+            50,
+            60,
+            280,
+            190
+          ],
+          "color": "#355c7d",
+          "font_size": 24,
+          "flags": {},
+          "workflow_architect_note": ""
+        },
+        {
+          "title": "02 尺寸调整",
+          "bounding": [
+            350,
+            60,
+            280,
+            190
+          ],
+          "color": "#6c5b7b",
+          "font_size": 24,
+          "flags": {},
+          "workflow_architect_note": ""
+        },
+        {
+          "title": "03 输出",
+          "bounding": [
+            670,
+            60,
+            280,
+            190
+          ],
+          "color": "#466365",
+          "font_size": 24,
+          "flags": {},
+          "workflow_architect_note": ""
+        }
+      ],
+      "config": {},
+      "extra": {
+        "workflow_architect": {
+          "generator_version": "2.15.2",
+          "abstract_template_id": "core_image_resize_v2",
+          "concrete_template_id": "core_image_resize_v2",
+          "task_schema_version": "2.0",
+          "task": "image_resize",
+          "profile": "stable",
+          "draft": false,
+          "execution_ready": true,
+          "missing_nodes": [],
+          "missing_models": [],
+          "identity_strategy": null,
+          "manual_review_required": true
+        }
+      },
+      "version": 0.4
+    },
+    "required_models": [],
+    "missing_nodes": [],
+    "missing_models": [],
+    "draft": false,
+    "execution_ready": true,
+    "dependency_report": {
+      "missing_capabilities": [],
+      "missing_nodes": [],
+      "missing_models": [],
+      "manager_suggestions": [],
+      "next_step": "ready_to_run"
+    }
+  },
+  "validation": {
+    "valid": true,
+    "execution_ready": true,
+    "draft_created": false,
+    "errors": [],
+    "warnings": [],
+    "missing_nodes": [],
+    "missing_models": []
+  },
+  "provenance": {
+    "generator_version": "2.15.2",
+    "registry_kind": "recorded-fixture-not-live",
+    "registry_sha256": "e522480285d325c1b3fd14223d7937191b72859dbbbb6edee85b2e7ece945b14",
+    "compiler_sha256": "d207db0b8308bdadd33c61954fab04694668cd9e5ff98953c81acf3ff29c1fed",
+    "asset_version_id": "00000000-0000-4000-8000-000000000006",
+    "asset_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "snapshot_hash": "ffdb8fee84a5a66e067212d21946b4e7c9a3bc458d32f1e4de37b824eee0a029"
+  },
+  "execution_authorized": false,
+  "submitted": false
+}

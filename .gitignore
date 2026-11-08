@@ -1,4 +1,6 @@
 node_modules/
+__pycache__/
+*.pyc
 dist/
 playwright-report/
 test-results/
@@ -8,3 +10,5 @@ test-results/
 vite.config.js
 vite.config.d.ts
 work/local-studio-state/
+work/local-workspace/
+work/owned-comfy-*/

@@ -1,0 +1,14 @@
+import { resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { LocalWorkspaceDatabase } from "../apps/api/src/localWorkspaceDatabase.ts";
+import { createLocalWorkspaceHttp } from "../apps/api/src/localWorkspaceHttp.ts";
+import { LocalWorkspaceAssets } from '../apps/api/src/localWorkspaceAssets.ts';
+const directory=resolve('work/local-workspace');mkdirSync(directory,{recursive:true});
+const db=await LocalWorkspaceDatabase.open(process.cwd(),resolve(directory,'postgres'));
+const origin='http://127.0.0.1:4310';
+const assets=new LocalWorkspaceAssets(db,resolve(directory,'assets'));
+const server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets});
+server.on('error',async error=>{console.error(error.message);await db.close();process.exitCode=1;});
+server.listen(4310,'127.0.0.1',()=>console.log(`本地工作台：${origin}；仅监听本机，数据保存在work/local-workspace。`));
+let closing=false;const close=()=>{if(closing)return;closing=true;server.close(()=>{void db.close();});};
+process.on('SIGINT',close);process.on('SIGTERM',close);

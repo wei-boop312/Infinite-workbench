@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "width": {
+      "type": "integer",
+      "minimum": 64,
+      "maximum": 8192
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 64,
+      "maximum": 8192
+    }
+  },
+  "required": [
+    "width",
+    "height"
+  ],
+  "additionalProperties": false
+}

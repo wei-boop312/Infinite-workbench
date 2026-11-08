@@ -1,0 +1,19 @@
+{
+  "baselineFiles": 317,
+  "vendorFiles": 55,
+  "dependencies": 120,
+  "baselineChanged": [
+    ".gitignore",
+    "README.md",
+    "apps/api/package.json",
+    "package.json",
+    "packages/contracts/src/index.ts",
+    "pnpm-lock.yaml"
+  ],
+  "missingLicenseEvidence": [
+    "@esbuild/win32-x64@0.25.12",
+    "@esbuild/win32-x64@0.28.2",
+    "@rollup/rollup-win32-x64-gnu@4.63.5",
+    "@rollup/rollup-win32-x64-msvc@4.63.5"
+  ]
+}

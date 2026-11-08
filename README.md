@@ -1,5 +1,7 @@
 # AI 电商视觉无限画布
 
+2026-11-09：本目录已作为商业无限画布隔离迁移分支。新增双层契约、本机数据库/身份/私有图片、项目与画布保存入口，以及固定模板/真实CPU适配验收。运行`pnpm local:dev`访问`http://127.0.0.1:4310`，首次设置本机账号。当前完整状态及复核命令见[实施进度](docs/IMPLEMENTATION_STATUS.md)。下文保留旧版本功能说明，不代表已完成云端产品迁移。
+
 阶段 1 可靠画布内核、阶段 2 资产/约束及存储安全边界、阶段 3 单人本机任务与成本内核的假执行器验收已完成；下一阶段是多供应商图片 API。默认仍只运行假执行器，不连接模型、不读取供应商密钥、不产生费用。阶段 3 验收证据与生产边界见 `docs/phase3-acceptance.md`。
 
 阶段 4 的严格供应商图片合同、默认关闭闸门、官方图片纯协议、兼容中转差异及 Google 原生纯协议/本地假响应已通过本地验收。里程碑 5 的第一步——候选图片完整验证及不可变资产/谱系事务保存——也已通过本地验收，但尚未接到工作台、任务执行租约或真实供应商；边界与证据见 `docs/image-provider-contract.md`、`docs/openai-image-protocol.md`、`docs/compatible-image-protocol.md`、`docs/google-image-protocol.md` 和 `docs/generated-image-ingestion.md`，实施顺序见 `docs/phase4-provider-plan.md`。

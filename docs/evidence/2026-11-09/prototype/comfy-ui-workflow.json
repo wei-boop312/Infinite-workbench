@@ -1,0 +1,207 @@
+{
+  "last_node_id": 3,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        80,
+        120
+      ],
+      "size": [
+        220,
+        100
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null,
+          "slot_index": 1
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage",
+        "workflow_architect_stage": "input",
+        "workflow_architect_missing": false
+      },
+      "widgets_values": [
+        "owned-probe.png"
+      ],
+      "title": "读取原图"
+    },
+    {
+      "id": 2,
+      "type": "ImageScale",
+      "pos": [
+        380,
+        120
+      ],
+      "size": [
+        220,
+        100
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            2
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ImageScale",
+        "workflow_architect_stage": "preprocessing",
+        "workflow_architect_missing": false
+      },
+      "widgets_values": [
+        "lanczos",
+        256,
+        256,
+        "disabled"
+      ],
+      "title": "调整图片尺寸"
+    },
+    {
+      "id": 3,
+      "type": "SaveImage",
+      "pos": [
+        700,
+        120
+      ],
+      "size": [
+        220,
+        100
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveImage",
+        "workflow_architect_stage": "output",
+        "workflow_architect_missing": false
+      },
+      "widgets_values": [
+        "workflow_architect/resize"
+      ],
+      "title": "保存结果"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "title": "01 输入",
+      "bounding": [
+        50,
+        60,
+        280,
+        190
+      ],
+      "color": "#355c7d",
+      "font_size": 24,
+      "flags": {},
+      "workflow_architect_note": ""
+    },
+    {
+      "title": "02 尺寸调整",
+      "bounding": [
+        350,
+        60,
+        280,
+        190
+      ],
+      "color": "#6c5b7b",
+      "font_size": 24,
+      "flags": {},
+      "workflow_architect_note": ""
+    },
+    {
+      "title": "03 输出",
+      "bounding": [
+        670,
+        60,
+        280,
+        190
+      ],
+      "color": "#466365",
+      "font_size": 24,
+      "flags": {},
+      "workflow_architect_note": ""
+    }
+  ],
+  "config": {},
+  "extra": {
+    "workflow_architect": {
+      "generator_version": "2.15.2",
+      "abstract_template_id": "core_image_resize_v2",
+      "concrete_template_id": "core_image_resize_v2",
+      "task_schema_version": "2.0",
+      "task": "image_resize",
+      "profile": "stable",
+      "draft": false,
+      "execution_ready": true,
+      "missing_nodes": [],
+      "missing_models": [],
+      "identity_strategy": null,
+      "manual_review_required": true
+    }
+  },
+  "version": 0.4
+}
