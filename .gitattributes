@@ -2,3 +2,5 @@
 vendor/** -text
 tests/fixtures/comfy/*.json -text
 db/migrations/*.sql text eol=lf
+# Raw test stdout includes intentional trailing blank lines; retain evidence bytes.
+docs/evidence/**/*.log whitespace=-blank-at-eof
