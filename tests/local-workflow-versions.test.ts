@@ -128,10 +128,18 @@ it('ready原字节资产先归档，结果对象/事件/成功同事务；重入
   const bytes=await sharp({create:{width:256,height:256,channels:3,background:{r:51,g:102,b:204}}}).png().toBuffer();
   const asset=await assets.upload(actor,project,bytes,'image/png','owned-result.png');
   const receipt={assetId:asset.id,sha256:asset.sha256,providerRequestId:'owned-archive'};
+  const before=(await db.asActor(actor,tx=>tx.query<{revision:number}>('SELECT revision FROM workspace.canvases WHERE project_id=$1',[project]))).rows[0];
+  const snapshot=(await runs.read(actor,project,run.id)).snapshot as {source:{id:string}};
+  const currentSource=(await db.asActor(actor,tx=>tx.query<{payload:any}>('SELECT r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id=$2',[project,snapshot.source.id]))).rows[0].payload;
+  const editorLease=await db.acquireLease(actor,project);
   await expect(execution.complete(claimed.lease,{...receipt,sha256:'f'.repeat(64)})).rejects.toThrow('OUTPUT_ASSET_NOT_READY');
   expect((await runs.read(actor,project,run.id)).state).toBe('archiving');
   const output=await execution.complete(claimed.lease,receipt);
   expect(await execution.complete(claimed.lease,receipt)).toEqual(output);
+  const edited={...currentSource,revision:currentSource.revision+1,title:'结果追加后仍能保存人工编辑'};
+  expect(await db.saveObject(actor,project,edited,Number(before.revision),editorLease)).toBe(Number(before.revision)+2);
+  await expect(db.saveObject(actor,project,{...edited,revision:edited.revision+1,title:'真正过期的人工编辑'},Number(before.revision),editorLease)).rejects.toThrow('REVISION_CONFLICT');
+  expect((await db.asActor(other,tx=>tx.query('SELECT * FROM workspace.canvas_changes'))).rows).toHaveLength(0);
   expect((await runs.read(actor,project,run.id))).toMatchObject({state:'succeeded',output:{asset_version_id:asset.id,sha256:asset.sha256}});
   expect((await assets.download(actor,project,asset.id)).bytes).toEqual(bytes);
   const rows=(await db.asActor(actor,tx=>tx.query<{count:string}>('SELECT count(*)::text AS count FROM workspace.object_revisions WHERE project_id=$1 AND asset_version_id=$2',[project,asset.id]))).rows;

@@ -27,6 +27,7 @@ test.afterAll(async()=>{if(server)await new Promise<void>(done=>server.close(()=
 test('真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投',async({page})=>{
   await page.goto(origin);await page.getByLabel('用户名',{exact:true}).fill('owned_browser');await page.getByLabel('密码',{exact:true}).fill('owned-browser-password-never-production');await page.getByRole('button',{name:'创建账号并进入'}).click();
   await page.getByLabel('新项目名称').fill('自有图片 CPU 闭环');await page.getByRole('button',{name:'创建项目',exact:true}).click();
+  await page.getByRole('button',{name:'添加文字卡'}).click();await page.getByLabel('卡片内容').fill('人工确认：保持原产品事实');await page.locator('#current').click();await expect(page.getByRole('status').first()).toHaveText('已保存到本机');
   const sharp=createRequire(new URL('../../apps/api/package.json',import.meta.url))('sharp');
   const source=await sharp({create:{width:16,height:12,channels:3,background:'#3366cc'}}).png().toBuffer();
   await page.getByLabel('选择产品图片').setInputFiles({name:'owned-product.png',mimeType:'image/png',buffer:source});await expect(page.getByRole('status').first()).toHaveText('已保存到本机');
@@ -34,12 +35,16 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   await form.getByLabel('工具输入图片').selectOption({label:'owned-product.png'});await form.getByRole('button',{name:'固定输入',exact:true}).click();
   await expect(form.getByRole('status')).toContainText('已固定图片修订');await form.getByRole('button',{name:'提交缩放任务'}).click();
   await expect(form.getByRole('status')).toHaveText('已完成，结果已归档',{timeout:60_000});
+  // The page still holds its pre-output canvas revision. A result append may
+  // rebase this independent edit; an intervening editor write still may not.
+  await page.getByLabel('卡片内容').fill('结果返回后补充的人工事实');await page.locator('#current').click();await expect(page.getByRole('status').first()).toHaveText('已保存到本机');
   await page.screenshot({path:resolve(evidence,'tool-completed.png'),fullPage:true});
   const waiting=page.waitForEvent('download');await form.getByRole('link',{name:'下载缩放结果'}).click();const download=await waiting,path=await download.path();if(!path)throw Error('NO_DOWNLOAD');
   const bytes=readFileSync(path),decoded=await sharp(bytes).removeAlpha().raw().toBuffer({resolveWithObject:true});
   expect(decoded.info).toMatchObject({width:256,height:256,channels:3});expect(decoded.data.every((value:number,index:number)=>value===[51,102,204][index%3])).toBe(true);writeFileSync(resolve(evidence,'result.png'),bytes);
   await form.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();await page.screenshot({path:resolve(evidence,'result-on-canvas.png'),fullPage:true});
   await page.reload();await expect(page.locator('[data-tool-form]').getByRole('status')).toHaveText('已完成，结果已归档');
+  await expect(page.getByLabel('卡片内容')).toHaveValue('结果返回后补充的人工事实');
   const actor=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id;
   const runs=(await db.asActor(actor,tx=>tx.query('SELECT id,state FROM workspace.runs'))).rows;expect(runs).toHaveLength(1);expect(runs[0].state).toBe('succeeded');
   const outputs=(await db.asActor(actor,tx=>tx.query('SELECT * FROM workspace.run_outputs'))).rows;expect(outputs).toHaveLength(1);

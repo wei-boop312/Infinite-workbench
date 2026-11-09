@@ -102,11 +102,12 @@ export class LocalRunExecution {
       if(!asset||asset.state!=='ready'||asset.sha256!==receipt.sha256||asset.width!==snapshot.parameters.width||asset.height!==snapshot.parameters.height||asset.mime!=='image/png'||receipt.assetId===snapshot.asset.id)throw Error('OUTPUT_ASSET_NOT_READY');
       // Append under the canvas revision lock; never replace the input or an
       // existing user object, and make concurrent editors reload on conflict.
-      if(!(await tx.query('SELECT project_id FROM workspace.canvases WHERE project_id=$1 FOR UPDATE',[lease.projectId])).rows.length)throw Error('NOT_FOUND');
+      const canvas=(await tx.query<{revision:number}>('SELECT revision FROM workspace.canvases WHERE project_id=$1 FOR UPDATE',[lease.projectId])).rows[0];if(!canvas)throw Error('NOT_FOUND');
       const object=WorkspaceObjectSchema.parse({id:randomUUID(),projectId:lease.projectId,revision:1,type:'image',assetVersionId:receipt.assetId,title:'缩放结果',x:snapshot.tool.x+snapshot.tool.width+80,y:snapshot.tool.y,width:Math.min(asset.width,480),height:Math.min(asset.width,480)*asset.height/asset.width});
       await tx.query('INSERT INTO workspace.objects VALUES($1,$2,1)',[lease.projectId,object.id]);
       await tx.query('INSERT INTO workspace.object_revisions VALUES($1,$2,1,$3,$4,$5)',[lease.projectId,object.id,receipt.assetId,JSON.stringify(object),contentHash(object)]);
       await tx.query('UPDATE workspace.canvases SET revision=revision+1 WHERE project_id=$1',[lease.projectId]);
+      await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,object_id,object_revision,actor_id) VALUES($1,$2,'run_output',$3,1,$4)",[lease.projectId,Number(canvas.revision)+1,object.id,lease.actorId]);
       const output=(await tx.query('INSERT INTO workspace.run_outputs(project_id,run_id,attempt_id,asset_version_id,object_id,object_revision,sha256) VALUES($1,$2,$3,$4,$5,1,$6) RETURNING *',[lease.projectId,lease.runId,lease.attemptId,receipt.assetId,object.id,receipt.sha256])).rows[0];
       const updated=await tx.query("UPDATE workspace.run_attempts SET stage='completed' WHERE project_id=$1 AND id=$2 RETURNING id",[lease.projectId,lease.attemptId]);
       if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');

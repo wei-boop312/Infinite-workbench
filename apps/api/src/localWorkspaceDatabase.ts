@@ -14,7 +14,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{
@@ -113,18 +113,26 @@ export class LocalWorkspaceDatabase {
   async saveObject(actorId:string,projectId:string,raw:unknown,baseCanvasRevision:number,lease:{token:string;fencing:number},now=new Date()) {
     const object=WorkspaceObjectSchema.parse(raw);
     if(object.projectId!==projectId) throw new Error("NOT_FOUND");
+    if(!Number.isSafeInteger(baseCanvasRevision)||baseCanvasRevision<0)throw new Error('REVISION_CONFLICT');
     return this.asActor(actorId,async tx=>{
       const canvas=(await tx.query<{revision:number}>("SELECT revision FROM workspace.canvases WHERE project_id=$1 FOR UPDATE",[projectId])).rows[0];
       if(!canvas) throw new Error("NOT_FOUND");
       const current=(await tx.query<{token_hash:string;holder_id:string;fencing_token:number;expires_at:Date}>("SELECT * FROM workspace.edit_leases WHERE project_id=$1 FOR UPDATE",[projectId])).rows[0];
       if(!current || current.holder_id!==actorId || current.token_hash!==hash(lease.token) || Number(current.fencing_token)!==lease.fencing || new Date(current.expires_at).getTime()<=now.getTime()) throw new Error("LEASE_CONFLICT");
-      if(Number(canvas.revision)!==baseCanvasRevision) throw new Error("REVISION_CONFLICT");
+      const currentRevision=Number(canvas.revision);
+      if(currentRevision!==baseCanvasRevision){
+        // Only a complete journal of independent result appends may be rebased.
+        // A user edit, legacy gap, future revision or object conflict still fails.
+        const changes=(await tx.query<{count:string;only_outputs:boolean}>("SELECT count(*)::text AS count,bool_and(kind='run_output') AS only_outputs FROM workspace.canvas_changes WHERE project_id=$1 AND revision>$2 AND revision<=$3",[projectId,baseCanvasRevision,currentRevision])).rows[0];
+        if(baseCanvasRevision<0||!Number.isInteger(baseCanvasRevision)||Number(changes.count)!==currentRevision-baseCanvasRevision||changes.only_outputs!==true)throw new Error('REVISION_CONFLICT');
+      }
       const previous=(await tx.query<{current_revision:number}>("SELECT current_revision FROM workspace.objects WHERE project_id=$1 AND id=$2",[projectId,object.id])).rows[0];
       if(object.revision!==Number(previous?.current_revision??0)+1) throw new Error("OBJECT_REVISION_CONFLICT");
       await tx.query("INSERT INTO workspace.objects VALUES($1,$2,$3) ON CONFLICT(project_id,id) DO UPDATE SET current_revision=excluded.current_revision",[projectId,object.id,object.revision]);
       await tx.query("INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)",[projectId,object.id,object.revision,object.type==='image'?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);
       await tx.query("UPDATE workspace.canvases SET revision=revision+1 WHERE project_id=$1",[projectId]);
-      return baseCanvasRevision+1;
+      await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,object_id,object_revision,actor_id) VALUES($1,$2,'editor',$3,$4,$5)",[projectId,currentRevision+1,object.id,object.revision,actorId]);
+      return currentRevision+1;
     });
   }
   async renewLease(actorId:string,projectId:string,lease:{token:string;fencing:number},now=new Date()){

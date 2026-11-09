@@ -107,3 +107,13 @@ OwnedComfyRuntime实际启动独立CPU实例，每任务独立端口和目录；
 最新24项专项及6包构建通过；原浏览器流程修复重叠后通过（card-placement-browser.log），真实浏览器CPU闭环通过（final-runtime-owned-browser.log，owned-browser/552f3e62-ce10-4c07-977b-ce5ec4f64cd2）。后者覆盖登录、HTTP上传/固定绑定/入队、单次真实resize、下载像素、画布结果、刷新仅一任务/一输出和实例停止。截图已人工查看。保留重叠失败日志，不以强制点击或更长超时掩盖。
 
 直接Node启动曾暴露staticImageDecoder→runKernel→verifiedAssets循环初始化；将同一个RunKernelError类移至无依赖模块并保留旧入口re-export，实际独立Node启动回归通过。尚未更新日常4310服务，升级须先停旧实例、保留PGlite与资产备份、再应用迁移，不能同时打开同一数据库目录。最近额度已用31%/剩余69%。
+
+## 2026-11-10 冻结通过与本机升级
+会话77798已结束：80文件、2915项全部通过，310.47秒（frozen-runtime-full-test.log）。这是5b32fca执行闭环阶段的全量证据，不覆盖后续新迁移007。滚动升级兼容页面2条浏览器测试通过：新增runtime接口尚未提供时，已有账号仍可登录并打开项目。
+
+已实际升级日常4310服务：识别并仅停止本项目旧node进程，保留私有DB/资产备份；1051个文件逐一SHA256比对；在独立restore-check副本验证迁移1–3→1–6、17张旧表摘要一致，再启动新版。没有打开同一数据库路径两次，没有创建测试用户进日常DB。摘要在local-upgrade-summary.json，原始备份及含私有数据摘要的核验报告只留git忽略的work/local-workspace/backups。新入口GET200、未登录me401、CPU缩放已配置，后台launcher9020。升级脚本的旧进程停止属于本地开发迁移，不是生产零停机方案。
+
+## 2026-11-10 编辑与结果追加解耦（待最终冻结）
+新增007画布变更journal，记录editor与run_output，不修改既有修订。保存遇到旧画布revision时，仅在期间journal完整且全是独立结果追加时允许重基；对象修订/租约仍校验，人工编辑或历史journal空缺仍拒绝覆盖。结果对象、journal、run成功同事务。
+
+28项相关测试和API构建通过；真实CPU浏览器在结果返回后用旧画布revision编辑文字成功，刷新仍保留该人工事实、仅一任务/一产物（canvas-journal-owned-browser.log，owned-browser/46b5714c-e8f3-47f3-8164-0aa14e0179fc）。007未应用日常DB；当前线上本机服务仍为迁移006阶段。新代码须随下个阶段做完整回归和备份升级，不能将上面的2915通过直接套用。最近额度已用33%/剩余67%。
