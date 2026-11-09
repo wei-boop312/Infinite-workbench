@@ -13,7 +13,7 @@ test.beforeAll(async()=>{
   db=await LocalWorkspaceDatabase.open(process.cwd());
   directory=mkdtempSync(join(tmpdir(),'workspace-browser-assets-'));
   const assets=new LocalWorkspaceAssets(db,directory);
-  server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets});
+  server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets,compilerSourceSha256:'b'.repeat(64)});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const a=server.address();if(!a||typeof a==='string')throw Error('NO_ADDRESS');origin=`http://127.0.0.1:${a.port}`;
 });
 test.afterAll(async()=>{if(server)await new Promise<void>(done=>server.close(()=>done()));if(db)await db.close();if(directory)rmSync(directory,{recursive:true,force:true});});
@@ -30,7 +30,7 @@ test('首个真实账号→登录态→项目→文字卡拖动编辑→刷新�
   await expect(page.getByRole('status')).toHaveText('已保存到本机');const left=await page.locator('.card').evaluate(e=>(e as HTMLElement).style.left);
   await page.reload();await expect(page.getByLabel('卡片内容')).toHaveValue('由人确认：接口数量和外观不得猜测');
   expect(await page.locator('.card').evaluate(e=>(e as HTMLElement).style.left)).toBe(left);
-  await page.screenshot({path:'docs/evidence/2026-11-09/local-workspace.png',fullPage:true});
+  await page.screenshot({path:'docs/evidence/2026-11-10/local-workspace.png',fullPage:true});
   await page.getByRole('button',{name:'退出登录'}).click();await expect(page.getByRole('heading',{name:'登录工作台'})).toBeVisible();
   await page.getByLabel('用户名',{exact:true}).fill('preview_owner');await page.getByLabel('密码',{exact:true}).fill('owned-browser-password-very-long-2026');
   await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByLabel('卡片内容')).toHaveValue('由人确认：接口数量和外观不得猜测');
@@ -41,5 +41,16 @@ test('首个真实账号→登录态→项目→文字卡拖动编辑→刷新�
   await page.reload();await expect(page.getByRole('img',{name:'owned-product.png'})).toBeVisible();
   const downloadPromise=page.waitForEvent('download');await page.getByRole('link',{name:'下载原件'}).click();const download=await downloadPromise;
   const path=await download.path();if(!path)throw Error('NO_DOWNLOAD');expect(readFileSync(path)).toEqual(png);
-  await page.screenshot({path:'docs/evidence/2026-11-09/local-workspace-with-image.png',fullPage:true});
+  await page.screenshot({path:'docs/evidence/2026-11-10/local-workspace-with-image.png',fullPage:true});
+  await page.getByRole('button',{name:'添加缩放工具'}).click();
+  const form=page.locator('[data-tool-form]');await expect(form).toHaveCount(1);
+  await expect(form.getByRole('button',{name:'提交缩放任务'})).toBeDisabled();
+  await form.getByLabel('工具输入图片').selectOption({label:'owned-product.png'});
+  await form.getByRole('button',{name:'固定输入',exact:true}).click();await expect(form.getByRole('status')).toContainText('已固定图片修订');
+  await form.getByRole('button',{name:'提交缩放任务'}).click();await expect(form.getByRole('status')).toHaveText('已入队，尚未执行');
+  await expect(form.getByRole('button',{name:'提交缩放任务'})).toBeDisabled();
+  await page.reload();const restored=page.locator('[data-tool-form]');await expect(restored.getByRole('status')).toHaveText('已入队，尚未执行');
+  const user=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id;
+  expect((await db.asActor(user,tx=>tx.query('SELECT * FROM workspace.runs'))).rows).toHaveLength(1);
+  await page.screenshot({path:'docs/evidence/2026-11-10/tool-card-queued.png',fullPage:true});
 });

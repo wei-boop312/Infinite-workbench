@@ -60,3 +60,11 @@ it('从权威绑定冻结运行快照，幂等提交只写一次run/outbox且不
   await expect(runs.create(actor,project,binding.id,{width:256,height:256,authorized:true},'forged')).rejects.toThrow();
   await expect(db.asActor(actor,tx=>tx.query("UPDATE workspace.run_snapshots SET payload='{}' WHERE project_id=$1",[project]))).rejects.toThrow('IMMUTABLE_HISTORY');
 });
+it('内置缩放模板重复安装只创建一个固定版本，不改变用户已有版本',async()=>{
+  const installed=await Promise.all([repo.ensureResizeTemplate(actor,project),repo.ensureResizeTemplate(actor,project)]);
+  expect(installed[0]).toEqual(installed[1]);
+  expect(installed[0].operation).toBe('image.resize');
+  expect(await repo.readWorkflow(actor,project,graph.id)).toEqual(graph);
+  const count=(await db.asActor(actor,tx=>tx.query<{count:string}>('SELECT count(*)::text AS count FROM workspace.template_versions WHERE project_id=$1 AND template_id=$2',[project,installed[0].templateId]))).rows[0].count;
+  expect(count).toBe('1');
+});

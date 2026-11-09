@@ -73,7 +73,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
           reply(response,201,{id:projectId,name:input.name.trim()});return;
         }
       }
-      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs)(?:\/([^/]+))?)?$/.exec(url.pathname);
+      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs|tools)(?:\/([^/]+))?)?$/.exec(url.pathname);
       if(!route||!uuid.test(route[1])){reply(response,404,'NOT_FOUND');return;}
       const projectId=route[1],role=(await db.asActor(user.id,tx=>tx.query<{role:string}>("SELECT m.role FROM workspace.project_members m JOIN workspace.projects p ON p.id=m.project_id WHERE p.id=$1 AND p.deleted_at IS NULL",[projectId]))).rows[0]?.role;
       if(!role){reply(response,404,'NOT_FOUND');return;}
@@ -100,6 +100,9 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
         }));reply(response,200,result);return;
       }
       if(role==='viewer'){reply(response,403,'ACCESS_DENIED');return;}
+      if(method==='POST'&&route[2]==='tools'&&route[3]==='resize'){
+        const input=await body(request);fields(input,[]);reply(response,200,await versions.ensureResizeTemplate(user.id,projectId));return;
+      }
       if(method==='POST'&&route[2]==='runs'&&!route[3]){
         const input=await body(request);fields(input,['bindingId','parameters']);
         const key=request.headers['idempotency-key'];

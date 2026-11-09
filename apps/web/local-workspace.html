@@ -5,26 +5,67 @@
 </style></head><body>
 <header><h1>商业无限画布</h1><small>本地工作台</small><span id="status" role="status">正在连接</span><button id="logout" hidden>退出登录</button></header>
 <section id="auth" hidden><h2 id="auth-title">登录工作台</h2><p id="auth-hint">登录后打开你的本机项目。</p><form id="login-form"><label>用户名<input id="username" autocomplete="username" required pattern="[a-z][a-z0-9_-]{2,39}" placeholder="例如 designer"></label><label>密码<input id="password" type="password" autocomplete="current-password" required maxlength="128"></label><p id="error" role="alert"></p><button class="primary" id="login-button" type="submit">登录</button></form></section>
-<section id="shell" hidden><aside><strong>我的项目</strong><div id="projects"></div><form id="project-form"><label>新项目名称<input id="project-name" required maxlength="240" placeholder="产品视觉项目"></label><button class="primary" type="submit">创建项目</button></form></aside><main><div class="toolbar"><span id="current">选择或创建项目</span><button id="add" disabled>添加文字卡</button><button id="upload" disabled>添加图片</button><input id="image-file" type="file" accept="image/png,image/jpeg,image/webp" aria-label="选择产品图片" hidden><button id="reset">重置视图</button></div><div id="viewport"><div id="empty">把产品事实与设计意图放在画布上<br>拖动卡片标题整理位置，滚轮缩放</div><div id="scene"></div></div><div class="hint">内容保存在本机。支持项目、文字、静态图片与原件下载；每图最多8MiB，每项目图片最多64MiB。工具模板和生成入口继续接入中。</div></main></section>
+<section id="shell" hidden><aside><strong>我的项目</strong><div id="projects"></div><form id="project-form"><label>新项目名称<input id="project-name" required maxlength="240" placeholder="产品视觉项目"></label><button class="primary" type="submit">创建项目</button></form></aside><main><div class="toolbar"><span id="current">选择或创建项目</span><button id="add" disabled>添加文字卡</button><button id="upload" disabled>添加图片</button><button id="add-tool" disabled>添加缩放工具</button><input id="image-file" type="file" accept="image/png,image/jpeg,image/webp" aria-label="选择产品图片" hidden><button id="reset">重置视图</button></div><div id="viewport"><div id="empty">把产品事实与设计意图放在画布上<br>拖动卡片标题整理位置，滚轮缩放</div><div id="scene"></div></div><div class="hint">内容保存在本机。工具卡固定输入后可提交本地缩放任务；入队不代表已经执行。每图最多8MiB，每项目图片最多64MiB。</div></main></section>
 <script>
 const $=id=>document.getElementById(id);let setup=false,project=null,revision=0,lease=null,objects=[],queue=Promise.resolve(),vx=70,vy=70,zoom=1;
 function status(text,error=false){$('status').textContent=text;$('status').style.color=error?'#b12938':'#68758a';}
-async function api(path,method='GET',body){const r=await fetch(path,{method,headers:{'content-type':'application/json','x-workspace-local':'1'},body:body===undefined?undefined:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw Error(j.error?.code||'请求失败');return j.data;}
+async function api(path,method='GET',body,extraHeaders={}){const r=await fetch(path,{method,headers:{'content-type':'application/json','x-workspace-local':'1',...extraHeaders},body:body===undefined?undefined:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw Error(j.error?.code||'请求失败');return j.data;}
+function toolForm(object){
+  const p=project,root=document.createElement('div');root.dataset.toolForm=object.id;root.style.cssText='padding:10px;display:grid;gap:7px;font-size:12px';
+  const source=document.createElement('select');source.setAttribute('aria-label','工具输入图片');source.style.cssText='width:100%;padding:7px';
+  const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='请选择输入图片';source.append(placeholder);
+  for(const image of objects.filter(o=>o.type==='image')){const option=document.createElement('option');option.value=image.id;option.textContent=image.title||image.id;source.append(option);}
+  const size=document.createElement('div');size.style.cssText='display:flex;gap:6px';const width=document.createElement('input'),height=document.createElement('input');
+  for(const [input,name] of [[width,'输出宽度'],[height,'输出高度']]){input.type='number';input.min='64';input.max='8192';input.value='256';input.setAttribute('aria-label',name);size.append(input);}
+  const bind=document.createElement('button');bind.textContent='固定输入';const run=document.createElement('button');run.textContent='提交缩放任务';run.disabled=true;
+  const read=document.createElement('button');read.textContent='查看任务状态';read.hidden=true;
+  const info=document.createElement('div');info.setAttribute('role','status');info.textContent='正在读取固定版本';
+  root.append(source,size,bind,run,read,info);let binding=null,pointer=null,inputChanged=false;
+  root.addEventListener('workspace-object-saved',event=>{if(binding&&event.detail.id===binding.sourceObjectId&&event.detail.revision!==binding.sourceObjectRevision){inputChanged=true;info.textContent=`输入已变化，仍固定修订 ${binding.sourceObjectRevision}；更新需再次固定输入`;}});
+  const storageKey=`workspace.tool-run.${p}.${object.id}`;
+  const active=()=>project===p&&root.isConnected;
+  const pointerMatches=()=>pointer&&binding&&pointer.bindingId===binding.id&&pointer.width===Number(width.value)&&pointer.height===Number(height.value);
+  const refreshButton=()=>{run.disabled=!binding||!!(pointerMatches()&&pointer.runId);};
+  const savePointer=value=>{const raw=JSON.stringify(value);localStorage.setItem(storageKey,raw);if(localStorage.getItem(storageKey)!==raw)throw Error('无法保存任务恢复记录，未提交');pointer=value;};
+  const showRun=async()=>{if(!pointer?.runId)return;const result=await api(`/v1/projects/${p}/runs/${pointer.runId}`);if(!active())return;info.textContent=(inputChanged?'输入已变化，历史任务仍使用固定修订；':'')+(result.state==='queued'?'已入队，尚未执行':`任务状态：${result.state}`);read.hidden=false;refreshButton();};
+  source.onchange=()=>{binding=null;run.disabled=true;info.textContent='选择已变更，请固定输入后提交';};width.oninput=height.oninput=refreshButton;
+  bind.onclick=async()=>{bind.disabled=true;try{
+    for(const key of [...timers.keys()])flush(key);await queue;
+    const image=objects.find(o=>o.id===source.value&&o.type==='image');if(!image||!image.revision||!object.revision)throw Error('请选择已保存的图片');
+    const result=await api(`/v1/projects/${p}/bindings`,'POST',{id:crypto.randomUUID(),projectId:p,taskLineId:crypto.randomUUID(),sourceObjectId:image.id,sourceObjectRevision:image.revision,toolObjectId:object.id,toolObjectRevision:object.revision,templateVersionId:object.templateVersionId});
+    if(!active())return;binding=result;inputChanged=false;info.textContent=`已固定图片修订 ${image.revision}，修改原图不会覆盖此输入`;refreshButton();
+  }catch(error){if(active())info.textContent=error.message;}finally{bind.disabled=false;}};
+  run.onclick=async()=>{if(!binding)return;run.disabled=true;try{
+    const w=Number(width.value),h=Number(height.value);if(!Number.isInteger(w)||!Number.isInteger(h)||w<64||h<64||w>8192||h>8192||w*h>16000000)throw Error('输出尺寸不合法或超过1600万像素');
+    if(!pointerMatches())savePointer({bindingId:binding.id,width:w,height:h,key:crypto.randomUUID()});
+    info.textContent='正在提交，响应丢失时重试将复用同一任务';
+    const result=await api(`/v1/projects/${p}/runs`,'POST',{bindingId:binding.id,parameters:{width:w,height:h}},{'idempotency-key':pointer.key});
+    savePointer({...pointer,runId:result.id});if(active())await showRun();
+  }catch(error){if(active())info.textContent=`提交未确认：${error.message}。可重试，不会自动重新提交。`;}finally{if(active())refreshButton();}};
+  read.onclick=()=>showRun().catch(error=>{if(active())info.textContent=error.message;});
+  (async()=>{
+    const refs=await api(`/v1/projects/${p}/references?object_id=${object.id}`);if(!active())return;
+    const latest=refs.items[0];if(latest){binding=latest.payload;inputChanged=latest.input_changed;source.value=binding.sourceObjectId;info.textContent=latest.input_changed?`输入已变化，仍固定修订 ${binding.sourceObjectRevision}；更新需再次固定输入`:`已固定图片修订 ${binding.sourceObjectRevision}`;}else info.textContent='请选择图片并固定输入';
+    try{const raw=localStorage.getItem(storageKey);if(raw&&raw.length<=2048){const value=JSON.parse(raw);if(value&&typeof value.key==='string'&&typeof value.bindingId==='string'){pointer=value;if(binding&&value.bindingId===binding.id){width.value=String(value.width);height.value=String(value.height);}}}}catch{}
+    refreshButton();if(pointer?.runId)await showRun();
+  })().catch(error=>{if(active())info.textContent=error.message;});
+  return root;
+}
 const timers=new Map();
 function schedule(id){const entry=timers.get(id)||{first:Date.now(),timer:null};clearTimeout(entry.timer);entry.timer=setTimeout(()=>{timers.delete(id);persist(id);},Math.min(800,Math.max(0,5000-(Date.now()-entry.first))));timers.set(id,entry);}
 function flush(id){const entry=timers.get(id);if(entry)clearTimeout(entry.timer);timers.delete(id);return persist(id);}
 function transform(){$('scene').style.transform=`translate(${vx}px,${vy}px) scale(${zoom})`;}
-function persist(id){status('保存中');queue=queue.catch(()=>{}).then(async()=>{const object=objects.find(o=>o.id===id);if(!object||!project)return;const saved=structuredClone(object);saved.revision=(object.revision||0)+1;const r=await api(`/v1/projects/${project}/canvas`,'PATCH',{object:saved,baseRevision:revision,lease:{token:lease.token,fencing:lease.fencing}});revision=r.revision;object.revision=saved.revision;status('已保存到本机');}).catch(e=>status(`未保存：${e.message}，当前内容仍保留在页面`,true));return queue;}
+function persist(id){status('保存中');queue=queue.catch(()=>{}).then(async()=>{const object=objects.find(o=>o.id===id);if(!object||!project)return;const saved=structuredClone(object);saved.revision=(object.revision||0)+1;const r=await api(`/v1/projects/${project}/canvas`,'PATCH',{object:saved,baseRevision:revision,lease:{token:lease.token,fencing:lease.fencing}});revision=r.revision;object.revision=saved.revision;for(const form of document.querySelectorAll('[data-tool-form]'))form.dispatchEvent(new CustomEvent('workspace-object-saved',{detail:{id,revision:object.revision}}));status('已保存到本机');}).catch(e=>status(`未保存：${e.message}，当前内容仍保留在页面`,true));return queue;}
 function render(){
   $('scene').replaceChildren();$('empty').hidden=objects.length>0;
   for(const object of objects){
-    if(!['text','image'].includes(object.type))continue;
+    if(!['text','image','tool'].includes(object.type))continue;
     const card=document.createElement('article');card.className='card';card.style.left=object.x+'px';card.style.top=object.y+'px';card.style.width=object.width+'px';card.style.height=object.height+'px';card.dataset.objectId=object.id;
     const handle=document.createElement('div');handle.className='handle';handle.textContent=object.title||(object.type==='text'?'文字卡':'产品图片');card.append(handle);
     if(object.type==='text'){
       const input=document.createElement('textarea');input.setAttribute('aria-label','卡片内容');input.value=object.text;
       input.oninput=()=>{object.text=input.value;status('有未保存的编辑');schedule(object.id);};input.onblur=()=>flush(object.id);card.append(input);
-    }else{
+    }else if(object.type==='tool'){card.append(toolForm(object));}else{
       const image=document.createElement('img');image.alt=object.title||'产品原图';image.src=`/v1/projects/${project}/assets/${object.assetVersionId}`;image.style.cssText='width:100%;height:calc(100% - 70px);object-fit:contain;display:block';
       const download=document.createElement('a');download.textContent='下载原件';download.href=image.src+'?download=1';download.style.cssText='display:block;padding:3px 12px;font-size:12px';card.append(image,download);
     }
@@ -34,13 +75,14 @@ function render(){
   }transform();
 }
 let opening=0;
-async function openProject(id,name){const sequence=++opening;$('add').disabled=true;$('upload').disabled=true;$('scene').style.pointerEvents='none';for(const key of [...timers.keys()])flush(key);await queue;const read=await api(`/v1/projects/${id}/canvas`);const nextLease=await api(`/v1/projects/${id}/lease`,'POST',{});if(sequence!==opening)return;project=id;revision=read.revision;objects=read.objects;lease=nextLease;$('current').textContent=name;$('add').disabled=false;$('upload').disabled=false;$('scene').style.pointerEvents='auto';localStorage.setItem('workspace.last-project',id);render();status('已保存到本机');for(const b of $('projects').children)b.classList.toggle('active',b.dataset.id===id);}
+async function openProject(id,name){const sequence=++opening;$('add').disabled=true;$('upload').disabled=true;$('add-tool').disabled=true;$('scene').style.pointerEvents='none';for(const key of [...timers.keys()])flush(key);await queue;const read=await api(`/v1/projects/${id}/canvas`);const nextLease=await api(`/v1/projects/${id}/lease`,'POST',{});if(sequence!==opening)return;project=id;revision=read.revision;objects=read.objects;lease=nextLease;$('current').textContent=name;$('add').disabled=false;$('upload').disabled=false;$('add-tool').disabled=false;$('scene').style.pointerEvents='auto';localStorage.setItem('workspace.last-project',id);render();status('已保存到本机');for(const b of $('projects').children)b.classList.toggle('active',b.dataset.id===id);}
 async function projects(){const list=await api('/v1/projects');$('projects').replaceChildren();for(const p of list.items){const b=document.createElement('button');b.textContent=p.name;b.dataset.id=p.id;b.onclick=()=>openProject(p.id,p.name).catch(e=>status(e.message,true));$('projects').append(b);}const selected=list.items.find(p=>p.id===localStorage.getItem('workspace.last-project'));if(selected)await openProject(selected.id,selected.name);}
 async function entered(){$('auth').hidden=true;$('shell').hidden=false;$('logout').hidden=false;status('已登录');await projects();}
 $('login-form').onsubmit=async e=>{e.preventDefault();$('login-button').disabled=true;$('error').textContent='';try{await api(setup?'/v1/auth/setup':'/v1/auth/login','POST',{username:$('username').value,password:$('password').value});$('password').value='';await entered();}catch(error){$('error').textContent=error.message;}finally{$('login-button').disabled=false;}};
 $('logout').onclick=async()=>{await queue;await api('/v1/auth/logout','POST',{});location.reload();};
 $('project-form').onsubmit=async e=>{e.preventDefault();try{const created=await api('/v1/projects','POST',{name:$('project-name').value});$('project-name').value='';await projects();await openProject(created.id,created.name);}catch(error){status(error.message,true);}};
 $('add').onclick=()=>{if(!project)return;const object={id:crypto.randomUUID(),projectId:project,revision:0,type:'text',title:'文字卡',text:'',x:objects.length*35,y:objects.length*30,width:260,height:180};objects.push(object);render();persist(object.id);};
+$('add-tool').onclick=async()=>{const p=project;if(!p)return;$('add-tool').disabled=true;try{await queue;const template=await api(`/v1/projects/${p}/tools/resize`,'POST',{});if(project!==p)return;const x=Math.max(0,...objects.map(o=>o.x+o.width))+40,object={id:crypto.randomUUID(),projectId:p,revision:0,type:'tool',title:'图片缩放 · 固定模板 v1',templateVersionId:template.id,x,y:0,width:330,height:350};objects.push(object);await persist(object.id);if(object.revision!==1)throw Error('工具卡未保存，请先处理保存冲突');render();}catch(error){status(error.message,true);}finally{$('add-tool').disabled=!project;}};
 $('reset').onclick=()=>{vx=70;vy=70;zoom=1;transform();};let pan=null;$('viewport').onpointerdown=e=>{if(e.target!==$('viewport'))return;pan={x:e.clientX,y:e.clientY,vx,vy};$('viewport').setPointerCapture(e.pointerId);};$('viewport').onpointermove=e=>{if(!pan)return;vx=pan.vx+e.clientX-pan.x;vy=pan.vy+e.clientY-pan.y;transform();};$('viewport').onpointerup=()=>pan=null;$('viewport').addEventListener('wheel',e=>{e.preventDefault();const bounds=$('viewport').getBoundingClientRect(),x=e.clientX-bounds.left,y=e.clientY-bounds.top,next=Math.max(.15,Math.min(4,zoom*Math.exp(-e.deltaY*.001)));vx=x-(x-vx)*next/zoom;vy=y-(y-vy)*next/zoom;zoom=next;transform();},{passive:false});
 $('upload').onclick=()=>{if(project)$('image-file').click();};
 $('image-file').onchange=async()=>{const file=$('image-file').files[0],p=project;if(!file||!p)return;$('upload').disabled=true;status('校验并保存图片');try{if(file.size>8*1024*1024)throw Error('图片超过8MiB');const response=await fetch(`/v1/projects/${p}/assets`,{method:'POST',headers:{'content-type':file.type,'x-workspace-local':'1','x-file-name':encodeURIComponent(file.name)},body:file});const result=await response.json();if(!response.ok)throw Error(result.error?.code||'上传失败');if(project!==p)throw Error('图片已保存，请回原项目查看');const asset=result.data,object={id:crypto.randomUUID(),projectId:p,revision:0,type:'image',title:file.name,assetVersionId:asset.id,x:objects.length*35,y:objects.length*30,width:280,height:230};objects.push(object);render();await persist(object.id);}catch(error){status(error.message,true);}finally{$('image-file').value='';$('upload').disabled=!project;}};
