@@ -2,7 +2,7 @@ import { PGlite, type Transaction } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash, randomUUID, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
-import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema,type WorkspaceObject } from "@canvas/contracts";
+import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema,WorkspaceDisplayEdgeSchema,type WorkspaceObject } from "@canvas/contracts";
 import { contentHash } from "./workspacePrototype.ts";
 import {validateObjectMutation} from './objectMutation.ts';
 
@@ -15,7 +15,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql','013_private_documents.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql','013_private_documents.sql','014_display_edges.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{
@@ -140,8 +140,8 @@ export class LocalWorkspaceDatabase {
   }
   async saveCanvasOperation(actorId:string,projectId:string,raw:unknown,lease:{token:string;fencing:number},now=new Date()){
     const input=WorkspaceCanvasOperationSchema.parse(raw);
-    if(input.objects.some(object=>object.projectId!==projectId))throw Error('NOT_FOUND');
-    if(new Set(input.objects.map(object=>object.id)).size!==input.objects.length)throw Error('INVALID_BODY');
+    if([...input.objects,...(input.edges??[])].some(item=>item.projectId.toLowerCase()!==projectId.toLowerCase()))throw Error('NOT_FOUND');
+    if(new Set(input.objects.map(object=>object.id.toLowerCase())).size!==input.objects.length||new Set((input.edges??[]).map(edge=>edge.id.toLowerCase())).size!==(input.edges?.length??0))throw Error('INVALID_BODY');
     const requestHash=contentHash(input);
     return this.asActor(actorId,async tx=>{
       const visible=(await tx.query<{allowed:boolean}>('SELECT workspace.can_edit(project_id) AS allowed FROM workspace.canvases WHERE project_id=$1',[projectId])).rows[0];
@@ -169,8 +169,25 @@ export class LocalWorkspaceDatabase {
         revision++;
         await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,object_id,object_revision,actor_id) VALUES($1,$2,'editor',$3,$4,$5)",[projectId,revision,object.id,object.revision,actorId]);
       }
+      for(const edge of input.edges??[]){
+        const previous=(await tx.query<{current_revision:number;payload:unknown}>('SELECT e.current_revision,r.payload FROM workspace.display_edges e JOIN workspace.display_edge_revisions r ON r.project_id=e.project_id AND r.edge_id=e.id AND r.revision=e.current_revision WHERE e.project_id=$1 AND e.id=$2',[projectId,edge.id])).rows[0];
+        if(edge.revision!==Number(previous?.current_revision??0)+1)throw Error('EDGE_REVISION_CONFLICT');
+        const old=previous?WorkspaceDisplayEdgeSchema.parse(previous.payload):null;
+        if(old&&(old.sourceObjectId.toLowerCase()!==edge.sourceObjectId.toLowerCase()||old.targetObjectId.toLowerCase()!==edge.targetObjectId.toLowerCase()))throw Error('EDGE_IDENTITY_CONFLICT');
+        if(!old&&edge.deleted)throw Error('INVALID_BODY');
+        // A hidden relation can still be deleted; creating/restoring a live
+        // relation requires both current endpoints, including this operation.
+        if(!edge.deleted){
+          const endpoints=(await tx.query<{id:string;payload:unknown}>('SELECT o.id,r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id IN ($2,$3)',[projectId,edge.sourceObjectId,edge.targetObjectId])).rows;
+          if(endpoints.length!==2||endpoints.some(row=>WorkspaceObjectSchema.parse(row.payload).deleted))throw Error('EDGE_ENDPOINT_NOT_FOUND');
+        }
+        await tx.query('INSERT INTO workspace.display_edges VALUES($1,$2,$3) ON CONFLICT(project_id,id) DO UPDATE SET current_revision=excluded.current_revision',[projectId,edge.id,edge.revision]);
+        await tx.query('INSERT INTO workspace.display_edge_revisions VALUES($1,$2,$3,$4,$5,$6,$7)',[projectId,edge.id,edge.revision,edge.sourceObjectId,edge.targetObjectId,JSON.stringify(edge),contentHash(edge)]);
+        revision++;
+        await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,edge_id,edge_revision,actor_id) VALUES($1,$2,'editor_edge',$3,$4,$5)",[projectId,revision,edge.id,edge.revision,actorId]);
+      }
       await tx.query('UPDATE workspace.canvases SET revision=$1 WHERE project_id=$2',[revision,projectId]);
-      const result={revision,objects:input.objects.map(object=>({id:object.id,revision:object.revision}))};
+      const result={revision,objects:input.objects.map(object=>({id:object.id,revision:object.revision})),...(input.edges?{edges:input.edges.map(edge=>({id:edge.id,revision:edge.revision}))}:{})};
       await tx.query('INSERT INTO workspace.canvas_operations(project_id,id,actor_id,request_hash,result) VALUES($1,$2,$3,$4,$5)',[projectId,input.id,actorId,requestHash,JSON.stringify(result)]);
       return {...result,reused:false};
     });

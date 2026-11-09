@@ -69,7 +69,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       }
       const user=await db.authenticate(cookie(request));
       if(url.pathname==='/v1/me'&&method==='GET'){reply(response,200,{user});return;}
-      if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:!!options.archiveRecovery,canvasOperationsEnabled:true,canvasSelectionEnabled:true,unplacedResultsEnabled:true,resultPlacementEnabled:!!placement,documentFilesEnabled:!!options.assets,scope:'local-cpu-resize-only'});return;}
+      if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:!!options.archiveRecovery,canvasOperationsEnabled:true,canvasSelectionEnabled:true,unplacedResultsEnabled:true,resultPlacementEnabled:!!placement,documentFilesEnabled:!!options.assets,displayEdgesEnabled:true,scope:'local-cpu-resize-only'});return;}
       if(url.pathname==='/v1/auth/logout'&&method==='POST'){
         await db.logout(cookie(request));response.setHeader('set-cookie','workspace_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');reply(response,200,{logged_out:true});return;
       }
@@ -133,6 +133,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
         const result=await db.asActor(user.id,async tx=>({
           revision:Number((await tx.query<{revision:number}>("SELECT revision FROM workspace.canvases WHERE project_id=$1",[projectId])).rows[0].revision),
           objects:(await tx.query<{payload:unknown}>("SELECT r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND coalesce((r.payload->>'deleted')::boolean,false)=false ORDER BY o.id",[projectId])).rows.map(r=>r.payload),
+          edges:(await tx.query<{payload:unknown}>("SELECT r.payload FROM workspace.display_edges e JOIN workspace.display_edge_revisions r ON r.project_id=e.project_id AND r.edge_id=e.id AND r.revision=e.current_revision WHERE e.project_id=$1 AND coalesce((r.payload->>'deleted')::boolean,false)=false ORDER BY e.id",[projectId])).rows.map(r=>r.payload),
         }));reply(response,200,result);return;
       }
       if(role==='viewer'){reply(response,403,'ACCESS_DENIED');return;}
@@ -143,9 +144,9 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
         reply(response,200,await placement.place(user.id,projectId,route[3],{id:input.id,baseRevision:input.baseRevision,x:input.x,y:input.y},lease));return;
       }
       if(method==='POST'&&route[2]==='canvas-operations'&&!route[3]){
-        const input=await body(request);fields(input,['id','baseRevision','objects','lease']);
+        const input=await body(request);fields(input,['id','baseRevision','objects','edges','lease']);
         const lease=input.lease as {token:string;fencing:number};if(!lease||typeof lease.token!=='string'||!Number.isSafeInteger(lease.fencing)||Object.keys(lease).some(key=>!['token','fencing'].includes(key)))throw Error('INVALID_BODY');
-        reply(response,200,await db.saveCanvasOperation(user.id,projectId,{id:input.id,baseRevision:input.baseRevision,objects:input.objects},lease));return;
+        reply(response,200,await db.saveCanvasOperation(user.id,projectId,{id:input.id,baseRevision:input.baseRevision,objects:input.objects,...(input.edges===undefined?{}:{edges:input.edges})},lease));return;
       }
       if(method==='POST'&&route[2]==='runs'&&route[4]==='recover-archive'){
         const input=await body(request);fields(input,[]);
@@ -207,7 +208,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       const message=error instanceof Error?error.message:'';
       if(message==='COMPILER_NOT_CONFIGURED'){reply(response,503,message);return;}
       const status=['UNAUTHENTICATED','LOGIN_FAILED'].includes(message)?401:message==='ACCESS_DENIED'?403:message==='NOT_FOUND'?404:
-        ['LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','OBJECT_IDENTITY_CONFLICT','OBJECT_LOCKED','RESULT_NOT_READY','LOCAL_SETUP_COMPLETE','IDEMPOTENCY_CONFLICT','ARCHIVE_BUSY','ARCHIVE_NOT_RECOVERABLE','NO_VERIFIED_ARTIFACT','ARCHIVE_LEASE_INVALID','ARTIFACT_NOT_FOUND','ARTIFACT_INTEGRITY_FAILED'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED','DOCUMENT_SIZE_EXCEEDED'].includes(message)?413:
+        ['LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','OBJECT_IDENTITY_CONFLICT','EDGE_REVISION_CONFLICT','EDGE_IDENTITY_CONFLICT','EDGE_ENDPOINT_NOT_FOUND','OBJECT_LOCKED','RESULT_NOT_READY','LOCAL_SETUP_COMPLETE','IDEMPOTENCY_CONFLICT','ARCHIVE_BUSY','ARCHIVE_NOT_RECOVERABLE','NO_VERIFIED_ARTIFACT','ARCHIVE_LEASE_INVALID','ARTIFACT_NOT_FOUND','ARTIFACT_INTEGRITY_FAILED'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED','DOCUMENT_SIZE_EXCEEDED'].includes(message)?413:
         ['INVALID_BODY','INVALID_LOCAL_CREDENTIALS','ASSET_TYPE_REJECTED','INVALID_ASSET_NAME','INVALID_BINDING','INVALID_IDEMPOTENCY_KEY','DOCUMENT_TYPE_REJECTED','DOCUMENT_ENCODING_REJECTED','ASSET_KIND_MISMATCH'].includes(message)||error instanceof SyntaxError||error instanceof URIError||(error instanceof Error&&error.name==='ZodError')?422:500;
       reply(response,status,status===500?'INTERNAL_ERROR':message==='INVALID_BODY'?'INVALID_BODY':status===422?'INVALID_INPUT':message);
     }

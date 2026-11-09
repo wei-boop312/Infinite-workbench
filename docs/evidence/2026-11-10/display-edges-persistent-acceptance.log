@@ -1,0 +1,19 @@
+{
+  "scope": "actual-display-edge-disk-restart-no-execution",
+  "caseId": "d3398035-9673-456c-b4b2-26f3b34f7e7f",
+  "status": "passed",
+  "databaseReopened": true,
+  "canvasRevision": 4,
+  "immutableEdgeRevisions": 2,
+  "originalHashUnchanged": true,
+  "receiptReusedAfterRestart": true,
+  "outsiderRows": 0,
+  "executionCounts": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "modelRequests": 0,
+  "evidence": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\docs\\evidence\\2026-11-10\\display-edges\\d3398035-9673-456c-b4b2-26f3b34f7e7f"
+}

@@ -1,0 +1,86 @@
+
+Running 8 tests using 1 worker
+
+(node:22532) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 1 tests\local-e2e\workspace.spec.ts:28:1 › 首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销 (2.2s)
+  ok 2 tests\local-e2e\workspace.spec.ts:75:1 › 滚动升级时运行配置接口尚未提供，仍能登录并打开已有项目 (364ms)
+  ok 3 tests\local-e2e\workspace.spec.ts:86:1 › 创建撤销与重做持久保存；连续22次编辑精确撤销20步且重开保留结果 (2.0s)
+  ok 4 tests\local-e2e\workspace.spec.ts:99:1 › 保存回复丢失保留固定操作，用户重试只提交一次修订并可撤销，viewer无法软删 (626ms)
+  x  5 tests\local-e2e\workspace.spec.ts:115:1 › 多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开 (583ms)
+(node:61896) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 6 tests\local-e2e\workspace.spec.ts:139:1 › 复制图片只派生卡片ID，仍引用私有原资产；删除副本可撤销且不删除原件 (651ms)
+  ok 7 tests\local-e2e\workspace.spec.ts:147:1 › UTF8资料卡只读预览、原件下载、复制撤销与重开，资料不能进入图片工具或执行脚本 (1.3s)
+  x  8 tests\local-e2e\workspace.spec.ts:165:1 › 展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务 (30.1s)
+
+
+  1) tests\local-e2e\workspace.spec.ts:115:1 › 多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开 ─────────────────
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator: getByRole('region', { name: '对象属性' }).getByRole('heading')
+    Expected: "已选择 2 个对象"
+    Error: strict mode violation: getByRole('region', { name: '对象属性' }).getByRole('heading') resolved to 2 elements:
+        1) <h2>已选择 2 个对象</h2> aka getByRole('heading', { name: '已选择 2 个对象' })
+        2) <h3>展示关系</h3> aka getByRole('heading', { name: '展示关系' })
+
+    Call log:
+      - Expect "toHaveText" getByRole('region', { name: '对象属性' }).getByRole('heading') with timeout 5000ms
+      - waiting for getByRole('region', { name: '对象属性' }).getByRole('heading')
+
+
+      118 |   const positions=()=>page.locator('.card').evaluateAll(elements=>elements.map(e=>({id:(e as HTMLElement).dataset.objectId,x:parseFloat((e as HTMLElement).style.left),y:parseFloat((e as HTMLElement).style.top)})));
+      119 |   await page.locator('.handle').nth(0).click();await page.locator('.handle').nth(1).click({modifiers:['Shift']});const properties=page.getByRole('region',{name:'对象属性'});
+    > 120 |   await expect(properties.getByRole('heading')).toHaveText('已选择 2 个对象');await properties.getByRole('button',{name:'组合',exact:true}).click();await expect(page.locator('.group-outline')).toHaveCount(1);await expect(page.getByRole('status')).toHaveText('已保存到本机');
+          |                                                 ^
+      121 |   await page.reload();await expect(page.locator('.group-outline')).toHaveCount(1);await page.locator('.handle').first().click();await expect(properties.getByRole('heading')).toHaveText('已选择 2 个对象');
+      122 |   const before=await positions(),handle=await page.locator('.handle').first().boundingBox();if(!handle)throw Error('NO_HANDLE');await page.mouse.move(handle.x+20,handle.y+10);await page.mouse.down();await page.mouse.move(handle.x+80,handle.y+50,{steps:5});await page.mouse.up();await expect(page.getByRole('status')).toHaveText('已保存到本机');
+      123 |   const moved=await positions();expect(moved).toEqual(before.map(value=>({...value,x:value.x+60,y:value.y+40})));
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\tests\local-e2e\workspace.spec.ts:120:49
+
+    Error Context: test-results\workspace-多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开\error-context.md
+
+    Error Context: test-results\workspace-多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开\error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\workspace-多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\workspace-多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) tests\local-e2e\workspace.spec.ts:165:1 › 展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务 ──────────────
+
+    Test timeout of 30000ms exceeded.
+
+    Error: locator.click: Test timeout of 30000ms exceeded.
+    Call log:
+      - waiting for getByRole('region', { name: '对象属性' }).getByRole('button', { name: '删除展示关系', exact: true })
+
+
+      171 |   await props.getByRole('button',{name:'复制所选',exact:true}).click();await expect(page.locator('.card')).toHaveCount(4);await expect(edges).toHaveCount(2);await page.getByRole('button',{name:'撤销',exact:true}).click();await expect(page.locator('.card')).toHaveCount(2);await expect(edges).toHaveCount(1);await page.getByRole('button',{name:'重做',exact:true}).click();await expect(page.locator('.card')).toHaveCount(4);await expect(edges).toHaveCount(2);await page.getByRole('button',{name:'撤销',exact:true}).click();await expect(page.locator('.card')).toHaveCount(2);
+      172 |   await page.locator('.handle').nth(0).click();await props.getByRole('button',{name:'删除所选',exact:true}).click();await expect(page.locator('.card')).toHaveCount(1);await expect(edges).toHaveCount(0);await page.getByRole('button',{name:'撤销',exact:true}).click();await expect(page.locator('.card')).toHaveCount(2);await expect(edges).toHaveCount(1);
+    > 173 |   await props.getByRole('button',{name:'删除展示关系',exact:true}).click();await expect(edges).toHaveCount(0);await page.getByRole('button',{name:'撤销',exact:true}).click();await expect(edges).toHaveCount(1);await page.reload();await expect(edges).toHaveCount(1);await expect(edges.locator('text')).toHaveText('产品资料 → 策划');expect(posts).toBe(0);const p=await page.evaluate(()=>localStorage.getItem('workspace.last-project'));expect((await(await page.request.get(origin+`/v1/projects/${p}/runs`)).json()).data.items).toEqual([]);await page.screenshot({path:'docs/evidence/2026-11-10/display-edges.png',fullPage:true});
+          |                                                              ^
+      174 | });
+      175 |
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\tests\local-e2e\workspace.spec.ts:173:62
+
+    Error Context: test-results\workspace-展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务\error-context.md
+
+    Error Context: test-results\workspace-展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务\error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\workspace-展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\workspace-展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2 failed
+    tests\local-e2e\workspace.spec.ts:115:1 › 多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开 ──────────────────
+    tests\local-e2e\workspace.spec.ts:165:1 › 展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务 ───────────────
+  6 passed (43.1s)

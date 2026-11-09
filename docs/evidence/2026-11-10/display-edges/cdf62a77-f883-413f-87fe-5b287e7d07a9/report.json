@@ -1,0 +1,18 @@
+{
+  "scope": "actual-display-edge-disk-restart-no-execution",
+  "caseId": "cdf62a77-f883-413f-87fe-5b287e7d07a9",
+  "status": "passed",
+  "databaseReopened": true,
+  "canvasRevision": 4,
+  "immutableEdgeRevisions": 2,
+  "originalHashUnchanged": true,
+  "receiptReusedAfterRestart": true,
+  "outsiderRows": 0,
+  "executionCounts": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "modelRequests": 0
+}

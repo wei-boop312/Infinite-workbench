@@ -32,7 +32,8 @@ export const WorkspaceObjectSchema = z.discriminatedUnion("type", [
   z.object({ ...ObjectBase, type: z.literal("tool"), templateVersionId: Id }).strict(),
 ]);
 
-export const WorkspaceCanvasOperationSchema=z.object({id:Id,baseRevision:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),objects:z.array(WorkspaceObjectSchema).min(1).max(100)}).strict();
+export const WorkspaceDisplayEdgeSchema=z.object({id:Id,projectId:Id,revision:Revision,sourceObjectId:Id,targetObjectId:Id,kind:z.literal('display'),label:z.string().max(240).optional(),deleted:z.boolean().optional()}).strict().refine(edge=>edge.sourceObjectId.toLowerCase()!==edge.targetObjectId.toLowerCase(),'Self relation rejected');
+export const WorkspaceCanvasOperationSchema=z.object({id:Id,baseRevision:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),objects:z.array(WorkspaceObjectSchema).max(100),edges:z.array(WorkspaceDisplayEdgeSchema).max(100).optional()}).strict().refine(input=>input.objects.length+(input.edges?.length??0)>0&&input.objects.length+(input.edges?.length??0)<=100,'Operation requires 1 to 100 changes');
 export const WorkspaceResultPlacementSchema=z.object({id:Id,baseRevision:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),x:z.number().finite(),y:z.number().finite()}).strict();
 export const DisplayEdgeSchema = z.object({
   id: Id, projectId: Id, sourceObjectId: Id, targetObjectId: Id,
@@ -102,6 +103,7 @@ export function workspaceJsonSchemas() {
     "canvas-operation.schema":z.toJSONSchema(WorkspaceCanvasOperationSchema),
     "result-placement.schema":z.toJSONSchema(WorkspaceResultPlacementSchema),
     "document-asset.schema":z.toJSONSchema(WorkspaceDocumentAssetSchema),
+    "display-edge-revision.schema":z.toJSONSchema(WorkspaceDisplayEdgeSchema),
     "object-revision.schema": z.toJSONSchema(WorkspaceObjectSchema),
     "workflow-version.schema": z.toJSONSchema(WorkspaceWorkflowSchema),
     "binding-request.schema": z.toJSONSchema(WorkspaceBindingRequestSchema),

@@ -1,0 +1,40 @@
+{
+  "payload": {
+    "versions": {
+      "python": "3.13.12 (tags/v3.13.12:1cbe481, Feb  3 2026, 18:22:25) [MSC v.1944 64 bit (AMD64)]",
+      "comfyui": "0.27.0",
+      "pytorch": "2.12.0+cu130"
+    },
+    "coreFiles": [
+      {
+        "path": "nodes.py",
+        "sha256": "c1f88a64ca13275af5cb555d303b3decb83c6d5ca3c624e643b4ff655b7efc22"
+      },
+      {
+        "path": "execution.py",
+        "sha256": "9baa678547e7f3dbdb193159157832cf1e987dc0428b865b1b60841d18ad0a8b"
+      },
+      {
+        "path": "server.py",
+        "sha256": "6f666a3bf7155b50e6e2d10106c0430a8239be3cbd4dd9ef2fd0942f0d6fd56b"
+      },
+      {
+        "path": "comfy/utils.py",
+        "sha256": "339031b402739116941030f8c570a61a35a3e6e072e67eee96c084e125107803"
+      },
+      {
+        "path": "comfy/model_management.py",
+        "sha256": "e1f686627e2ffbb907377bb107fc90fbb74dbbd944e1c5d367944f95392197c6"
+      }
+    ],
+    "runtimeRef": "owned-comfy-worker-19485372-f663-49cb-9d5d-1bc242463a7c",
+    "runtimeKind": "owned-cpu-comfy",
+    "bridgeSha256": "6c16bdf799959f6d83bb6dbf2dc165d3bec56910e954f52c05da499df43f5dce",
+    "schemaVersion": 1,
+    "adapterVersion": "local-owned-resize-v1",
+    "registrySha256": "ae25c185d3d86faf7fdac34cc6ab17970f709c48061e5bc1f217b9ed1c53f7b9",
+    "compilerSourceSha256": "147e8f274d2711b29b1ec523832d4d246ea3877344a3013b8b407c8982419099",
+    "pythonExecutableSha256": "a2a4eff8d0b0c845284c607d50a3b5b966ac5a3121736a2e38e165bd6644d9fe"
+  },
+  "content_hash": "6d616f5700c6f11ef0191b7eea367dde8eabe82bfc9f1a1df7619c46189c8fcf"
+}

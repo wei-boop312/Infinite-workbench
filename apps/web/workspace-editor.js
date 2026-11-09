@@ -29,3 +29,6 @@ export class BoundedEditHistory {
   values(direction){const changes=this.peek(direction);return changes?.map(change=>{const value=direction==='undo'?change.before:change.after;return value??{...(change.after??change.before),deleted:true};})??[];}
   accept(direction){if(direction==='undo'){const item=this.past.pop();if(item)this.future.unshift(item);}else{const item=this.future.shift();if(item)this.past=[...this.past,item].slice(-20);}}
 }
+
+export function visibleDisplayEdges(edges,objects){const ids=new Set(objects.filter(o=>!o.deleted).map(o=>o.id.toLowerCase()));return edges.filter(edge=>!edge.deleted&&ids.has(edge.sourceObjectId.toLowerCase())&&ids.has(edge.targetObjectId.toLowerCase()));}
+export function copiedDisplayEdges(edges,originals,copies,newId){const ids=new Map(originals.map((o,index)=>[o.id.toLowerCase(),copies[index].id]));return edges.filter(edge=>!edge.deleted&&ids.has(edge.sourceObjectId.toLowerCase())&&ids.has(edge.targetObjectId.toLowerCase())).map(edge=>({...structuredClone(edge),id:newId(),revision:0,sourceObjectId:ids.get(edge.sourceObjectId.toLowerCase()),targetObjectId:ids.get(edge.targetObjectId.toLowerCase())}));}
