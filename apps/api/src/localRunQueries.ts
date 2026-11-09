@@ -1,6 +1,7 @@
 import type {Transaction} from '@electric-sql/pglite';
 import {WorkspaceWorkflowSchema} from '@canvas/contracts';
 import {LocalWorkspaceDatabase} from './localWorkspaceDatabase.ts';
+import {validateResizeCapabilityPin} from './workspaceModelGateway';
 import {contentHash,validateWorkflow} from './workspacePrototype.ts';
 
 const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -61,7 +62,8 @@ export class LocalRunQueries {
       let localZeroCostRuns=0,executionUnknownRuns=0,unknownCostRuns=0,unaccountedRuns=0;
       for(const row of rows){
         const p=this.snapshot(row.payload,row.content_hash);let zero=false;
-        if(p?.schemaVersion===1&&p?.authorization?.scope==='local-resize-only-v1'&&p.authorization.providerCost==='0'&&p.authorization.currency===budget.currency&&p?.template?.operation==='image.resize'){
+        if(p?.schemaVersion===2)validateResizeCapabilityPin(p.modelCapability);
+        if([1,2].includes(p?.schemaVersion)&&p?.authorization?.scope==='local-resize-only-v1'&&p.authorization.providerCost==='0'&&p.authorization.currency===budget.currency&&p?.template?.operation==='image.resize'){
           try{validateWorkflow(WorkspaceWorkflowSchema.parse(p.workflow));zero=true;}catch{}
         }
         if(row.state==='unknown')executionUnknownRuns++;

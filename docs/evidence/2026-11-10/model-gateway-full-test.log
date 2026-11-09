@@ -1,0 +1,10 @@
+$ vitest run
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+
+ Test Files  87 passed (87)
+      Tests  2972 passed (2972)
+   Start at  07:45:59
+   Duration  311.03s (tests 98%, import 1%)
+

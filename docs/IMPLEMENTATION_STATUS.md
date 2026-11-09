@@ -289,3 +289,18 @@ FR-02/07、TASK-07/09/15、T02/T09本地切片。新增普通task对象严格仅
 
 ### 第十次日常服务升级完成
 07:40备份升级完成：1118文件hash一致，独立restore-check副本14→15，31张既有表所有原有列数据摘要一致；launcher64768。入口200且首页含添加任务卡；账号/项目/素材未重置。私有备份work/local-workspace/backups/20261110-074024-76d3215a-0be5-4f75-8794-15d284e98d51；脱敏统计task-cards-upgrade-summary.json。代码提交1535ac8。周额度已用61%/剩余39%，尚未达到停止条件。下一步模型网关能力/费用未知协议及资料事实/分析策划等就绪部分，实际付费/云调用因账号与环境未配置仍不启用；完整目标保持进行中。
+
+## 2026-11-10 模型能力网关协议与本地路由（全量运行中）
+TASK-16、FR-07/08/09的LOCAL_PARTIAL。复核旧imageProviderContract及版本/报价指纹约束后，仅借鉴“固定能力/版本、指纹与未知费用不归零”，没有把旧租户/报价/付费执行接口直接挂到新工作区。新增服务端固定目录：local-comfy-resize、document-facts、fact-analysis、visual-plan。只有本机CPU缩放声明已验证零供应商费用，ready/queue_only/not_configured区分配置与排队条件；ready表示执行入口已配置，不替代实时健康/质量验收。提取/分析/策划均provider=unconfigured、model=null、cost=unknown，无金额字段，无远端适配器或Key读取。
+
+新增严格机器契约model-capability/model-cost/model-preflight；费用known用十进制字符串，unknown不接受amount=0等伪字段。GET /v1/model-capabilities要求登录，仅给出服务器自有脱敏目录；POST /v1/projects/{p}/model-preflight要求当前项目编辑权限、同源与严格固定能力ID/version/operation/参数。不接受URL、actor、Key、任意provider参数。预检明确submitted=false/executionAuthorized=false，不创建run/snapshot/outbox/attempt，不冻结预算；未配置能力空参数只返回needs_configuration/未知费用，有输入参数则拒绝，不外发资料。
+
+LocalBoundRuns改为通过同一网关冻结能力，新增快照schemaVersion2和modelCapability descriptor/hash，worker领取及归档校验器重新验证版本、整段hash与本地白名单；单纯重算篡改内容hash也不能扩权。旧v1历史仍按原本地白名单验证，不添加字段或重写hash。原resize请求hash/幂等policy不变，所以升级后旧幂等key可以原样复用回执；usage认识v2并验证能力指纹，损坏时关闭，不给假零费用。此为新工作区统一协议基础及既有CPU适配，不声称已完成真正云LLM提取/分析/策划。
+
+50项网关/版本/费用/worker/HTTP专项通过；真实HTTP验证未登录401、外项目404、篡参422、版本409以及预检后0run/snapshot/attempt/outbox、预算无冻结/支出。旧v1真实SQL夹具幂等重读与领取通过，原hash不变；v2缺指纹拒绝worker和usage。首次新增测试因根测试目录不能解析@canvas/contracts别名而加载失败，改为本仓库相对契约导入，保留失败日志，未改业务断言。真实CPU浏览器a3e4be83-3429-407e-929e-d1ab910a26a1通过：新v2正常执行/任务卡结果下载/重开和单次提交闭环，无新模型或付费请求；自有进程最终停止。六包构建已通过。
+
+全量87893：work/model-gateway-full-test.log运行中。无数据库DDL，日常4310仍前一任务卡阶段二进制，schema15；新代码须待全量终态后备份重启。真正文本模型供应商账号/许可与实际调用、资料来源事实、分析策划、Agent、JSON导出恢复、原生多连接与性能仍待；无云/付费环境不作为其余就绪本地任务停止理由。
+
+### 模型网关协议最终冻结结果
+全量87893终态：87文件2972项全部通过，311.03秒；六包构建与真实CPU浏览器通过。另为实际CPU证据增加SQL快照版本/能力pin的直接断言与脱敏导出，避免仅根据调用路径推断v2运行；不变更运行代码或放宽原有断言。代码无DDL，不改旧v1快照和既有幂等请求hash。最新周额度已用62%/剩余38%；准备本机备份重启。
+最终实际CPU SQL证据d995a1cf-1533-4f18-b6ef-0d56d9b03b65通过：数据库schemaVersion=2、local-comfy-resize v1、ready、零供应商费用及capabilityHash已直接断言并导出model-capability-pin.json；同一结果字节、任务卡重开和单次运行约束继续通过。未读取用户日常数据。

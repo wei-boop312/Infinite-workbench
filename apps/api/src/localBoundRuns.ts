@@ -1,16 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { WorkspaceParametersSchema, WorkspaceWorkflowSchema, WorkspaceTemplateSchema, WorkspaceObjectSchema, WorkspaceBindingRequestSchema } from '@canvas/contracts';
 import { LocalWorkspaceDatabase } from './localWorkspaceDatabase.ts';
+import {WorkspaceModelGateway} from './workspaceModelGateway.ts';
 import { contentHash,validateWorkflow } from './workspacePrototype.ts';
 
 /** Only explicitly requested, zero-provider-cost local resize is supported. */
 export class LocalBoundRuns {
-  constructor(private db:LocalWorkspaceDatabase,private compilerSourceSha256:string|null=null){
+  constructor(private db:LocalWorkspaceDatabase,private compilerSourceSha256:string|null=null,private gateway=new WorkspaceModelGateway({compilerConfigured:compilerSourceSha256!==null,localResizeExecutor:false})){
     if(compilerSourceSha256!==null&&!/^[a-f0-9]{64}$/.test(compilerSourceSha256))throw Error('INVALID_COMPILER_PIN');
   }
   async create(actorId:string,projectId:string,bindingId:string,input:unknown,key:string){
     if(this.compilerSourceSha256===null)throw Error('COMPILER_NOT_CONFIGURED');
-    const parameters=WorkspaceParametersSchema.parse(input);
+    const parameters=WorkspaceParametersSchema.parse(input),modelCapability=this.gateway.resizeSnapshot(input);
     if(!/^[a-zA-Z0-9_-]{1,128}$/.test(key))throw Error('INVALID_IDEMPOTENCY_KEY');
     const requestHash=contentHash({bindingId,parameters,policy:'local-resize-only-v1'});
     return this.db.asActor(actorId,async tx=>{
@@ -41,7 +42,7 @@ export class LocalBoundRuns {
       if(source.type!=='image'||tool.type!=='tool'||tool.templateVersionId!==template.id||contentHash(source)!==contentHash(p.source)||contentHash(tool)!==contentHash(p.tool))throw Error('BINDING_INTEGRITY_FAILED');
       const asset=(await tx.query<{sha256:string;state:string}>('SELECT sha256,state FROM workspace.asset_versions WHERE project_id=$1 AND id=$2',[projectId,source.assetVersionId])).rows[0];
       if(!asset||asset.state!=='ready'||asset.sha256!==p.assetSha256||source.assetVersionId!==p.assetVersionId)throw Error('ASSET_INTEGRITY_FAILED');
-      const snapshot={schemaVersion:1,binding,workflow,workflowHash:w.content_hash,template,templateHash:t.content_hash,source,tool,
+      const snapshot={schemaVersion:2,modelCapability,binding,workflow,workflowHash:w.content_hash,template,templateHash:t.content_hash,source,tool,
         asset:{id:source.assetVersionId,sha256:asset.sha256},parameters,
         compiler:{version:'2.15.2',sourceSha256:this.compilerSourceSha256,registryValidation:'required-before-worker-execution'},
         authorization:{actorId,scope:'local-resize-only-v1',providerCost:'0',currency:'USD'}};

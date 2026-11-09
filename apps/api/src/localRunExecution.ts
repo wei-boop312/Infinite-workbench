@@ -2,6 +2,7 @@ import { createHash,randomBytes,randomUUID } from 'node:crypto';
 import { WorkspaceWorkflowSchema,WorkspaceTemplateSchema,WorkspaceObjectSchema,WorkspaceBindingRequestSchema,WorkspaceParametersSchema,WorkspaceRuntimeEvidenceSchema,WorkspaceArtifactManifestSchema } from '@canvas/contracts';
 import { LocalWorkspaceDatabase } from './localWorkspaceDatabase.ts';
 import { contentHash,validateWorkflow } from './workspacePrototype.ts';
+import {validateResizeCapabilityPin} from './workspaceModelGateway.ts';
 import {isInterruptedWithoutOutput,type OwnedCancellationReceipt} from './ownedCancellationReceipt.ts';
 import {matchesOwnedOutputHistory} from './ownedOutputReceipt.ts';
 import type {StoredRunArtifact} from './localRunArtifactStore.ts';
@@ -19,7 +20,8 @@ export class LocalRunExecution {
   constructor(private db:LocalWorkspaceDatabase,private compilerSourceSha256:string){}
   private validateSnapshot(raw:unknown,projectId:string,actorId:string,compilerSourceSha256=this.compilerSourceSha256){
     const snapshot=raw as Record<string,any>;
-    if(!snapshot||snapshot.schemaVersion!==1)throw Error('SNAPSHOT_INTEGRITY_FAILED');
+    if(!snapshot||![1,2].includes(snapshot.schemaVersion))throw Error('SNAPSHOT_INTEGRITY_FAILED');
+    if(snapshot.schemaVersion===2)validateResizeCapabilityPin(snapshot.modelCapability);
     const binding=WorkspaceBindingRequestSchema.parse(snapshot.binding),workflow=WorkspaceWorkflowSchema.parse(snapshot.workflow),template=WorkspaceTemplateSchema.parse(snapshot.template),
       source=WorkspaceObjectSchema.parse(snapshot.source),tool=WorkspaceObjectSchema.parse(snapshot.tool),parameters=WorkspaceParametersSchema.parse(snapshot.parameters);
     validateWorkflow(workflow);

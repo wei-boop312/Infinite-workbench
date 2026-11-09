@@ -1,4 +1,5 @@
 import { z } from "zod";
+import {WorkspaceModelCapabilitySchema,WorkspaceModelCostSchema,WorkspaceModelPreflightSchema} from "./workspaceModels.ts";
 
 // A separate protocol: legacy CanvasDocument v2 is never silently reinterpreted.
 const Id = z.uuid();
@@ -102,6 +103,9 @@ export function workspaceJsonSchemas() {
   return {
     "resize-parameters.schema": ResizeParameterJsonSchema,
     "canvas-operation.schema":z.toJSONSchema(WorkspaceCanvasOperationSchema),
+    "model-capability.schema":z.toJSONSchema(WorkspaceModelCapabilitySchema),
+    "model-cost.schema":z.toJSONSchema(WorkspaceModelCostSchema),
+    "model-preflight.schema":z.toJSONSchema(WorkspaceModelPreflightSchema),
     "result-placement.schema":z.toJSONSchema(WorkspaceResultPlacementSchema),
     "document-asset.schema":z.toJSONSchema(WorkspaceDocumentAssetSchema),
     "display-edge-revision.schema":z.toJSONSchema(WorkspaceDisplayEdgeSchema),

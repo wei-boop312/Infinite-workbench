@@ -1,0 +1,25 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/workspace-model-gateway.test.ts (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/workspace-model-gateway.test.ts [ tests/workspace-model-gateway.test.ts ]
+Error: Cannot find package '@canvas/contracts' imported from C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation/tests/workspace-model-gateway.test.ts
+ ❯ tests/workspace-model-gateway.test.ts:3:1
+      1| import {it,expect,beforeAll,afterAll} from 'vitest';
+      2| import {WorkspaceModelGateway,validateResizeCapabilityPin} from '../ap…
+      3| import {WorkspaceModelCapabilitySchema,WorkspaceModelCostSchema} from …
+       | ^
+      4| import {contentHash} from '../apps/api/src/workspacePrototype';
+      5| import {LocalWorkspaceDatabase} from '../apps/api/src/localWorkspaceDa…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 3 passed (4)
+      Tests  21 passed (21)
+   Start at  07:44:38
+   Duration  4.58s (tests 83%, transform 10%, import 7%)
+

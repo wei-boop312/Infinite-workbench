@@ -146,3 +146,17 @@ it('ready原字节资产先归档，结果对象/事件/成功同事务；重入
   expect(rows[0].count).toBe('1');
   expect((await db.asActor(actor,tx=>tx.query<{stage:string}>('SELECT stage FROM workspace.run_events WHERE project_id=$1 AND run_id=$2 ORDER BY sequence',[project,run.id]))).rows.map(r=>r.stage)).toEqual(['claimed','submitted','returned','completed']);
 });
+
+import {WorkspaceModelGateway} from '../apps/api/src/workspaceModelGateway';
+import {LocalRunQueries} from '../apps/api/src/localRunQueries';
+import {contentHash} from '../apps/api/src/workspacePrototype';
+it('新增v2能力指纹冻结并校验；真实SQL旧v1回执可幂等重读和领取，原快照不改写',async()=>{
+  const binding=(await db.asActor(actor,tx=>tx.query<{id:string}>('SELECT id FROM workspace.bindings WHERE project_id=$1',[project]))).rows[0],runs=new LocalBoundRuns(db,'b'.repeat(64),new WorkspaceModelGateway({compilerConfigured:true,localResizeExecutor:true})),parameters={width:128,height:128},newRun=await runs.create(actor,project,binding.id,parameters,'owned-capability-pin-v2'),current=(await runs.read(actor,project,newRun.id)).snapshot as any;
+  expect(current).toMatchObject({schemaVersion:2,modelCapability:{capability:{id:'local-comfy-resize',version:1,readiness:'ready',cost:{state:'known',amount:'0'}}}});expect(current.modelCapability.capabilityHash).toBe(contentHash(current.modelCapability.capability));
+  // Emulate a legitimate pre-gateway v1 record using the original exact shape
+  // and request hash. This owned fixture never touches daily user history.
+  const legacy=structuredClone(current);legacy.schemaVersion=1;delete legacy.modelCapability;const legacyId=randomUUID(),snapshotId=randomUUID(),key='owned-pre-gateway-v1',legacyHash=contentHash(legacy);
+  await db.asActor(actor,async tx=>{await tx.query('INSERT INTO workspace.run_snapshots VALUES($1,$2,$3,$4)',[project,snapshotId,JSON.stringify(legacy),legacyHash]);await tx.query("INSERT INTO workspace.runs(project_id,id,snapshot_id,state,idempotency_key,request_hash,reserved_amount) VALUES($1,$2,$3,'queued',$4,$5,0)",[project,legacyId,snapshotId,key,contentHash({bindingId:binding.id,parameters,policy:'local-resize-only-v1'})]);});
+  expect(await runs.create(actor,project,binding.id,parameters,key)).toEqual({id:legacyId,reused:true});expect((await runs.read(actor,project,legacyId)).snapshotHash).toBe(legacyHash);const execution=new LocalRunExecution(db,'b'.repeat(64));expect((await execution.claim(actor,project,legacyId,randomUUID())).snapshot.schemaVersion).toBe(1);expect((await runs.read(actor,project,legacyId)).snapshotHash).toBe(legacyHash);expect((await new LocalRunQueries(db).usage(actor,project)).actual.complete).toBe(true);
+  const missingPin=structuredClone(current);delete missingPin.modelCapability;const invalid=await db.enqueue(actor,project,missingPin,'owned-v2-missing-pin','0');await expect(execution.claim(actor,project,invalid,randomUUID())).rejects.toThrow('SNAPSHOT_INTEGRITY_FAILED');await expect(new LocalRunQueries(db).usage(actor,project)).rejects.toThrow('SNAPSHOT_INTEGRITY_FAILED');
+});
