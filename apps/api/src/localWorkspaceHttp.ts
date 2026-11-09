@@ -24,7 +24,7 @@ function fields(data:Record<string,unknown>,keys:string[]){if(Object.keys(data).
 function cookie(request:IncomingMessage){return (request.headers.cookie??'').split(';').map(s=>s.trim()).find(s=>s.startsWith('workspace_session='))?.slice(18)??'';}
 
 /** Loopback development API. No cloud OIDC, CORS, public registration or model execution. */
-export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{origin:()=>string;clientFile?:string;assets?:LocalWorkspaceAssets;compilerSourceSha256?:string}){
+export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{origin:()=>string;clientFile?:string;assets?:LocalWorkspaceAssets;compilerSourceSha256?:string;onRunQueued?:()=>void}){
   const failures=new Map<string,{count:number;until:number}>();
   const versions=new LocalWorkflowVersions(db);
   const boundRuns=new LocalBoundRuns(db,options.compilerSourceSha256??null);
@@ -61,6 +61,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       }
       const user=await db.authenticate(cookie(request));
       if(url.pathname==='/v1/me'&&method==='GET'){reply(response,200,{user});return;}
+      if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,scope:'local-cpu-resize-only'});return;}
       if(url.pathname==='/v1/auth/logout'&&method==='POST'){
         await db.logout(cookie(request));response.setHeader('set-cookie','workspace_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');reply(response,200,{logged_out:true});return;
       }
@@ -107,7 +108,8 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
         const input=await body(request);fields(input,['bindingId','parameters']);
         const key=request.headers['idempotency-key'];
         if(typeof input.bindingId!=='string'||!uuid.test(input.bindingId)||typeof key!=='string')throw Error('INVALID_BODY');
-        reply(response,202,await boundRuns.create(user.id,projectId,input.bindingId,input.parameters,key));return;
+        const run=await boundRuns.create(user.id,projectId,input.bindingId,input.parameters,key);
+        options.onRunQueued?.();reply(response,202,run);return;
       }
       if(method==='POST'&&!route[3]&&['workflow-versions','template-versions','bindings'].includes(route[2])){
         const input=await body(request);

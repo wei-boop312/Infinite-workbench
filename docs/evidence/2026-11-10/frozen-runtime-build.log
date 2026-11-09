@@ -1,0 +1,44 @@
+$ pnpm -r --if-present build
+Scope: 6 of 7 workspace projects
+packages/contracts build$ tsc -p tsconfig.json
+packages/contracts build: Done
+packages/testing build$ tsc -p tsconfig.json
+packages/canvas-schema build$ tsc -p tsconfig.json
+packages/testing build: Done
+apps/worker build$ tsc -p tsconfig.json
+packages/canvas-schema build: Done
+apps/api build$ tsc -p tsconfig.json
+apps/web build$ tsc -b && vite build
+apps/worker build: Done
+apps/api build: Done
+apps/web build: vite v7.2.2 building client environment for production...
+apps/web build: transforming...
+apps/web build: ../../node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/util.js (400:0): A comment
+apps/web build: "// Wrapped in a `@__PURE__` IIFE: esbuild never tree-shakes a top-level initializer that contains a member access on `Number`, so the bare object literal survived into every bundle."
+apps/web build: in "../../node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/util.js" contains an annotation that Rollup cannot interpret due to the position of the comment. The comment will be removed to avoid issues.
+apps/web build: ../../node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/regexes.js (74:0): A comment
+apps/web build: "/** Anchors a pattern source. The interpolation lives here rather than at the call site because
+apps/web build:  * esbuild will not drop a `@__PURE__` call whose own argument interpolates a variable, but it
+apps/web build:  * will drop `anchor(dateSource)`. Keeping it inline pinned `date` into every bundle. */"
+apps/web build: in "../../node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/regexes.js" contains an annotation that Rollup cannot interpret due to the position of the comment. The comment will be removed to avoid issues.
+apps/web build: ✓ 341 modules transformed.
+apps/web build: rendering chunks...
+apps/web build: computing gzip size...
+apps/web build: dist/index.html                                                 0.54 kB │ gzip:   0.37 kB
+apps/web build: dist/assets/RunPanel-CE3RkHV2.css                               4.77 kB │ gzip:   1.41 kB
+apps/web build: (!) Some chunks are larger than 500 kB after minification. Consider:
+apps/web build: - Using dynamic import() to code-split the application
+apps/web build: - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+apps/web build: - Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+apps/web build: dist/assets/index-CyPAHrg8.css                                 38.55 kB │ gzip:   7.53 kB
+apps/web build: dist/assets/lockedProductionGeneratedAssetPolicy-CKWt02np.js    1.66 kB │ gzip:   0.90 kB
+apps/web build: dist/assets/productionGeneratedAssetPolicy-D5xYVkfu.js          2.64 kB │ gzip:   1.33 kB
+apps/web build: dist/assets/generatedAssetCache-SrbI6o-w.js                     2.87 kB │ gzip:   1.51 kB
+apps/web build: dist/assets/generatedResult-Cwpm0Kgc.js                         5.01 kB │ gzip:   2.25 kB
+apps/web build: dist/assets/productionGeneratedResult-BxcUhznR.js               5.73 kB │ gzip:   2.40 kB
+apps/web build: dist/assets/lockedProductionGeneratedResult-BV_9PXou.js         6.04 kB │ gzip:   2.46 kB
+apps/web build: dist/assets/RunPanel-CghCCfQe.js                              148.70 kB │ gzip:  40.99 kB
+apps/web build: dist/assets/index-Cw5sVmwL.js                                 190.78 kB │ gzip:  46.11 kB
+apps/web build: dist/assets/index-Ce5n6tD2.js                                 513.90 kB │ gzip: 161.60 kB
+apps/web build: ✓ built in 1.56s
+apps/web build: Done

@@ -93,6 +93,23 @@ export class LocalWorkspaceDatabase {
       return {token,fencing,expiresAt};
     });
   }
+  /** Privileged read-only dispatcher inventory, never routed to public HTTP. */
+  async pendingLocalRuns(){
+    const rows=(await this.db.query<{project_id:string;run_id:string;actor_id:string}>(`SELECT o.project_id,o.run_id,s.payload->'authorization'->>'actorId' AS actor_id
+      FROM workspace.outbox o JOIN workspace.runs r ON r.project_id=o.project_id AND r.id=o.run_id
+      JOIN workspace.run_snapshots s ON s.project_id=r.project_id AND s.id=r.snapshot_id
+      JOIN workspace.projects p ON p.id=r.project_id AND p.deleted_at IS NULL
+      JOIN workspace.project_members m ON m.project_id=p.id AND m.user_id::text=s.payload->'authorization'->>'actorId' AND m.role IN ('owner','creator','designer')
+      WHERE o.dispatched_at IS NULL AND o.event_type='run.created' AND r.state='queued' AND s.payload->'authorization'->>'scope'='local-resize-only-v1'
+      ORDER BY o.created_at LIMIT 100`)).rows;
+    return rows.filter(row=>/^[0-9a-f-]{36}$/i.test(row.actor_id));
+  }
+  async expiredLocalAttempts(){
+    return (await this.db.query<{project_id:string;run_id:string;actor_id:string}>(`SELECT a.project_id,a.run_id,a.actor_id FROM workspace.run_attempts a
+      JOIN workspace.projects p ON p.id=a.project_id AND p.deleted_at IS NULL
+      JOIN workspace.project_members m ON m.project_id=p.id AND m.user_id=a.actor_id AND m.role IN ('owner','creator','designer')
+      WHERE a.lease_expires_at<=now() AND a.stage IN ('claimed','submitted','returned') LIMIT 100`)).rows;
+  }
   async saveObject(actorId:string,projectId:string,raw:unknown,baseCanvasRevision:number,lease:{token:string;fencing:number},now=new Date()) {
     const object=WorkspaceObjectSchema.parse(raw);
     if(object.projectId!==projectId) throw new Error("NOT_FOUND");

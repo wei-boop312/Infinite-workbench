@@ -1,0 +1,8 @@
+
+Running 1 test using 1 worker
+
+(node:61532) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 1 tests\owned-runtime-e2e\resize.spec.ts:27:1 › 真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投 (9.8s)
+
+  1 passed (12.5s)

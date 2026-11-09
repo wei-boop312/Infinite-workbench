@@ -1,0 +1,30 @@
+$ vitest run
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/locked-production-public-http.test.ts (81 tests | 1 failed) 29547ms
+   ❯ B10A full persisted protected artifact/fee history, never reprocess or send (8)
+     × 原result字段损坏，部分重算SQLite SHA仍失败关闭 5048ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > 原result字段损坏，部分重算SQLite SHA仍失败关闭
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-public-http.test.ts:270:38
+    268|     expect(() => port.getConfirmation(principal, "project-a", t.prepar…
+    269|   });
+    270|   it.each(["proof", "fees", "result"])("原%s字段损坏，部分重算SQLite SHA仍失败关闭", …
+       |                                      ^
+    271|     const t = await ownedLockedGeneratedTask(); owned.push(t); if (bad…
+    272|     try { const row = db.prepare("SELECT payload FROM kernel_state WHE…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 77 passed (78)
+      Tests  1 failed | 2907 passed (2908)
+   Start at  02:58:46
+   Duration  393.90s (tests 98%, import 1%)
+
+[ELIFECYCLE] Test failed. See above for more details.

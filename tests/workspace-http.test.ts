@@ -6,23 +6,26 @@ import { createLocalWorkspaceHttp } from "../apps/api/src/localWorkspaceHttp.ts"
 
 describe('本地身份到项目/租约/保存的真实HTTP闭环',()=>{
   let db:LocalWorkspaceDatabase,server:Server,origin='',cookie='',otherCookie='',project='';
+  let queuedNotifications=0;
   const password='owned-http-password-2026-very-long';
   async function request(path:string,method='GET',value?:unknown,session=cookie,from=origin){
     return fetch(origin+path,{method,headers:{origin:from,'content-type':'application/json','x-workspace-local':'1',cookie:session},body:value===undefined?undefined:JSON.stringify(value)});
   }
   beforeAll(async()=>{
     db=await LocalWorkspaceDatabase.open(process.cwd());await db.registerLocalUser('owner_http',password);await db.registerLocalUser('other_http',password);
-    server=createLocalWorkspaceHttp(db,{origin:()=>origin,compilerSourceSha256:'b'.repeat(64)});await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));
+    server=createLocalWorkspaceHttp(db,{origin:()=>origin,compilerSourceSha256:'b'.repeat(64),onRunQueued:()=>{queuedNotifications++;}});await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));
     const address=server.address();if(!address||typeof address==='string')throw new Error('NO_ADDRESS');origin=`http://127.0.0.1:${address.port}`;
   });
   afterAll(async()=>{if(server)await new Promise<void>(done=>server.close(()=>done()));if(db)await db.close();});
   it('未登录拒绝；跨站登录被拒绝；真实登录仅通过HttpOnly cookie发session',async()=>{
     expect((await request('/v1/me')).status).toBe(401);
+    expect((await request('/v1/runtime')).status).toBe(401);
     expect((await request('/v1/auth/login','POST',{username:'owner_http',password},'','https://external.example')).status).toBe(403);
     const login=await request('/v1/auth/login','POST',{username:'owner_http',password},'');
     expect(login.status).toBe(200);expect(login.headers.get('set-cookie')).toContain('HttpOnly');
     cookie=login.headers.get('set-cookie')!.split(';')[0];expect(JSON.stringify(await login.json())).not.toContain('token');
     const other=await request('/v1/auth/login','POST',{username:'other_http',password},'');otherCookie=other.headers.get('set-cookie')!.split(';')[0];
+    expect((await(await request('/v1/runtime')).json()).data).toEqual({resizeEnabled:true,scope:'local-cpu-resize-only'});
   });
   it('项目归属由session决定，不接受伪造actor，其他用户看不到',async()=>{
     expect((await request('/v1/projects','POST',{name:'产品',actorId:randomUUID()})).status).toBe(422);
@@ -59,8 +62,10 @@ describe('本地身份到项目/租约/保存的真实HTTP闭环',()=>{
     expect((await request(`/v1/projects/${project}/bindings`,'POST',binding)).status).toBe(201);
     const send=(payload:unknown)=>fetch(`${origin}/v1/projects/${project}/runs`,{method:'POST',headers:{origin,'content-type':'application/json','x-workspace-local':'1','idempotency-key':'http-owned-once',cookie},body:JSON.stringify(payload)});
     expect((await send({bindingId:binding.id,parameters:{width:256,height:256},snapshot:{authorized:true}})).status).toBe(422);
+    expect(queuedNotifications).toBe(0);
     const first=await send({bindingId:binding.id,parameters:{width:256,height:256}});expect(first.status).toBe(202);const id=(await first.json()).data.id;
     expect((await(await send({bindingId:binding.id,parameters:{width:256,height:256}})).json()).data).toMatchObject({id,reused:true});
+    expect(queuedNotifications).toBe(2);
     const result=(await(await request(`/v1/projects/${project}/runs/${id}`)).json()).data;
     expect(result.state).toBe('queued');expect(result.snapshot.source.id).toBe(source.id);expect(result.snapshot.authorization.actorId).toBe(actor);
     expect((await request(`/v1/projects/${project}/runs/${id}`,'GET',undefined,otherCookie)).status).toBe(404);

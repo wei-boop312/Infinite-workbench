@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import {RunKernelError} from './runKernelError';
+export {RunKernelError} from './runKernelError';
 import type { IncomingMessage } from "node:http";
 import {
   ProjectBudgetSnapshotSchema,
@@ -98,16 +100,6 @@ export class StaticRunAuthorizer implements RunAuthorizer {
     return [...this.sessions.values()].some((access) => access.tenantId === principal.tenantId
       && access.actorId === principal.actorId
       && (access.projects[projectId]?.includes(permission) ?? false));
-  }
-}
-
-export class RunKernelError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-  ) {
-    super(message);
   }
 }
 

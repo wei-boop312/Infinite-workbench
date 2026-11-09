@@ -1,0 +1,32 @@
+{
+  "scope": "actual-private-cpu-worker-not-ui-no-model",
+  "caseId": "da676b78-ddd3-4a29-b2c3-0450ed286b2a",
+  "project": "2d02de10-7391-44a6-bfd0-c1248b340319",
+  "compilerSourceSha256": "147e8f274d2711b29b1ec523832d4d246ea3877344a3013b8b407c8982419099",
+  "status": "passed",
+  "runId": "5b1a0440-1baa-4225-b074-bfc0b53933a9",
+  "state": "succeeded",
+  "sourceSha256": "a17ad49249d86a6a46554148c0d6eaf1511d0ab2291fc1a1755f2d67e2986680",
+  "outputSha256": "38bab3c0052ab188921160ceb2a7d54cdb2894d59b15d40d995d90cf9a327b4b",
+  "output": {
+    "asset_version_id": "e9ae70f3-6a5a-4bb6-877c-805880362bce",
+    "object_id": "5f5a7184-b3c2-4efa-aa6f-e1a86792b083",
+    "object_revision": 1,
+    "sha256": "38bab3c0052ab188921160ceb2a7d54cdb2894d59b15d40d995d90cf9a327b4b"
+  },
+  "attempt": {
+    "provider_request_id": "d8c48949-d39f-451d-9a31-731f3f5575fa",
+    "stage": "completed",
+    "request_hash": "2824fadf97fa34d4f4cd3ad0a8cff939f6fc1f4e2ac5efe7ed6814b57de1a90b"
+  },
+  "sourceUnchanged": true,
+  "pixels": "256x256 uniform RGB(51,102,204)",
+  "databaseReopened": true,
+  "replayRefused": true,
+  "providerRequests": 0,
+  "modelsLoaded": false,
+  "directory": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\work\\owned-comfy-worker-c655cd10-9ad9-4a89-b7cd-988b98d40bbd",
+  "ownedPid": 22420,
+  "submitted": true,
+  "stopped": true
+}

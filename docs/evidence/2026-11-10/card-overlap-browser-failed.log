@@ -1,0 +1,77 @@
+
+Running 1 test using 1 worker
+
+(node:1644) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  x  1 tests\local-e2e\workspace.spec.ts:20:1 › 首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销 (30.1s)
+
+
+  1) tests\local-e2e\workspace.spec.ts:20:1 › 首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销 ────────────────────────
+
+    Test timeout of 30000ms exceeded.
+
+    Error: page.waitForEvent: Test timeout of 30000ms exceeded.
+    =========================== logs ===========================
+    waiting for event "download"
+    ============================================================
+
+      40 |   const image=page.getByRole('img',{name:'owned-product.png'});await expect(image).toBeVisible();await expect(page.getByRole('status')).toHaveText('已保存到本机');
+      41 |   await page.reload();await expect(page.getByRole('img',{name:'owned-product.png'})).toBeVisible();
+    > 42 |   const downloadPromise=page.waitForEvent('download');await page.getByRole('link',{name:'下载原件'}).click();const download=await downloadPromise;
+         |                              ^
+      43 |   const path=await download.path();if(!path)throw Error('NO_DOWNLOAD');expect(readFileSync(path)).toEqual(png);
+      44 |   await page.screenshot({path:'docs/evidence/2026-11-10/local-workspace-with-image.png',fullPage:true});
+      45 |   await page.getByRole('button',{name:'添加缩放工具'}).click();
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\tests\local-e2e\workspace.spec.ts:42:30
+
+    Error: locator.click: Test timeout of 30000ms exceeded.
+    Call log:
+      - waiting for getByRole('link', { name: '下载原件' })
+        - locator resolved to <a href="http://127.0.0.1:62270/v1/projects/83cdadc3-f14f-41a8-b41a-2448b3e990db/assets/7099f566-0ff2-44b4-be84-fc9be92c41c2?download=1">下载原件</a>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <textarea aria-label="卡片内容"></textarea> from <article class="card" data-object-id="fe9eb13d-964d-4595-a2dd-307b194ddabe">…</article> subtree intercepts pointer events
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <textarea aria-label="卡片内容"></textarea> from <article class="card" data-object-id="fe9eb13d-964d-4595-a2dd-307b194ddabe">…</article> subtree intercepts pointer events
+        - retrying click action
+          - waiting 100ms
+        56 × waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <textarea aria-label="卡片内容"></textarea> from <article class="card" data-object-id="fe9eb13d-964d-4595-a2dd-307b194ddabe">…</article> subtree intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+
+
+      40 |   const image=page.getByRole('img',{name:'owned-product.png'});await expect(image).toBeVisible();await expect(page.getByRole('status')).toHaveText('已保存到本机');
+      41 |   await page.reload();await expect(page.getByRole('img',{name:'owned-product.png'})).toBeVisible();
+    > 42 |   const downloadPromise=page.waitForEvent('download');await page.getByRole('link',{name:'下载原件'}).click();const download=await downloadPromise;
+         |                                                                                                  ^
+      43 |   const path=await download.path();if(!path)throw Error('NO_DOWNLOAD');expect(readFileSync(path)).toEqual(png);
+      44 |   await page.screenshot({path:'docs/evidence/2026-11-10/local-workspace-with-image.png',fullPage:true});
+      45 |   await page.getByRole('button',{name:'添加缩放工具'}).click();
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\tests\local-e2e\workspace.spec.ts:42:98
+
+    Error Context: test-results\workspace-首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销\error-context.md
+
+    Error Context: test-results\workspace-首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销\error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\workspace-首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\workspace-首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    tests\local-e2e\workspace.spec.ts:20:1 › 首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销 ─────────────────────────

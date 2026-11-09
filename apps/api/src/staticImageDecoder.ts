@@ -1,5 +1,5 @@
 import sharp from "sharp";
-import { RunKernelError } from "./runKernel";
+import { RunKernelError } from "./runKernelError";
 
 export const MAX_STATIC_IMAGE_PIXELS = 16_000_000;
 export const MAX_STATIC_IMAGE_EDGE = 8192;

@@ -9,6 +9,8 @@ import {LocalWorkflowVersions} from '../apps/api/src/localWorkflowVersions';
 import {LocalBoundRuns} from '../apps/api/src/localBoundRuns';
 import {LocalRunExecution} from '../apps/api/src/localRunExecution';
 import {LocalResizeWorker,type OwnedResizeRuntime} from '../apps/worker/src/localResizeWorker';
+import {LocalRunDispatcher} from '../apps/worker/src/localRunDispatcher';
+import {setTimeout as delay} from 'node:timers/promises';
 let db:LocalWorkspaceDatabase,assets:LocalWorkspaceAssets,runs:LocalBoundRuns,execution:LocalRunExecution,bindingId:string,sourceId:string,sourceBytes:Buffer,resultBytes:Buffer;
 const actor=randomUUID(),project=randomUUID(),pin='b'.repeat(64);
 beforeAll(async()=>{
@@ -51,4 +53,32 @@ it('编译图夹带额外节点在提交前拒绝，标failed且关闭runtime',a
   const run=await runs.create(actor,project,bindingId,{width:256,height:256},'mock-runtime-injection');
   await expect(new LocalResizeWorker(execution,assets,r).execute(actor,project,run.id)).rejects.toThrow('RESIZE_PROMPT_REJECTED');
   expect((await runs.read(actor,project,run.id)).state).toBe('failed');expect(r.submit).not.toHaveBeenCalled();expect(r.close).toHaveBeenCalledTimes(1);
+});
+it('自有runtime启动失败写failed，不能伪装成已提交或无限留在queued',async()=>{
+  const r=runtime();r.start=vi.fn(async()=>{throw Error('owned-start-failed');});
+  const run=await runs.create(actor,project,bindingId,{width:256,height:256},'mock-runtime-start-failed');
+  await expect(new LocalResizeWorker(execution,assets,r).execute(actor,project,run.id)).rejects.toThrow('owned-start-failed');
+  expect((await runs.read(actor,project,run.id)).state).toBe('failed');expect(r.submit).not.toHaveBeenCalled();
+});
+it('dispatcher启动消费持久outbox，领取同事务标记dispatched；重启不重投完成任务',async()=>{
+  const run=await runs.create(actor,project,bindingId,{width:256,height:256},'mock-dispatch-pending');
+  const factory=vi.fn(()=>new LocalResizeWorker(execution,assets,runtime())),errors=vi.fn();
+  const dispatcher=new LocalRunDispatcher(db,factory,errors);dispatcher.start();
+  try{const deadline=Date.now()+1500;while((await runs.read(actor,project,run.id)).state!=='succeeded'&&Date.now()<deadline)await delay(5);}
+  finally{await dispatcher.close();}
+  expect((await runs.read(actor,project,run.id)).state).toBe('succeeded');expect(factory).toHaveBeenCalledTimes(1);expect(errors).not.toHaveBeenCalled();
+  const row=(await db.asActor(actor,tx=>tx.query<{dispatched_at:Date}>('SELECT dispatched_at FROM workspace.outbox WHERE project_id=$1 AND run_id=$2',[project,run.id]))).rows[0];expect(row.dispatched_at).not.toBeNull();
+  const restarted=new LocalRunDispatcher(db,factory,errors);restarted.start();await delay(10);await restarted.close();expect(factory).toHaveBeenCalledTimes(1);
+});
+it('dispatcher恢复过期attempt：未提交failed、已提交unknown，不启动runtime或重发请求',async()=>{
+  const past=new Date(Date.now()-61_000),ids:string[]=[];
+  for(const submitted of [false,true]){
+    const run=await runs.create(actor,project,bindingId,{width:256,height:256},'mock-recover-'+submitted);ids.push(run.id);
+    const claim=await execution.claim(actor,project,run.id,randomUUID(),past);if(submitted)await execution.beforeSubmit(claim.lease,{owned:true},past);
+  }
+  const factory=vi.fn(()=>new LocalResizeWorker(execution,assets,runtime())),errors=vi.fn();
+  const dispatcher=new LocalRunDispatcher(db,factory,errors,(a,p,r)=>execution.recoverExpired(a,p,r));dispatcher.start();
+  try{const deadline=Date.now()+1500;while((await runs.read(actor,project,ids[1])).state==='running'&&Date.now()<deadline)await delay(5);}
+  finally{await dispatcher.close();}
+  expect((await runs.read(actor,project,ids[0])).state).toBe('failed');expect((await runs.read(actor,project,ids[1])).state).toBe('unknown');expect(factory).not.toHaveBeenCalled();expect(errors).not.toHaveBeenCalled();
 });

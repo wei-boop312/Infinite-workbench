@@ -16,10 +16,11 @@ export class LocalResizeWorker {
   private workerId=randomUUID();
   constructor(private execution:LocalRunExecution,private assets:LocalWorkspaceAssets,private runtime:OwnedResizeRuntime){}
   async execute(actorId:string,projectId:string,runId:string){
-    let lease:LocalExecutionLease|undefined;
+    let lease:LocalExecutionLease|undefined,startupComplete=false;
     try{
       // Startup precedes the short execution lease and cannot submit a graph.
       await this.runtime.start();
+      startupComplete=true;
       const claim=await this.execution.claim(actorId,projectId,runId,this.workerId);lease=claim.lease;
       const source=await this.assets.download(actorId,projectId,claim.snapshot.asset.id);
       if(source.asset.sha256!==claim.snapshot.asset.sha256)throw Error('ASSET_INTEGRITY_FAILED');
@@ -40,6 +41,9 @@ export class LocalResizeWorker {
       if(createHash('sha256').update(archived.bytes).digest('hex')!==asset.sha256)throw Error('ASSET_INTEGRITY_FAILED');
       return await this.execution.complete(lease,{assetId:asset.id,sha256:asset.sha256,providerRequestId});
     }catch(error){
+      // Record a pre-submit startup failure only after the same authoritative
+      // claim checks. A revoked actor or invalid snapshot still cannot write.
+      if(!startupComplete){try{lease=(await this.execution.claim(actorId,projectId,runId,this.workerId)).lease;}catch{}}
       if(lease){try{await this.execution.stopAttempt(lease);}catch{/* Lease/permission loss must not permit a replay. */}}
       throw error;
     }finally{await this.runtime.close();}

@@ -94,3 +94,16 @@ Python路径可通过WORKSPACE_PYTHON指定，要求绝对路径。示例使用�
 12项仓储/worker专项通过（worker-archive-tests.log），其中运行端明确为mock，不作为真实Comfy通过。6包构建通过（worker-archive-build.log）。实时registry Python编译入口用归档自有实例清单进行纯离线验证，3项通过（live-resize-compiler-tests.log）；没有连网或执行。后续必须实现自有隔离CPU runtime并做真实纵向/界面验收。迁移005/006未应用日常数据库。
 
 指纹优化保留旧字节协议及修改后重算，缓存的仅是最多1024个属性名的JSON转义文本，不缓存对象、内容、权限或digest。2项兼容测试通过；最初仅减少entry分配的80项套件仍有1超时失败（fingerprint-targeted-tests.log），追加属性名编码优化后原multipart两项通过（76项筛选未运行，multipart-optimized-tests.log）。新的全量会话4798仍运行，日志work/ready-output-full-test.log已出现旧HTTP用例5048ms超时，不能称整体绿；本次worker/回执和编译入口新增于全量启动之后，须以专项加最终冻结回归验证。最近周额度已用30%/剩余70%。
+
+## 2026-11-10 真实CPU与浏览器闭环
+会话4798已结束：78文件/2908项，2907通过、1项旧public HTTP超时（393.90秒）。该确切用例单独复核通过（另80项筛选未运行），不是全量通过。最终冻结回归会话77798正在执行，work/frozen-runtime-full-test.log；期间不并行启动真实CPU/浏览器压力。
+
+OwnedComfyRuntime实际启动独立CPU实例，每任务独立端口和目录；禁用custom/API节点，隔离环境且离线，不借用日常实例。上传比对字节；live三类registry用保留编译器编译，核对编译器pin及出站白名单图；确切请求先持久，只有一次POST；回执先保存，history绑定prompt ID与确切图，只读取自有output路径。产物校验、ready归档、原子回画布和原字节下载已走通。实例关闭后保留证据。
+
+自有合成图真实worker验收在owned-worker/da676b78-ddd3-4a29-b2c3-0450ed286b2a：256×256均匀RGB、原件不变、数据库关闭重开、历史任务拒绝再领取均通过，ownedPid22420已停止。没有模型权重或收费调用。它只证明resize，不证明AI图像生成质量。
+
+新增本地串行dispatcher读取持久outbox，领取同事务标记dispatched；恢复过期claimed为failed、submitted/returned为unknown，从不重投。身份撤销/项目软删不会启动新执行；当前回收同样受原actor编辑权限约束，生产独立worker角色与撤销后的管理员核查仍待。GUI自动只读轮询、结果下载和显式载入结果已接通；载入前保存队列及编辑generation检查，拒绝覆盖未保存内容。新图片/文字默认移到已有卡片右侧，修复刷新后随机遮挡下载链接；旧坐标不改。
+
+最新24项专项及6包构建通过；原浏览器流程修复重叠后通过（card-placement-browser.log），真实浏览器CPU闭环通过（final-runtime-owned-browser.log，owned-browser/552f3e62-ce10-4c07-977b-ce5ec4f64cd2）。后者覆盖登录、HTTP上传/固定绑定/入队、单次真实resize、下载像素、画布结果、刷新仅一任务/一输出和实例停止。截图已人工查看。保留重叠失败日志，不以强制点击或更长超时掩盖。
+
+直接Node启动曾暴露staticImageDecoder→runKernel→verifiedAssets循环初始化；将同一个RunKernelError类移至无依赖模块并保留旧入口re-export，实际独立Node启动回归通过。尚未更新日常4310服务，升级须先停旧实例、保留PGlite与资产备份、再应用迁移，不能同时打开同一数据库目录。最近额度已用31%/剩余69%。

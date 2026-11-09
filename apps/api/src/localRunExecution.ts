@@ -38,6 +38,7 @@ export class LocalRunExecution {
       await tx.query("INSERT INTO workspace.run_attempts(project_id,id,run_id,actor_id,worker_id,token_hash,lease_expires_at,stage) VALUES($1,$2,$3,$4,$5,$6,$7,'claimed')",[projectId,attemptId,runId,actorId,workerId,hash(token),new Date(now.getTime()+60_000).toISOString()]);
       const updated=await tx.query("UPDATE workspace.runs SET state='running' WHERE project_id=$1 AND id=$2 AND state='queued' RETURNING id",[projectId,runId]);
       if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
+      await tx.query("UPDATE workspace.outbox SET dispatched_at=$1 WHERE project_id=$2 AND run_id=$3 AND event_type='run.created' AND dispatched_at IS NULL",[now.toISOString(),projectId,runId]);
       return {lease:{projectId,runId,attemptId,actorId,workerId,token},snapshot,snapshotHash:run.content_hash};
     });
   }
