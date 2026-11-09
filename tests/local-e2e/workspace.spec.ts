@@ -53,6 +53,10 @@ test('首个真实账号→登录态→项目→文字卡拖动编辑→刷新�
   const user=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id;
   expect((await db.asActor(user,tx=>tx.query('SELECT * FROM workspace.runs'))).rows).toHaveLength(1);
   await page.screenshot({path:'docs/evidence/2026-11-10/tool-card-queued.png',fullPage:true});
+  await restored.getByRole('button',{name:'取消任务',exact:true}).click();await expect(restored.getByRole('status')).toHaveText('已取消');
+  await page.reload();await expect(page.locator('[data-tool-form]').getByRole('status')).toHaveText('已取消');
+  expect((await db.asActor(user,tx=>tx.query<{state:string}>('SELECT state FROM workspace.runs'))).rows[0].state).toBe('cancelled');
+  await page.screenshot({path:'docs/evidence/2026-11-10/tool-card-cancelled.png',fullPage:true});
 });
 test('滚动升级时运行配置接口尚未提供，仍能登录并打开已有项目',async({page})=>{
   await page.route('**/v1/runtime',route=>route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({error:{code:'NOT_FOUND'}})}));

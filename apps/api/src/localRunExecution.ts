@@ -2,10 +2,11 @@ import { createHash,randomBytes,randomUUID } from 'node:crypto';
 import { WorkspaceWorkflowSchema,WorkspaceTemplateSchema,WorkspaceObjectSchema,WorkspaceBindingRequestSchema,WorkspaceParametersSchema } from '@canvas/contracts';
 import { LocalWorkspaceDatabase } from './localWorkspaceDatabase.ts';
 import { contentHash,validateWorkflow } from './workspacePrototype.ts';
+import {isInterruptedWithoutOutput,type OwnedCancellationReceipt} from './ownedCancellationReceipt.ts';
 
 const hash=(text:string)=>createHash('sha256').update(text).digest('hex');
 export type LocalExecutionLease={projectId:string;runId:string;attemptId:string;actorId:string;workerId:string;token:string};
-type AttemptRow={id:string;actor_id:string;worker_id:string;token_hash:string;lease_expires_at:Date;stage:string;request_hash:string|null;provider_request_id:string|null;response_payload:unknown};
+type AttemptRow={id:string;actor_id:string;worker_id:string;token_hash:string;lease_expires_at:Date;stage:string;request_hash:string|null;request_payload:Record<string,unknown>|null;provider_request_id:string|null;response_payload:unknown};
 
 /** Internal worker port, never accepts an actor or lease from public HTTP. */
 export class LocalRunExecution {
@@ -48,6 +49,9 @@ export class LocalRunExecution {
       const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND id=$2 AND run_id=$3 FOR UPDATE',[lease.projectId,lease.attemptId,lease.runId])).rows[0];
       this.checkLease(row,lease,now);
       if(row.stage!=='claimed')throw Error('ALREADY_SUBMITTED');
+      const run=(await tx.query<{state:string}>('SELECT state FROM workspace.runs WHERE project_id=$1 AND id=$2 FOR UPDATE',[lease.projectId,lease.runId])).rows[0];
+      if(run?.state==='cancel_requested')throw Error('RUN_CANCEL_REQUESTED');
+      if(run?.state!=='running')throw Error('RUN_NOT_RUNNING');
       // Persist the exact outbound request before allowing one external POST.
       const updated=await tx.query("UPDATE workspace.run_attempts SET stage='submitted',request_payload=$1,request_hash=$2 WHERE project_id=$3 AND id=$4 RETURNING id",[JSON.stringify(request),requestHash,lease.projectId,lease.attemptId]);
       if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
@@ -64,7 +68,7 @@ export class LocalRunExecution {
       if(row.stage!=='submitted')throw Error('INVALID_ATTEMPT_STAGE');
       const updated=await tx.query("UPDATE workspace.run_attempts SET stage='returned',provider_request_id=$1,response_payload=$2 WHERE project_id=$3 AND id=$4 RETURNING id",[providerRequestId,JSON.stringify(response),lease.projectId,lease.attemptId]);
       if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
-      await tx.query("UPDATE workspace.runs SET state='archiving' WHERE project_id=$1 AND id=$2 AND state='running'",[lease.projectId,lease.runId]);
+      await tx.query("UPDATE workspace.runs SET state='archiving' WHERE project_id=$1 AND id=$2 AND state IN ('running','cancel_requested')",[lease.projectId,lease.runId]);
     });
   }
   async recordSubmissionReceipt(lease:LocalExecutionLease,providerRequestId:string,now=new Date()){
@@ -79,11 +83,34 @@ export class LocalRunExecution {
   async stopAttempt(lease:LocalExecutionLease,now=new Date()){
     return this.db.asActor(lease.actorId,async tx=>{
       const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND id=$2 AND run_id=$3 FOR UPDATE',[lease.projectId,lease.attemptId,lease.runId])).rows[0];this.checkLease(row,lease,now);
-      if(['completed','failed','unknown'].includes(row.stage))return;
-      const state=row.stage==='claimed'?'failed':'unknown';
+      if(['completed','failed','unknown','cancelled'].includes(row.stage))return;
+      const run=(await tx.query<{state:string}>('SELECT state FROM workspace.runs WHERE project_id=$1 AND id=$2 FOR UPDATE',[lease.projectId,lease.runId])).rows[0];
+      const state=row.stage==='claimed'?(run?.state==='cancel_requested'?'cancelled':'failed'):'unknown';
       const updated=await tx.query('UPDATE workspace.run_attempts SET stage=$1 WHERE project_id=$2 AND id=$3 RETURNING id',[state,lease.projectId,lease.attemptId]);
       if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
       await tx.query('UPDATE workspace.runs SET state=$1 WHERE project_id=$2 AND id=$3',[state,lease.projectId,lease.runId]);
+      return {state};
+    });
+  }
+  async cancellationRequested(lease:LocalExecutionLease,now=new Date()){
+    return this.db.asActor(lease.actorId,async tx=>{
+      const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND id=$2 AND run_id=$3',[lease.projectId,lease.attemptId,lease.runId])).rows[0];this.checkLease(row,lease,now);
+      return (await tx.query<{state:string}>('SELECT state FROM workspace.runs WHERE project_id=$1 AND id=$2',[lease.projectId,lease.runId])).rows[0]?.state==='cancel_requested';
+    });
+  }
+  async confirmCancelled(lease:LocalExecutionLease,raw:OwnedCancellationReceipt,now=new Date()){
+    const receipt=structuredClone(raw);
+    await this.db.asActor(lease.actorId,async tx=>{
+      const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND id=$2 AND run_id=$3 FOR UPDATE',[lease.projectId,lease.attemptId,lease.runId])).rows[0];this.checkLease(row,lease,now);
+      const run=(await tx.query<{state:string}>('SELECT state FROM workspace.runs WHERE project_id=$1 AND id=$2 FOR UPDATE',[lease.projectId,lease.runId])).rows[0];
+      if(receipt.scope!=='owned-cpu-resize-single-run'||receipt.ownedProcessStopped!==true||
+        row.provider_request_id!==receipt.providerRequestId||!row.request_payload||contentHash(row.request_payload)!==row.request_hash||
+        !isInterruptedWithoutOutput(receipt.history,receipt.providerRequestId,row.request_payload.prompt))throw Error('CANCELLATION_NOT_CONFIRMED');
+      if(row.stage==='cancelled'&&run?.state==='cancelled'&&contentHash(row.response_payload)===contentHash(receipt.history))return;
+      if(row.stage!=='submitted'||run?.state!=='cancel_requested'||!(await tx.query('SELECT run_id FROM workspace.run_cancellations WHERE project_id=$1 AND run_id=$2',[lease.projectId,lease.runId])).rows.length)throw Error('CANCELLATION_NOT_CONFIRMED');
+      const updated=await tx.query("UPDATE workspace.run_attempts SET stage='cancelled',response_payload=$1 WHERE project_id=$2 AND id=$3 RETURNING id",[JSON.stringify(receipt.history),lease.projectId,lease.attemptId]);
+      if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
+      await tx.query("UPDATE workspace.runs SET state='cancelled' WHERE project_id=$1 AND id=$2",[lease.projectId,lease.runId]);
     });
   }
   /** Called only after the private asset adapter has decoded and saved bytes. */
@@ -118,9 +145,10 @@ export class LocalRunExecution {
   async recoverExpired(actorId:string,projectId:string,runId:string,now=new Date()){
     return this.db.asActor(actorId,async tx=>{
       const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND run_id=$2 FOR UPDATE',[projectId,runId])).rows[0];
-      if(!row)throw Error('NOT_FOUND');if(new Date(row.lease_expires_at).getTime()>now.getTime()||['completed','unknown','failed'].includes(row.stage))return {changed:false};
+      if(!row)throw Error('NOT_FOUND');if(new Date(row.lease_expires_at).getTime()>now.getTime()||['completed','unknown','failed','cancelled'].includes(row.stage))return {changed:false};
       // No automatic retry: even a zero-cost resize may have produced an artifact.
-      const state=row.stage==='claimed'?'failed':'unknown';
+      const run=(await tx.query<{state:string}>('SELECT state FROM workspace.runs WHERE project_id=$1 AND id=$2 FOR UPDATE',[projectId,runId])).rows[0];
+      const state=row.stage==='claimed'?(run?.state==='cancel_requested'?'cancelled':'failed'):'unknown';
       const updated=await tx.query('UPDATE workspace.run_attempts SET stage=$1 WHERE project_id=$2 AND id=$3 RETURNING id',[state,projectId,row.id]);
       if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
       await tx.query('UPDATE workspace.runs SET state=$1 WHERE project_id=$2 AND id=$3',[state,projectId,runId]);

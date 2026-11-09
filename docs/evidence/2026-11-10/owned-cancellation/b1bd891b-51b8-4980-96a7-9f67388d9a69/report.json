@@ -1,0 +1,30 @@
+{
+  "scope": "actual-owned-post-submit-cancellation-no-model",
+  "caseId": "b1bd891b-51b8-4980-96a7-9f67388d9a69",
+  "project": "ad8641b6-da30-461a-b7bd-203e1beb7cb4",
+  "parameters": {
+    "width": 4096,
+    "height": 3906
+  },
+  "compilerSourceSha256": "147e8f274d2711b29b1ec523832d4d246ea3877344a3013b8b407c8982419099",
+  "status": "passed",
+  "runId": "ceeac770-0821-4332-a21d-9f0e2aeb3cb1",
+  "outcome": "confirmed_cancelled",
+  "output": null,
+  "state": "cancelled",
+  "sourceSha256": "a17ad49249d86a6a46554148c0d6eaf1511d0ab2291fc1a1755f2d67e2986680",
+  "attempt": {
+    "provider_request_id": "f3489f65-cc1f-469a-ad4b-7f9cb839f6bf",
+    "stage": "cancelled",
+    "request_hash": "2201f1453ff3fde9edba57c1f570e062bedb0443de23f6d79edf6dbfc90c9ba7"
+  },
+  "sourceUnchanged": true,
+  "databaseReopened": true,
+  "replayRefused": true,
+  "providerRequests": 0,
+  "modelsLoaded": false,
+  "directory": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\work\\owned-comfy-worker-6d92060f-ac54-45bc-b612-26a65413f560",
+  "ownedPid": 61488,
+  "submitted": true,
+  "stopped": true
+}

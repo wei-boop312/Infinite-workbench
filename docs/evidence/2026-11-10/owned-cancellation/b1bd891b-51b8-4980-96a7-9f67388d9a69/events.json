@@ -1,0 +1,18 @@
+[
+  {
+    "sequence": 1,
+    "stage": "claimed"
+  },
+  {
+    "sequence": 2,
+    "stage": "submitted"
+  },
+  {
+    "sequence": 3,
+    "stage": "cancel_requested"
+  },
+  {
+    "sequence": 4,
+    "stage": "cancelled"
+  }
+]

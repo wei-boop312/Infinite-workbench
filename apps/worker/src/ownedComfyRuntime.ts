@@ -7,6 +7,8 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {recordedCompilerPin} from './compileResize.ts';
 import {contentHash} from '../../api/src/workspacePrototype.ts';
 import type {OwnedResizeRuntime} from './localResizeWorker.ts';
+import {isInterruptedWithoutOutput} from '../../api/src/ownedCancellationReceipt.ts';
+import {OwnedRuntimeCancellation} from './runtimeCancellation.ts';
 
 type Options={root:string;pythonExecutable:string;comfyMain:string;compilerSourceSha256:string};
 /** A private CPU-only instance per task; never connects to a daily Comfy URL. */
@@ -43,7 +45,7 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
     return {SystemRoot:'C:/Windows',WINDIR:'C:/Windows',PATH:'C:/Windows/System32',HF_HOME:resolve(this.directory,'cache'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',
       USERNAME:'owned-workspace-worker',USERPROFILE:resolve(this.directory,'user'),APPDATA:resolve(this.directory,'cache'),LOCALAPPDATA:resolve(this.directory,'cache'),TEMP:resolve(this.directory,'temp'),TMP:resolve(this.directory,'temp')};
   }
-  private async json(path:string,body?:BodyInit){
+  private async json(path:string,body?:BodyInit,allowEmpty=false){
     this.alive();const response=await fetch(this.origin+path,{method:body===undefined?'GET':'POST',body,redirect:'error',signal:AbortSignal.timeout(3000),
       headers:typeof body==='string'?{'content-type':'application/json'}:undefined});
     if(!response.ok)throw Error('OWNED_COMFY_HTTP_'+response.status);
@@ -51,6 +53,7 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
     if(!response.body)throw Error('OWNED_COMFY_EMPTY_RESPONSE');
     const reader=response.body.getReader();
     try{while(true){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.length;if(size>2*1024*1024){await reader.cancel();throw Error('OWNED_COMFY_RESPONSE_TOO_LARGE');}chunks.push(chunk.value);}}finally{reader.releaseLock();}
+    if(allowEmpty&&size===0)return {};
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
   private ownedFile(folder:'input'|'output',subfolder:string,name:string){
@@ -89,18 +92,29 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
     if(typeof receipt.prompt_id!=='string'||!/^[a-zA-Z0-9_-]{1,160}$/.test(receipt.prompt_id)||Object.keys(receipt.node_errors??{}).length)throw Error('SUBMISSION_RECEIPT_REJECTED');
     return receipt.prompt_id;
   }
-  async result(providerRequestId:string){
+  async result(providerRequestId:string,cancellationRequested?:()=>Promise<boolean>){
     if(!this.submitted||!/^[a-zA-Z0-9_-]{1,160}$/.test(providerRequestId))throw Error('INVALID_PROVIDER_REQUEST_ID');
-    const deadline=Date.now()+30_000;
+    const deadline=Date.now()+30_000;let interrupted=false;
     while(Date.now()<deadline){
       const all=await this.json('/history/'+providerRequestId),history=all[providerRequestId];
       if(history){
-        if(history.status?.status_str!=='success'||history.prompt?.[1]!==providerRequestId||contentHash(history.prompt?.[2])!==contentHash(this.prompt))throw Error('HISTORY_RECEIPT_REJECTED');
+        if(history.prompt?.[1]!==providerRequestId||!history.prompt?.[2]||contentHash(history.prompt[2])!==contentHash(this.prompt))throw Error('HISTORY_RECEIPT_REJECTED');
+        if(interrupted&&isInterruptedWithoutOutput(history,providerRequestId,this.prompt)){
+          await this.close();if(!this.evidence.stopped)throw Error('CANCELLATION_NOT_CONFIRMED');
+          throw new OwnedRuntimeCancellation({scope:'owned-cpu-resize-single-run',providerRequestId,ownedProcessStopped:true,history});
+        }
+        const interruptedWithOutput=interrupted&&history.status?.status_str==='error'&&Array.isArray(history.status.messages)&&history.status.messages.some((message:unknown)=>Array.isArray(message)&&message[0]==='execution_interrupted'&&message[1]?.prompt_id===providerRequestId);
+        if(history.status?.status_str!=='success'&&!interruptedWithOutput)throw Error('HISTORY_RECEIPT_REJECTED');
         const outputs=history.outputs;
         if(!outputs||Object.keys(outputs).join(',')!=='3'||!Array.isArray(outputs['3'].images)||outputs['3'].images.length!==1)throw Error('OUTPUT_COUNT_REJECTED');
         const image=outputs['3'].images[0];if(image.type!=='output'||typeof image.subfolder!=='string'||typeof image.filename!=='string')throw Error('OUTPUT_RECEIPT_REJECTED');
         const bytes=readFileSync(this.ownedFile('output',image.subfolder,image.filename));
         return {history,bytes};
+      }
+      if(!interrupted&&cancellationRequested&&await cancellationRequested()){
+        // This process owns exactly one prompt. Target it explicitly and never
+        // interrupt a daily/shared Comfy instance. A lost reply is not retried.
+        interrupted=true;await this.json('/interrupt',JSON.stringify({prompt_id:providerRequestId}),true);
       }
       await delay(200);
     }

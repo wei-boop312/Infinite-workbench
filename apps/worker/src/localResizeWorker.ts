@@ -2,6 +2,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {LocalRunExecution,type LocalExecutionLease} from '../../api/src/localRunExecution.ts';
 import {LocalWorkspaceAssets} from '../../api/src/localWorkspaceAssets.ts';
 import {validateResizePrompt} from './validateResizePrompt.ts';
+import {OwnedRuntimeCancellation} from './runtimeCancellation.ts';
 
 /** Implementations must own an isolated CPU Comfy process; no user-supplied URL. */
 export interface OwnedResizeRuntime {
@@ -9,7 +10,7 @@ export interface OwnedResizeRuntime {
   upload(bytes:Buffer,mime:string,name:string):Promise<string>;
   compile(parameters:unknown,uploadedFilename:string):Promise<unknown>;
   submit(request:{prompt:unknown;client_id:string}):Promise<string>;
-  result(providerRequestId:string):Promise<{history:unknown;bytes:Buffer}>;
+  result(providerRequestId:string,cancellationRequested?:()=>Promise<boolean>):Promise<{history:unknown;bytes:Buffer}>;
   close():Promise<void>;
 }
 export class LocalResizeWorker {
@@ -32,7 +33,8 @@ export class LocalResizeWorker {
       // Exactly one call. A thrown/lost reply is never resubmitted.
       const providerRequestId=await this.runtime.submit(request);
       await this.execution.recordSubmissionReceipt(lease,providerRequestId);
-      const result=await this.runtime.result(providerRequestId);
+      const executionLease=lease;
+      const result=await this.runtime.result(providerRequestId,()=>this.execution.cancellationRequested(executionLease));
       await this.execution.recordResponse(lease,providerRequestId,result.history);
       const asset=await this.assets.upload(actorId,projectId,result.bytes,'image/png',`resize-${runId}.png`);
       if(asset.width!==claim.snapshot.parameters.width||asset.height!==claim.snapshot.parameters.height)throw Error('OUTPUT_DIMENSIONS_MISMATCH');
@@ -41,11 +43,15 @@ export class LocalResizeWorker {
       if(createHash('sha256').update(archived.bytes).digest('hex')!==asset.sha256)throw Error('ASSET_INTEGRITY_FAILED');
       return await this.execution.complete(lease,{assetId:asset.id,sha256:asset.sha256,providerRequestId});
     }catch(error){
+      let failure=error;
+      if(lease&&error instanceof OwnedRuntimeCancellation){
+        try{await this.execution.confirmCancelled(lease,error.receipt);return {cancelled:true};}catch(proofError){failure=proofError;}
+      }
       // Record a pre-submit startup failure only after the same authoritative
       // claim checks. A revoked actor or invalid snapshot still cannot write.
       if(!startupComplete){try{lease=(await this.execution.claim(actorId,projectId,runId,this.workerId)).lease;}catch{}}
-      if(lease){try{await this.execution.stopAttempt(lease);}catch{/* Lease/permission loss must not permit a replay. */}}
-      throw error;
+      if(lease){try{if((await this.execution.stopAttempt(lease))?.state==='cancelled')return {cancelled:true};}catch{/* Lease/permission loss must not permit a replay. */}}
+      throw failure;
     }finally{await this.runtime.close();}
   }
 }

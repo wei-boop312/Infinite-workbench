@@ -25,7 +25,7 @@ describe('本地身份到项目/租约/保存的真实HTTP闭环',()=>{
     expect(login.status).toBe(200);expect(login.headers.get('set-cookie')).toContain('HttpOnly');
     cookie=login.headers.get('set-cookie')!.split(';')[0];expect(JSON.stringify(await login.json())).not.toContain('token');
     const other=await request('/v1/auth/login','POST',{username:'other_http',password},'');otherCookie=other.headers.get('set-cookie')!.split(';')[0];
-    expect((await(await request('/v1/runtime')).json()).data).toEqual({resizeEnabled:true,scope:'local-cpu-resize-only'});
+    expect((await(await request('/v1/runtime')).json()).data).toEqual({resizeEnabled:true,runCancellationEnabled:true,scope:'local-cpu-resize-only'});
   });
   it('项目归属由session决定，不接受伪造actor，其他用户看不到',async()=>{
     expect((await request('/v1/projects','POST',{name:'产品',actorId:randomUUID()})).status).toBe(422);
@@ -67,8 +67,14 @@ describe('本地身份到项目/租约/保存的真实HTTP闭环',()=>{
     expect((await(await send({bindingId:binding.id,parameters:{width:256,height:256}})).json()).data).toMatchObject({id,reused:true});
     expect(queuedNotifications).toBe(2);
     const result=(await(await request(`/v1/projects/${project}/runs/${id}`)).json()).data;
-    expect(result.state).toBe('queued');expect(result.snapshot.source.id).toBe(source.id);expect(result.snapshot.authorization.actorId).toBe(actor);
+    expect(result.state).toBe('queued');expect(result.eventSequence).toBe(0);expect(result.snapshot.source.id).toBe(source.id);expect(result.snapshot.authorization.actorId).toBe(actor);
     expect((await request(`/v1/projects/${project}/runs/${id}`,'GET',undefined,otherCookie)).status).toBe(404);
+    expect((await request(`/v1/projects/${project}/runs/${id}/cancel`,'POST',{reason:'forbidden'},otherCookie)).status).toBe(404);
+    expect((await request(`/v1/projects/${project}/runs/${id}/cancel`,'POST',{reason:'x',snapshot:{}})).status).toBe(422);
+    const cancellation=await request(`/v1/projects/${project}/runs/${id}/cancel`,'POST',{reason:'HTTP排队取消'});expect(cancellation.status).toBe(202);
+    expect((await cancellation.json()).data.state).toBe('cancelled');
+    expect((await(await request(`/v1/projects/${project}/runs/${id}`)).json()).data).toMatchObject({state:'cancelled',eventSequence:1});
+    expect((await request(`/v1/projects/${project}/runs/${id}/cancel`)).status).toBe(404);
   });
   it('项目软删后RLS和API都不再返回对象；注销后cookie立即无效',async()=>{
     expect((await request(`/v1/projects/${project}`,'DELETE')).status).toBe(200);

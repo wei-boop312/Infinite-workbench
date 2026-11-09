@@ -1,0 +1,30 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/local-resize-worker.test.ts (12 tests | 1 failed) 1437ms
+   × 排队取消幂等，只记一次原因/事件；viewer与跨项目请求不能取消 9ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/local-resize-worker.test.ts > 排队取消幂等，只记一次原因/事件；viewer与跨项目请求不能取消
+AssertionError: expected [Function] to throw error including 'ACCESS_DENIED' but got 'NOT_FOUND'
+
+Expected: "ACCESS_DENIED"
+Received: "NOT_FOUND"
+
+ ❯ tests/local-resize-worker.test.ts:88:62
+     86| it('排队取消幂等，只记一次原因/事件；viewer与跨项目请求不能取消',async()=>{
+     87|   const run=await runs.create(actor,project,bindingId,{width:256,heigh…
+     88|   await expect(runs.cancel(viewer,project,run.id,'forbidden')).rejects…
+       |                                                              ^
+     89|   await expect(runs.cancel(randomUUID(),project,run.id,'forbidden')).r…
+     90|   expect(await runs.cancel(actor,project,run.id,'原始取消原因')).toMatchObje…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 11 passed (12)
+   Start at  03:42:55
+   Duration  1.95s (tests 79%, transform 11%, import 9%)
+

@@ -1,0 +1,89 @@
+{
+  "meta": {},
+  "prompt": [
+    0,
+    "f3489f65-cc1f-469a-ad4b-7f9cb839f6bf",
+    {
+      "1": {
+        "_meta": {
+          "title": "读取原图"
+        },
+        "inputs": {
+          "image": "input-fcededca-58e5-431c-b6e3-454dcf7db927.png"
+        },
+        "class_type": "LoadImage"
+      },
+      "2": {
+        "_meta": {
+          "title": "调整图片尺寸"
+        },
+        "inputs": {
+          "crop": "disabled",
+          "image": [
+            "1",
+            0
+          ],
+          "width": 4096,
+          "height": 3906,
+          "upscale_method": "lanczos"
+        },
+        "class_type": "ImageScale"
+      },
+      "3": {
+        "_meta": {
+          "title": "保存结果"
+        },
+        "inputs": {
+          "images": [
+            "2",
+            0
+          ],
+          "filename_prefix": "workflow_architect/resize"
+        },
+        "class_type": "SaveImage"
+      }
+    },
+    {
+      "client_id": "22095a71-62bd-4265-997d-648a7d342940",
+      "create_time": 1794253616376
+    },
+    [
+      "3"
+    ]
+  ],
+  "status": {
+    "messages": [
+      [
+        "execution_start",
+        {
+          "prompt_id": "f3489f65-cc1f-469a-ad4b-7f9cb839f6bf",
+          "timestamp": 1794253616377
+        }
+      ],
+      [
+        "execution_cached",
+        {
+          "nodes": [],
+          "prompt_id": "f3489f65-cc1f-469a-ad4b-7f9cb839f6bf",
+          "timestamp": 1794253616379
+        }
+      ],
+      [
+        "execution_interrupted",
+        {
+          "node_id": "3",
+          "executed": [
+            "1",
+            "2"
+          ],
+          "node_type": "SaveImage",
+          "prompt_id": "f3489f65-cc1f-469a-ad4b-7f9cb839f6bf",
+          "timestamp": 1794253616610
+        }
+      ]
+    ],
+    "completed": false,
+    "status_str": "error"
+  },
+  "outputs": {}
+}
