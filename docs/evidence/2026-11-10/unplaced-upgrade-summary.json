@@ -1,0 +1,35 @@
+{
+  "ready": true,
+  "existingTableCount": 26,
+  "beforeVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "scope": "sanitized-local-unplaced-results-upgrade",
+  "origin": "http://127.0.0.1:4310",
+  "verifiedBackupFiles": 1096,
+  "afterVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
+  "existingDataUnchanged": true
+}
