@@ -304,3 +304,6 @@ LocalBoundRuns改为通过同一网关冻结能力，新增快照schemaVersion2�
 ### 模型网关协议最终冻结结果
 全量87893终态：87文件2972项全部通过，311.03秒；六包构建与真实CPU浏览器通过。另为实际CPU证据增加SQL快照版本/能力pin的直接断言与脱敏导出，避免仅根据调用路径推断v2运行；不变更运行代码或放宽原有断言。代码无DDL，不改旧v1快照和既有幂等请求hash。最新周额度已用62%/剩余38%；准备本机备份重启。
 最终实际CPU SQL证据d995a1cf-1533-4f18-b6ef-0d56d9b03b65通过：数据库schemaVersion=2、local-comfy-resize v1、ready、零供应商费用及capabilityHash已直接断言并导出model-capability-pin.json；同一结果字节、任务卡重开和单次运行约束继续通过。未读取用户日常数据。
+
+### 第十一次日常服务备份重启完成
+07:52完成：1124文件hash一致，独立restore-check副本15→15（无DDL），31张既有表全部原有列数据摘要一致；launcher27416。入口200、未登录能力目录401；未在日常库添加测试账号或素材。私有备份work/local-workspace/backups/20261110-075226-0cce5553-32af-4537-9dc9-d0573012ed66；脱敏统计model-gateway-upgrade-summary.json。代码提交b3b51b5。周额度已用62%/剩余38%，未达到停止阈值。后续推进有原件来源的本地规则资料候选/人工确认等就绪基础，并保留真实模型/分析策划/Agent/导出/云端门槛；完整目标进行中。
