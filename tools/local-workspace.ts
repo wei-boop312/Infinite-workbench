@@ -21,5 +21,5 @@ const dispatcher=pythonExecutable&&comfyMain?new LocalRunDispatcher(db,()=>new L
 const server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets,compilerSourceSha256:pin,onRunQueued:dispatcher?()=>dispatcher.wake():undefined});
 server.on('error',async error=>{console.error(error.message);await db.close();process.exitCode=1;});
 server.listen(4310,'127.0.0.1',()=>{dispatcher?.start();console.log(`本地工作台：${origin}；仅监听本机，数据保存在work/local-workspace。CPU缩放：${dispatcher?'已配置':'未配置'}。`);});
-let closing=false;const close=()=>{if(closing)return;closing=true;server.close(()=>{void (async()=>{await dispatcher?.close();await db.close();})();});};
+let closing=false;const close=()=>{if(closing)return;closing=true;server.emit('workspace-shutdown');server.close(()=>{void (async()=>{await dispatcher?.close();await db.close();})();});};
 process.on('SIGINT',close);process.on('SIGTERM',close);

@@ -16,7 +16,7 @@ test.beforeAll(async()=>{
   server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets,compilerSourceSha256:'b'.repeat(64)});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const a=server.address();if(!a||typeof a==='string')throw Error('NO_ADDRESS');origin=`http://127.0.0.1:${a.port}`;
 });
-test.afterAll(async()=>{if(server)await new Promise<void>(done=>server.close(()=>done()));if(db)await db.close();if(directory)rmSync(directory,{recursive:true,force:true});});
+test.afterAll(async()=>{if(server){server.emit('workspace-shutdown');await new Promise<void>(done=>server.close(()=>done()));}if(db)await db.close();if(directory)rmSync(directory,{recursive:true,force:true});});
 test('首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销',async({page})=>{
   await page.goto(origin);await expect(page.getByRole('heading',{name:'创建本机账号'})).toBeVisible();
   await page.getByLabel('用户名',{exact:true}).fill('preview_owner');await page.getByLabel('密码',{exact:true}).fill('owned-browser-password-very-long-2026');
@@ -57,6 +57,11 @@ test('首个真实账号→登录态→项目→文字卡拖动编辑→刷新�
   await page.reload();await expect(page.locator('[data-tool-form]').getByRole('status')).toHaveText('已取消');
   expect((await db.asActor(user,tx=>tx.query<{state:string}>('SELECT state FROM workspace.runs'))).rows[0].state).toBe('cancelled');
   await page.screenshot({path:'docs/evidence/2026-11-10/tool-card-cancelled.png',fullPage:true});
+  await page.getByRole('button',{name:'任务与用量',exact:true}).click();const history=page.getByRole('dialog',{name:'任务与用量'});
+  await expect(history.locator('.task-row')).toHaveCount(1);await history.locator('.task-row').click();
+  await expect(history.locator('#history-state')).toHaveText('已取消');await expect(history.getByRole('log')).toContainText('已取消');
+  await expect(history.locator('#history-stream')).toHaveText('执行日志已连接');await expect(history.locator('#history-usage')).toContainText('本地CPU缩放无供应商费用');
+  await page.screenshot({path:'docs/evidence/2026-11-10/task-history-cancelled.png',fullPage:true});await history.getByRole('button',{name:'关闭',exact:true}).click();
 });
 test('滚动升级时运行配置接口尚未提供，仍能登录并打开已有项目',async({page})=>{
   await page.route('**/v1/runtime',route=>route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({error:{code:'NOT_FOUND'}})}));

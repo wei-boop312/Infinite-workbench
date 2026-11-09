@@ -58,7 +58,9 @@ export class LocalBoundRuns {
       if(!r)throw Error('NOT_FOUND');if(contentHash(r.payload)!==r.content_hash)throw Error('SNAPSHOT_INTEGRITY_FAILED');
       const output=(await tx.query('SELECT asset_version_id,object_id,object_revision,sha256 FROM workspace.run_outputs WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0]??null;
       const cancellation=(await tx.query('SELECT requested_by,reason,created_at FROM workspace.run_cancellations WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0]??null;
-      return {id:r.id,state:r.state,eventSequence:Number(r.event_sequence),snapshot:r.payload,snapshotHash:r.content_hash,output,cancellation};
+      const a=(await tx.query<{stage:string;provider_request_id:string|null}>('SELECT stage,provider_request_id FROM workspace.run_attempts WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0];
+      const attempt=a?{stage:a.stage,providerRequestId:a.provider_request_id}:null;
+      return {id:r.id,state:r.state,eventSequence:Number(r.event_sequence),snapshot:r.payload,snapshotHash:r.content_hash,output,cancellation,attempt};
     });
   }
   async cancel(actorId:string,projectId:string,id:string,reason:string){

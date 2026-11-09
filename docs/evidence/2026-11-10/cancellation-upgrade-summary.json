@@ -1,0 +1,27 @@
+{
+  "origin": "http://127.0.0.1:4310",
+  "afterVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "existingDataDigestsUnchanged": true,
+  "scope": "local-workspace-backup-copy-verified-upgrade",
+  "verifiedBackupFiles": 1072,
+  "privateBackupRetained": true,
+  "ready": true,
+  "existingTableCount": 20,
+  "beforeVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ]
+}

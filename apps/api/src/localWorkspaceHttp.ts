@@ -6,6 +6,8 @@ import type { LocalWorkspaceAssets } from './localWorkspaceAssets.ts';
 import { RunKernelError } from './runKernel.ts';
 import { LocalWorkflowVersions } from './localWorkflowVersions.ts';
 import { LocalBoundRuns } from './localBoundRuns.ts';
+import {LocalRunQueries} from './localRunQueries.ts';
+import {openLocalRunEventStream} from './localRunEventStream.ts';
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function reply(response:ServerResponse,status:number,data:unknown){
@@ -28,7 +30,8 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
   const failures=new Map<string,{count:number;until:number}>();
   const versions=new LocalWorkflowVersions(db);
   const boundRuns=new LocalBoundRuns(db,options.compilerSourceSha256??null);
-  return createServer(async(request,response)=>{
+  const queries=new LocalRunQueries(db),streams=new Map<()=>void,string>();
+  const server=createServer(async(request,response)=>{
     try{
       const expected=new URL(options.origin());
       if(!['127.0.0.1','localhost'].includes(expected.hostname)||expected.protocol!=='http:'||request.headers.host!==expected.host){reply(response,403,'ORIGIN_REJECTED');return;}
@@ -61,7 +64,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       }
       const user=await db.authenticate(cookie(request));
       if(url.pathname==='/v1/me'&&method==='GET'){reply(response,200,{user});return;}
-      if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,runCancellationEnabled:true,scope:'local-cpu-resize-only'});return;}
+      if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,scope:'local-cpu-resize-only'});return;}
       if(url.pathname==='/v1/auth/logout'&&method==='POST'){
         await db.logout(cookie(request));response.setHeader('set-cookie','workspace_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');reply(response,200,{logged_out:true});return;
       }
@@ -74,10 +77,30 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
           reply(response,201,{id:projectId,name:input.name.trim()});return;
         }
       }
-      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs|tools)(?:\/([^/]+)(?:\/(cancel))?)?)?$/.exec(url.pathname);
+      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs|tools|usage)(?:\/([^/]+)(?:\/(cancel|events))?)?)?$/.exec(url.pathname);
       if(!route||!uuid.test(route[1])||(route[4]&&(route[2]!=='runs'||!uuid.test(route[3])))){reply(response,404,'NOT_FOUND');return;}
       const projectId=route[1],role=(await db.asActor(user.id,tx=>tx.query<{role:string}>("SELECT m.role FROM workspace.project_members m JOIN workspace.projects p ON p.id=m.project_id WHERE p.id=$1 AND p.deleted_at IS NULL",[projectId]))).rows[0]?.role;
       if(!role){reply(response,404,'NOT_FOUND');return;}
+      if(method==='GET'&&route[2]==='runs'&&!route[3]){
+        if([...url.searchParams.keys()].some(key=>!['limit','cursor'].includes(key)))throw Error('INVALID_BODY');
+        reply(response,200,await queries.list(user.id,projectId,{limit:url.searchParams.has('limit')?Number(url.searchParams.get('limit')):undefined,cursor:url.searchParams.get('cursor')??undefined}));return;
+      }
+      if(method==='GET'&&route[2]==='usage'&&!route[3]){reply(response,200,await queries.usage(user.id,projectId));return;}
+      if(method==='GET'&&route[2]==='runs'&&route[4]==='events'){
+        if([...url.searchParams.keys()].some(key=>!['after_sequence','limit'].includes(key)))throw Error('INVALID_BODY');
+        const header=request.headers['last-event-id'],parameter=url.searchParams.get('after_sequence');
+        if(header!==undefined&&typeof header!=='string')throw Error('INVALID_BODY');
+        // Native EventSource retains its initial URL on reconnect and advances
+        // Last-Event-ID; that header must take precedence over the initial query.
+        const raw=header??parameter??'0';if(!/^(0|[1-9]\d*)$/.test(raw))throw Error('INVALID_BODY');const after=Number(raw);
+        const page=await queries.events(user.id,projectId,route[3],after,url.searchParams.has('limit')?Number(url.searchParams.get('limit')):100);
+        if(request.headers.accept?.includes('text/event-stream')){
+          if(response.destroyed)return;
+          if(streams.size>=16||[...streams.values()].filter(actor=>actor===user.id).length>=4){reply(response,429,'STREAM_LIMIT_EXCEEDED');return;}
+          let stop:()=>void;stop=openLocalRunEventStream(response,{db,queries,sessionToken:cookie(request),actorId:user.id,projectId,runId:route[3],afterSequence:after,onStop:()=>streams.delete(stop)});streams.set(stop,user.id);return;
+        }
+        reply(response,200,page);return;
+      }
       if(method==='GET'&&route[2]==='runs'&&!route[4]&&uuid.test(route[3]??'')){
         reply(response,200,await boundRuns.read(user.id,projectId,route[3]));return;
       }
@@ -157,4 +180,6 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       reply(response,status,status===500?'INTERNAL_ERROR':message==='INVALID_BODY'?'INVALID_BODY':status===422?'INVALID_INPUT':message);
     }
   });
+  server.on('workspace-shutdown',()=>{for(const stop of [...streams.keys()])stop();});
+  return server;
 }

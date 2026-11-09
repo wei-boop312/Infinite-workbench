@@ -23,7 +23,7 @@ test.beforeAll(async()=>{
   server=createLocalWorkspaceHttp(db,{origin:()=>origin,assets,compilerSourceSha256:pin,clientFile:resolve('apps/web/local-workspace.html'),onRunQueued:()=>dispatcher.wake()});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw Error('NO_ADDRESS');origin=`http://127.0.0.1:${address.port}`;dispatcher.start();
 });
-test.afterAll(async()=>{if(server)await new Promise<void>(done=>server.close(()=>done()));if(dispatcher)await dispatcher.close();for(const runtime of runtimes)await runtime.close();if(db)await db.close();writeFileSync(resolve(evidence,'runtime-report.json'),JSON.stringify({caseId,errors,runtimes:runtimes.map(r=>r.evidence)},null,2));});
+test.afterAll(async()=>{if(server){server.emit('workspace-shutdown');await new Promise<void>(done=>server.close(()=>done()));}if(dispatcher)await dispatcher.close();for(const runtime of runtimes)await runtime.close();if(db)await db.close();writeFileSync(resolve(evidence,'runtime-report.json'),JSON.stringify({caseId,errors,runtimes:runtimes.map(r=>r.evidence)},null,2));});
 test('真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投',async({page})=>{
   await page.goto(origin);await page.getByLabel('用户名',{exact:true}).fill('owned_browser');await page.getByLabel('密码',{exact:true}).fill('owned-browser-password-never-production');await page.getByRole('button',{name:'创建账号并进入'}).click();
   await page.getByLabel('新项目名称').fill('自有图片 CPU 闭环');await page.getByRole('button',{name:'创建项目',exact:true}).click();
@@ -49,5 +49,11 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   const runs=(await db.asActor(actor,tx=>tx.query('SELECT id,state FROM workspace.runs'))).rows;expect(runs).toHaveLength(1);expect(runs[0].state).toBe('succeeded');
   const outputs=(await db.asActor(actor,tx=>tx.query('SELECT * FROM workspace.run_outputs'))).rows;expect(outputs).toHaveLength(1);
   expect(runtimes).toHaveLength(1);await expect.poll(()=>runtimes[0].evidence.stopped).toBe(true);expect(errors).toEqual([]);
+  await page.evaluate(()=>{for(const key of Object.keys(localStorage))if(key.startsWith('workspace.tool-run.'))localStorage.removeItem(key);});await page.reload();
+  await page.getByRole('button',{name:'任务与用量',exact:true}).click();const history=page.getByRole('dialog',{name:'任务与用量'});await expect(history.locator('.task-row')).toHaveCount(1);await history.locator('.task-row').click();
+  await expect(history.locator('#history-state')).toHaveText('已完成，结果已归档');await expect(history.getByRole('log')).toContainText('已归档完成');
+  await page.screenshot({path:resolve(evidence,'task-history.png'),fullPage:true});
+  const historyWaiting=page.waitForEvent('download');await history.getByRole('link',{name:'下载任务结果'}).click();const historyDownload=await historyWaiting,historyPath=await historyDownload.path();if(!historyPath)throw Error('NO_HISTORY_DOWNLOAD');expect(readFileSync(historyPath)).toEqual(bytes);
+  await history.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();expect(runtimes).toHaveLength(1);
   writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],reloaded:true,noSecondSubmission:true},null,2));
 });
