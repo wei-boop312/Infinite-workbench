@@ -56,7 +56,8 @@ export class LocalBoundRuns {
     return this.db.asActor(actorId,async tx=>{
       const r=(await tx.query<{id:string;state:string;payload:unknown;content_hash:string}>('SELECT r.id,r.state,s.payload,s.content_hash FROM workspace.runs r JOIN workspace.run_snapshots s ON s.project_id=r.project_id AND s.id=r.snapshot_id WHERE r.project_id=$1 AND r.id=$2',[projectId,id])).rows[0];
       if(!r)throw Error('NOT_FOUND');if(contentHash(r.payload)!==r.content_hash)throw Error('SNAPSHOT_INTEGRITY_FAILED');
-      return {id:r.id,state:r.state,snapshot:r.payload,snapshotHash:r.content_hash};
+      const output=(await tx.query('SELECT asset_version_id,object_id,object_revision,sha256 FROM workspace.run_outputs WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0]??null;
+      return {id:r.id,state:r.state,snapshot:r.payload,snapshotHash:r.content_hash,output};
     });
   }
 }

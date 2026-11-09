@@ -87,3 +87,10 @@ Python路径可通过WORKSPACE_PYTHON指定，要求绝对路径。示例使用�
 上面的全量会话71326已结束：76文件中7失败，2899项中21失败、2878通过，543.36秒。失败涉及旧费用、attempt、产物、公开HTTP及结果画布等超时；不是最终通过。单独复核multipart仍复现超时，不能仅归因于并行负载。inspector CPU采样记录在work/multipart-diagnostic.cpuprofile，规范化指纹序列化为最大热点；正在验证保持旧hash规则的减少分配补丁，没有缓存快照、提高超时或减少worker。
 
 新增迁移005及内部LocalRunExecution：固定快照/编译器/资产校验、单次领取、60秒令牌租约、提交前持久确切请求、一次提交边界、响应归档态及顺序事件。未提交过期标failed，已提交过期标unknown，均不自动重投。8项专项通过（work/execution-final-tests.log），6包构建通过（work/execution-build.log）。尚无真实worker连接及产物ready/回画布；archiving不表示成功。迁移尚未应用日常数据库，现有本地服务未受执行补丁影响。周额度最近已用29%/剩余71%。
+
+## 2026-11-10 ready结果归档与内部worker
+新增迁移006输出关联；只有私有适配器校验后的ready PNG、匹配快照尺寸/hash及已持久provider request ID可完成。新结果对象追加、画布revision递增、output关联、完成事件与succeeded同事务；不改输入对象，重复回填不增卡。内部LocalResizeWorker串接私有原件、出站三节点验证、提交前持久请求、单次POST、先存回执、产物校验及回填；异常在提交前failed、提交后unknown，绝不自动重发。
+
+12项仓储/worker专项通过（worker-archive-tests.log），其中运行端明确为mock，不作为真实Comfy通过。6包构建通过（worker-archive-build.log）。实时registry Python编译入口用归档自有实例清单进行纯离线验证，3项通过（live-resize-compiler-tests.log）；没有连网或执行。后续必须实现自有隔离CPU runtime并做真实纵向/界面验收。迁移005/006未应用日常数据库。
+
+指纹优化保留旧字节协议及修改后重算，缓存的仅是最多1024个属性名的JSON转义文本，不缓存对象、内容、权限或digest。2项兼容测试通过；最初仅减少entry分配的80项套件仍有1超时失败（fingerprint-targeted-tests.log），追加属性名编码优化后原multipart两项通过（76项筛选未运行，multipart-optimized-tests.log）。新的全量会话4798仍运行，日志work/ready-output-full-test.log已出现旧HTTP用例5048ms超时，不能称整体绿；本次worker/回执和编译入口新增于全量启动之后，须以专项加最终冻结回归验证。最近周额度已用30%/剩余70%。

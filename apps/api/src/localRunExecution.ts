@@ -66,6 +66,53 @@ export class LocalRunExecution {
       await tx.query("UPDATE workspace.runs SET state='archiving' WHERE project_id=$1 AND id=$2 AND state='running'",[lease.projectId,lease.runId]);
     });
   }
+  async recordSubmissionReceipt(lease:LocalExecutionLease,providerRequestId:string,now=new Date()){
+    if(!/^[a-zA-Z0-9_-]{1,160}$/.test(providerRequestId))throw Error('INVALID_PROVIDER_REQUEST_ID');
+    await this.db.asActor(lease.actorId,async tx=>{
+      const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND id=$2 AND run_id=$3 FOR UPDATE',[lease.projectId,lease.attemptId,lease.runId])).rows[0];this.checkLease(row,lease,now);
+      if(row.stage!=='submitted')throw Error('INVALID_ATTEMPT_STAGE');
+      const updated=await tx.query('UPDATE workspace.run_attempts SET provider_request_id=$1 WHERE project_id=$2 AND id=$3 RETURNING id',[providerRequestId,lease.projectId,lease.attemptId]);
+      if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
+    });
+  }
+  async stopAttempt(lease:LocalExecutionLease,now=new Date()){
+    return this.db.asActor(lease.actorId,async tx=>{
+      const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND id=$2 AND run_id=$3 FOR UPDATE',[lease.projectId,lease.attemptId,lease.runId])).rows[0];this.checkLease(row,lease,now);
+      if(['completed','failed','unknown'].includes(row.stage))return;
+      const state=row.stage==='claimed'?'failed':'unknown';
+      const updated=await tx.query('UPDATE workspace.run_attempts SET stage=$1 WHERE project_id=$2 AND id=$3 RETURNING id',[state,lease.projectId,lease.attemptId]);
+      if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
+      await tx.query('UPDATE workspace.runs SET state=$1 WHERE project_id=$2 AND id=$3',[state,lease.projectId,lease.runId]);
+    });
+  }
+  /** Called only after the private asset adapter has decoded and saved bytes. */
+  async complete(lease:LocalExecutionLease,receipt:{assetId:string;sha256:string;providerRequestId:string},now=new Date()){
+    return this.db.asActor(lease.actorId,async tx=>{
+      const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND id=$2 AND run_id=$3 FOR UPDATE',[lease.projectId,lease.attemptId,lease.runId])).rows[0];
+      this.checkLease(row,lease,now);
+      if(row.provider_request_id!==receipt.providerRequestId)throw Error('OUTPUT_RECEIPT_MISMATCH');
+      const prior=(await tx.query<{asset_version_id:string;sha256:string}>('SELECT * FROM workspace.run_outputs WHERE project_id=$1 AND run_id=$2',[lease.projectId,lease.runId])).rows[0];
+      if(prior){if(prior.asset_version_id!==receipt.assetId||prior.sha256!==receipt.sha256)throw Error('OUTPUT_RECEIPT_MISMATCH');return prior;}
+      if(row.stage!=='returned')throw Error('INVALID_ATTEMPT_STAGE');
+      const run=(await tx.query<{state:string;payload:unknown;content_hash:string}>('SELECT r.state,s.payload,s.content_hash FROM workspace.runs r JOIN workspace.run_snapshots s ON s.project_id=r.project_id AND s.id=r.snapshot_id WHERE r.project_id=$1 AND r.id=$2 FOR UPDATE OF r',[lease.projectId,lease.runId])).rows[0];
+      if(!run||run.state!=='archiving'||contentHash(run.payload)!==run.content_hash)throw Error('SNAPSHOT_INTEGRITY_FAILED');
+      const snapshot=this.validateSnapshot(run.payload,lease.projectId,lease.actorId);
+      const asset=(await tx.query<{sha256:string;state:string;width:number;height:number;mime:string}>('SELECT v.sha256,v.state,f.width,f.height,f.mime FROM workspace.asset_versions v JOIN workspace.asset_files f ON f.project_id=v.project_id AND f.id=v.id WHERE v.project_id=$1 AND v.id=$2',[lease.projectId,receipt.assetId])).rows[0];
+      if(!asset||asset.state!=='ready'||asset.sha256!==receipt.sha256||asset.width!==snapshot.parameters.width||asset.height!==snapshot.parameters.height||asset.mime!=='image/png'||receipt.assetId===snapshot.asset.id)throw Error('OUTPUT_ASSET_NOT_READY');
+      // Append under the canvas revision lock; never replace the input or an
+      // existing user object, and make concurrent editors reload on conflict.
+      if(!(await tx.query('SELECT project_id FROM workspace.canvases WHERE project_id=$1 FOR UPDATE',[lease.projectId])).rows.length)throw Error('NOT_FOUND');
+      const object=WorkspaceObjectSchema.parse({id:randomUUID(),projectId:lease.projectId,revision:1,type:'image',assetVersionId:receipt.assetId,title:'缩放结果',x:snapshot.tool.x+snapshot.tool.width+80,y:snapshot.tool.y,width:Math.min(asset.width,480),height:Math.min(asset.width,480)*asset.height/asset.width});
+      await tx.query('INSERT INTO workspace.objects VALUES($1,$2,1)',[lease.projectId,object.id]);
+      await tx.query('INSERT INTO workspace.object_revisions VALUES($1,$2,1,$3,$4,$5)',[lease.projectId,object.id,receipt.assetId,JSON.stringify(object),contentHash(object)]);
+      await tx.query('UPDATE workspace.canvases SET revision=revision+1 WHERE project_id=$1',[lease.projectId]);
+      const output=(await tx.query('INSERT INTO workspace.run_outputs(project_id,run_id,attempt_id,asset_version_id,object_id,object_revision,sha256) VALUES($1,$2,$3,$4,$5,1,$6) RETURNING *',[lease.projectId,lease.runId,lease.attemptId,receipt.assetId,object.id,receipt.sha256])).rows[0];
+      const updated=await tx.query("UPDATE workspace.run_attempts SET stage='completed' WHERE project_id=$1 AND id=$2 RETURNING id",[lease.projectId,lease.attemptId]);
+      if(!updated.rows.length)throw Error('EXECUTION_PERMISSION_DENIED');
+      await tx.query("UPDATE workspace.runs SET state='succeeded' WHERE project_id=$1 AND id=$2",[lease.projectId,lease.runId]);
+      return output;
+    });
+  }
   async recoverExpired(actorId:string,projectId:string,runId:string,now=new Date()){
     return this.db.asActor(actorId,async tx=>{
       const row=(await tx.query<AttemptRow>('SELECT * FROM workspace.run_attempts WHERE project_id=$1 AND run_id=$2 FOR UPDATE',[projectId,runId])).rows[0];

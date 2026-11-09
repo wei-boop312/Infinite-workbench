@@ -4,6 +4,9 @@ import { LocalWorkspaceDatabase } from '../apps/api/src/localWorkspaceDatabase.t
 import { LocalWorkflowVersions } from '../apps/api/src/localWorkflowVersions.ts';
 import { LocalBoundRuns } from '../apps/api/src/localBoundRuns.ts';
 import { LocalRunExecution } from '../apps/api/src/localRunExecution.ts';
+import { LocalWorkspaceAssets } from '../apps/api/src/localWorkspaceAssets.ts';
+import {createRequire} from 'node:module';
+import {resolve} from 'node:path';
 let db:LocalWorkspaceDatabase,repo:LocalWorkflowVersions;
 const actor=randomUUID(),project=randomUUID(),other=randomUUID();
 const graph={id:randomUUID(),workflowId:randomUUID(),projectId:project,version:1,nodes:[
@@ -113,4 +116,25 @@ it('领取之后撤销编辑角色，原有效令牌也不能开始提交',async
     const attempt=(await db.asActor(actor,tx=>tx.query<{stage:string}>('SELECT stage FROM workspace.run_attempts WHERE project_id=$1 AND run_id=$2',[project,run.id]))).rows[0];
     expect(attempt.stage).toBe('claimed');
   }finally{await admin.query("UPDATE workspace.project_members SET role='owner' WHERE project_id=$1 AND user_id=$2",[project,actor]);}
+});
+it('ready原字节资产先归档，结果对象/事件/成功同事务；重入不重复卡片',async()=>{
+  const binding=(await db.asActor(actor,tx=>tx.query<{id:string}>('SELECT id FROM workspace.bindings WHERE project_id=$1',[project]))).rows[0];
+  const runs=new LocalBoundRuns(db,'b'.repeat(64)),execution=new LocalRunExecution(db,'b'.repeat(64));
+  const run=await runs.create(actor,project,binding.id,{width:256,height:256},'archive-owned-result');
+  const claimed=await execution.claim(actor,project,run.id,randomUUID());
+  await execution.beforeSubmit(claimed.lease,{owned:true});await execution.recordResponse(claimed.lease,'owned-archive',{status:'success'});
+  const assets=new LocalWorkspaceAssets(db,resolve('work','owned-run-assets-'+randomUUID()));
+  const sharp=createRequire(new URL('../apps/api/package.json',import.meta.url))('sharp');
+  const bytes=await sharp({create:{width:256,height:256,channels:3,background:{r:51,g:102,b:204}}}).png().toBuffer();
+  const asset=await assets.upload(actor,project,bytes,'image/png','owned-result.png');
+  const receipt={assetId:asset.id,sha256:asset.sha256,providerRequestId:'owned-archive'};
+  await expect(execution.complete(claimed.lease,{...receipt,sha256:'f'.repeat(64)})).rejects.toThrow('OUTPUT_ASSET_NOT_READY');
+  expect((await runs.read(actor,project,run.id)).state).toBe('archiving');
+  const output=await execution.complete(claimed.lease,receipt);
+  expect(await execution.complete(claimed.lease,receipt)).toEqual(output);
+  expect((await runs.read(actor,project,run.id))).toMatchObject({state:'succeeded',output:{asset_version_id:asset.id,sha256:asset.sha256}});
+  expect((await assets.download(actor,project,asset.id)).bytes).toEqual(bytes);
+  const rows=(await db.asActor(actor,tx=>tx.query<{count:string}>('SELECT count(*)::text AS count FROM workspace.object_revisions WHERE project_id=$1 AND asset_version_id=$2',[project,asset.id]))).rows;
+  expect(rows[0].count).toBe('1');
+  expect((await db.asActor(actor,tx=>tx.query<{stage:string}>('SELECT stage FROM workspace.run_events WHERE project_id=$1 AND run_id=$2 ORDER BY sequence',[project,run.id]))).rows.map(r=>r.stage)).toEqual(['claimed','submitted','returned','completed']);
 });

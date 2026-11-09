@@ -6,7 +6,7 @@ function keys(value:unknown,expected:string[]):asserts value is Record<string,an
 /** Validate the actual outbound graph, not just the compiler's success flag. */
 export function validateResizePrompt(raw:unknown,parameters:unknown,uploadedFilename:string){
   const size=WorkspaceParametersSchema.parse(parameters);
-  if(!/^[A-Za-z0-9_-]{1,128}\.png$/.test(uploadedFilename))throw Error('RESIZE_SOURCE_NAME_REJECTED');
+  if(!/^[A-Za-z0-9_-]{1,128}\.(png|jpg|jpeg|webp)$/.test(uploadedFilename))throw Error('RESIZE_SOURCE_NAME_REJECTED');
   keys(raw,['1','2','3']);
   const expected=['LoadImage','ImageScale','SaveImage'];
   for(let i=1;i<=3;i++){
