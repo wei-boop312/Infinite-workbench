@@ -1,0 +1,11 @@
+
+Running 4 tests using 1 worker
+
+(node:54344) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 1 tests\local-e2e\workspace.spec.ts:26:1 › 首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销 (2.0s)
+  ok 2 tests\local-e2e\workspace.spec.ts:73:1 › 滚动升级时运行配置接口尚未提供，仍能登录并打开已有项目 (329ms)
+  ok 3 tests\local-e2e\workspace.spec.ts:83:1 › 创建撤销与重做持久保存；连续22次编辑精确撤销20步且重开保留结果 (2.2s)
+  ok 4 tests\local-e2e\workspace.spec.ts:96:1 › 保存回复丢失保留固定操作，用户重试只提交一次修订并可撤销，viewer无法软删 (600ms)
+
+  4 passed (7.7s)

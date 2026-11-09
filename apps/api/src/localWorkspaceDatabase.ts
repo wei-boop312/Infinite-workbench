@@ -2,7 +2,7 @@ import { PGlite, type Transaction } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash, randomUUID, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
-import { WorkspaceObjectSchema } from "@canvas/contracts";
+import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema } from "@canvas/contracts";
 import { contentHash } from "./workspacePrototype.ts";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -14,7 +14,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{
@@ -133,6 +133,42 @@ export class LocalWorkspaceDatabase {
       await tx.query("UPDATE workspace.canvases SET revision=revision+1 WHERE project_id=$1",[projectId]);
       await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,object_id,object_revision,actor_id) VALUES($1,$2,'editor',$3,$4,$5)",[projectId,currentRevision+1,object.id,object.revision,actorId]);
       return currentRevision+1;
+    });
+  }
+  async saveCanvasOperation(actorId:string,projectId:string,raw:unknown,lease:{token:string;fencing:number},now=new Date()){
+    const input=WorkspaceCanvasOperationSchema.parse(raw);
+    if(input.objects.some(object=>object.projectId!==projectId))throw Error('NOT_FOUND');
+    if(new Set(input.objects.map(object=>object.id)).size!==input.objects.length)throw Error('INVALID_BODY');
+    const requestHash=contentHash(input);
+    return this.asActor(actorId,async tx=>{
+      const visible=(await tx.query<{allowed:boolean}>('SELECT workspace.can_edit(project_id) AS allowed FROM workspace.canvases WHERE project_id=$1',[projectId])).rows[0];
+      if(!visible)throw Error('NOT_FOUND');if(!visible.allowed)throw Error('ACCESS_DENIED');
+      const canvas=(await tx.query<{revision:number;allowed:boolean}>('SELECT revision,workspace.can_edit(project_id) AS allowed FROM workspace.canvases WHERE project_id=$1 FOR UPDATE',[projectId])).rows[0];
+      if(!canvas)throw Error('NOT_FOUND');if(!canvas.allowed)throw Error('ACCESS_DENIED');
+      const prior=(await tx.query<{actor_id:string;request_hash:string;result:{revision:number;objects:{id:string;revision:number}[]}}>('SELECT actor_id,request_hash,result FROM workspace.canvas_operations WHERE project_id=$1 AND id=$2',[projectId,input.id])).rows[0];
+      if(prior){if(prior.actor_id!==actorId||prior.request_hash!==requestHash)throw Error('IDEMPOTENCY_CONFLICT');return {...prior.result,reused:true};}
+      const current=(await tx.query<{token_hash:string;holder_id:string;fencing_token:number;expires_at:Date}>('SELECT * FROM workspace.edit_leases WHERE project_id=$1 FOR UPDATE',[projectId])).rows[0];
+      if(!current||current.holder_id!==actorId||current.token_hash!==hash(lease.token)||Number(current.fencing_token)!==lease.fencing||new Date(current.expires_at).getTime()<=now.getTime())throw Error('LEASE_CONFLICT');
+      const startRevision=Number(canvas.revision);
+      if(startRevision!==input.baseRevision){
+        const changes=(await tx.query<{count:string;only_outputs:boolean}>("SELECT count(*)::text AS count,bool_and(kind='run_output') AS only_outputs FROM workspace.canvas_changes WHERE project_id=$1 AND revision>$2 AND revision<=$3",[projectId,input.baseRevision,startRevision])).rows[0];
+        if(Number(changes.count)!==startRevision-input.baseRevision||changes.only_outputs!==true)throw Error('REVISION_CONFLICT');
+      }
+      let revision=startRevision;
+      for(const object of input.objects){
+        const previous=(await tx.query<{current_revision:number;payload:{type:string}}>('SELECT o.current_revision,r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id=$2',[projectId,object.id])).rows[0];
+        if(object.revision!==Number(previous?.current_revision??0)+1)throw Error('OBJECT_REVISION_CONFLICT');
+        if(previous&&previous.payload.type!==object.type)throw Error('OBJECT_IDENTITY_CONFLICT');
+        if(!previous&&object.deleted)throw Error('INVALID_BODY');
+        await tx.query('INSERT INTO workspace.objects VALUES($1,$2,$3) ON CONFLICT(project_id,id) DO UPDATE SET current_revision=excluded.current_revision',[projectId,object.id,object.revision]);
+        await tx.query('INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)',[projectId,object.id,object.revision,object.type==='image'?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);
+        revision++;
+        await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,object_id,object_revision,actor_id) VALUES($1,$2,'editor',$3,$4,$5)",[projectId,revision,object.id,object.revision,actorId]);
+      }
+      await tx.query('UPDATE workspace.canvases SET revision=$1 WHERE project_id=$2',[revision,projectId]);
+      const result={revision,objects:input.objects.map(object=>({id:object.id,revision:object.revision}))};
+      await tx.query('INSERT INTO workspace.canvas_operations(project_id,id,actor_id,request_hash,result) VALUES($1,$2,$3,$4,$5)',[projectId,input.id,actorId,requestHash,JSON.stringify(result)]);
+      return {...result,reused:false};
     });
   }
   async renewLease(actorId:string,projectId:string,lease:{token:string;fencing:number},now=new Date()){

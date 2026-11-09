@@ -38,7 +38,7 @@ export class LocalWorkflowVersions {
       };
       const source=await revision(request.sourceObjectId,request.sourceObjectRevision);
       const tool=await revision(request.toolObjectId,request.toolObjectRevision);
-      if(source.type!=='image'||tool.type!=='tool'||tool.templateVersionId!==template.id)throw Error('INVALID_BINDING');
+      if(source.deleted||tool.deleted||source.type!=='image'||tool.type!=='tool'||tool.templateVersionId!==template.id)throw Error('INVALID_BINDING');
       const asset=(await tx.query<{sha256:string;state:string}>('SELECT sha256,state FROM workspace.asset_versions WHERE project_id=$1 AND id=$2',[projectId,source.assetVersionId])).rows[0];
       if(!asset||asset.state!=='ready')throw Error('NOT_FOUND');
       const payload={...request,workflowVersionId:version.workflow_version_id,source,tool,assetVersionId:source.assetVersionId,assetSha256:asset.sha256,templateHash:version.content_hash};

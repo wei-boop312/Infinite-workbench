@@ -66,6 +66,9 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   // The page still holds its pre-output canvas revision. A result append may
   // rebase this independent edit; an intervening editor write still may not.
   await page.getByLabel('卡片内容').fill('结果返回后补充的人工事实');await page.locator('#current').click();await expect(page.getByRole('status').first()).toHaveText('已保存到本机');
+  await page.getByRole('button',{name:'撤销',exact:true}).click();await expect(page.getByLabel('卡片内容')).toHaveValue('人工确认：保持原产品事实');
+  const editActor=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id;expect((await db.asActor(editActor,tx=>tx.query('SELECT * FROM workspace.run_outputs'))).rows).toHaveLength(1);
+  await page.getByRole('button',{name:'重做',exact:true}).click();await expect(page.getByLabel('卡片内容')).toHaveValue('结果返回后补充的人工事实');
   await page.screenshot({path:resolve(evidence,'tool-completed.png'),fullPage:true});
   const waiting=page.waitForEvent('download');await form.getByRole('link',{name:'下载缩放结果'}).click();const download=await waiting,path=await download.path();if(!path)throw Error('NO_DOWNLOAD');
   const bytes=readFileSync(path),decoded=await sharp(bytes).removeAlpha().raw().toBuffer({resolveWithObject:true});
@@ -86,5 +89,5 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   await page.screenshot({path:resolve(evidence,'task-history.png'),fullPage:true});
   const historyWaiting=page.waitForEvent('download');await history.getByRole('link',{name:'下载任务结果'}).click();const historyDownload=await historyWaiting,historyPath=await historyDownload.path();if(!historyPath)throw Error('NO_HISTORY_DOWNLOAD');expect(readFileSync(historyPath)).toEqual(bytes);
   await history.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();expect(runtimes).toHaveLength(1);
-  writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],archiveRecoveredThroughUI:archiveFailure,reloaded:true,noSecondSubmission:true},null,2));
+  writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],userUndoPreservedBackgroundOutput:true,archiveRecoveredThroughUI:archiveFailure,reloaded:true,noSecondSubmission:true},null,2));
 });

@@ -16,6 +16,7 @@ export const WorkspaceAssetSchema = z.object({
 const ObjectBase = {
   id: Id, projectId: Id, revision: Revision,
   title: z.string().max(240).optional(),
+  deleted: z.boolean().optional(),
   x: z.number().finite(), y: z.number().finite(),
   width: z.number().positive().finite(), height: z.number().positive().finite(),
 };
@@ -25,6 +26,7 @@ export const WorkspaceObjectSchema = z.discriminatedUnion("type", [
   z.object({ ...ObjectBase, type: z.literal("tool"), templateVersionId: Id }).strict(),
 ]);
 
+export const WorkspaceCanvasOperationSchema=z.object({id:Id,baseRevision:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),objects:z.array(WorkspaceObjectSchema).min(1).max(100)}).strict();
 export const DisplayEdgeSchema = z.object({
   id: Id, projectId: Id, sourceObjectId: Id, targetObjectId: Id,
   kind: z.literal("display"),
@@ -90,6 +92,7 @@ export const ResizeParameterJsonSchema = z.toJSONSchema(WorkspaceParametersSchem
 export function workspaceJsonSchemas() {
   return {
     "resize-parameters.schema": ResizeParameterJsonSchema,
+    "canvas-operation.schema":z.toJSONSchema(WorkspaceCanvasOperationSchema),
     "object-revision.schema": z.toJSONSchema(WorkspaceObjectSchema),
     "workflow-version.schema": z.toJSONSchema(WorkspaceWorkflowSchema),
     "binding-request.schema": z.toJSONSchema(WorkspaceBindingRequestSchema),

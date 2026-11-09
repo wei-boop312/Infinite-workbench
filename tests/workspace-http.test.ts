@@ -25,7 +25,7 @@ describe('本地身份到项目/租约/保存的真实HTTP闭环',()=>{
     expect(login.status).toBe(200);expect(login.headers.get('set-cookie')).toContain('HttpOnly');
     cookie=login.headers.get('set-cookie')!.split(';')[0];expect(JSON.stringify(await login.json())).not.toContain('token');
     const other=await request('/v1/auth/login','POST',{username:'other_http',password},'');otherCookie=other.headers.get('set-cookie')!.split(';')[0];
-    expect((await(await request('/v1/runtime')).json()).data).toEqual({resizeEnabled:true,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:false,scope:'local-cpu-resize-only'});
+    expect((await(await request('/v1/runtime')).json()).data).toEqual({resizeEnabled:true,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:false,canvasOperationsEnabled:true,scope:'local-cpu-resize-only'});
   });
   it('项目归属由session决定，不接受伪造actor，其他用户看不到',async()=>{
     expect((await request('/v1/projects','POST',{name:'产品',actorId:randomUUID()})).status).toBe(422);
