@@ -12,6 +12,10 @@ export const WorkspaceAssetSchema = z.object({
   id: Id, projectId: Id, sha256: z.string().regex(/^[a-f0-9]{64}$/),
   state: z.literal("ready"), mime: z.enum(["image/png","image/jpeg","image/webp"]),
 }).strict();
+export const WorkspaceDocumentAssetSchema=z.object({
+  id:Id,projectId:Id,sha256:z.string().regex(/^[a-f0-9]{64}$/),state:z.literal('ready'),mime:z.enum(['text/plain','text/markdown','text/csv']),
+  name:z.string().min(1).max(240),byteSize:z.number().int().positive().max(2097152),characterCount:z.number().int().nonnegative(),lineCount:z.number().int().positive(),hasBom:z.boolean(),encoding:z.literal('utf-8'),
+}).strict();
 
 const ObjectBase = {
   id: Id, projectId: Id, revision: Revision,
@@ -23,6 +27,7 @@ const ObjectBase = {
 };
 export const WorkspaceObjectSchema = z.discriminatedUnion("type", [
   z.object({ ...ObjectBase, type: z.literal("image"), assetVersionId: Id }).strict(),
+  z.object({ ...ObjectBase, type: z.literal("file"), assetVersionId: Id }).strict(),
   z.object({ ...ObjectBase, type: z.literal("text"), text: z.string().max(100_000) }).strict(),
   z.object({ ...ObjectBase, type: z.literal("tool"), templateVersionId: Id }).strict(),
 ]);
@@ -96,6 +101,7 @@ export function workspaceJsonSchemas() {
     "resize-parameters.schema": ResizeParameterJsonSchema,
     "canvas-operation.schema":z.toJSONSchema(WorkspaceCanvasOperationSchema),
     "result-placement.schema":z.toJSONSchema(WorkspaceResultPlacementSchema),
+    "document-asset.schema":z.toJSONSchema(WorkspaceDocumentAssetSchema),
     "object-revision.schema": z.toJSONSchema(WorkspaceObjectSchema),
     "workflow-version.schema": z.toJSONSchema(WorkspaceWorkflowSchema),
     "binding-request.schema": z.toJSONSchema(WorkspaceBindingRequestSchema),

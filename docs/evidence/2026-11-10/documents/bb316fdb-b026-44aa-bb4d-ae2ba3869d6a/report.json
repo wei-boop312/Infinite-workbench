@@ -1,0 +1,20 @@
+{
+  "scope": "actual-private-document-disk-restart-no-model",
+  "caseId": "bb316fdb-b026-44aa-bb4d-ae2ba3869d6a",
+  "status": "passed",
+  "projectId": "47c74fee-52b5-4925-98ae-1aac69688476",
+  "assetId": "9daf3cf0-717f-4f73-8838-a8a85cd8f028",
+  "sha256": "765376f402ac196630bbff885262a5d07cc88a83b89935b07fbee3bedcffe65b",
+  "byteSize": 89,
+  "mime": "text/markdown",
+  "characterCount": 52,
+  "lineCount": 3,
+  "originalBytesUnchanged": true,
+  "databaseReopened": true,
+  "activeCards": 1,
+  "immutableRevisions": 3,
+  "storedDocumentVersions": 1,
+  "documentRejectedAsImage": true,
+  "outsiderDenied": true,
+  "modelRequests": 0
+}

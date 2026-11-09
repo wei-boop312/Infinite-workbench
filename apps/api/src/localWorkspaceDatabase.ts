@@ -2,7 +2,7 @@ import { PGlite, type Transaction } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash, randomUUID, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
-import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema } from "@canvas/contracts";
+import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema,type WorkspaceObject } from "@canvas/contracts";
 import { contentHash } from "./workspacePrototype.ts";
 import {validateObjectMutation} from './objectMutation.ts';
 
@@ -15,7 +15,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql','013_private_documents.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{
@@ -130,8 +130,9 @@ export class LocalWorkspaceDatabase {
       const previous=(await tx.query<{current_revision:number;payload:unknown}>('SELECT o.current_revision,r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id=$2',[projectId,object.id])).rows[0];
       if(object.revision!==Number(previous?.current_revision??0)+1) throw new Error("OBJECT_REVISION_CONFLICT");
       validateObjectMutation(previous?WorkspaceObjectSchema.parse(previous.payload):undefined,object);
+      await this.checkObjectAsset(tx,object);
       await tx.query("INSERT INTO workspace.objects VALUES($1,$2,$3) ON CONFLICT(project_id,id) DO UPDATE SET current_revision=excluded.current_revision",[projectId,object.id,object.revision]);
-      await tx.query("INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)",[projectId,object.id,object.revision,object.type==='image'?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);
+      await tx.query("INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)",[projectId,object.id,object.revision,(object.type==='image'||object.type==='file')?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);
       await tx.query("UPDATE workspace.canvases SET revision=revision+1 WHERE project_id=$1",[projectId]);
       await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,object_id,object_revision,actor_id) VALUES($1,$2,'editor',$3,$4,$5)",[projectId,currentRevision+1,object.id,object.revision,actorId]);
       return currentRevision+1;
@@ -161,9 +162,10 @@ export class LocalWorkspaceDatabase {
         const previous=(await tx.query<{current_revision:number;payload:unknown}>('SELECT o.current_revision,r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id=$2',[projectId,object.id])).rows[0];
         if(object.revision!==Number(previous?.current_revision??0)+1)throw Error('OBJECT_REVISION_CONFLICT');
         validateObjectMutation(previous?WorkspaceObjectSchema.parse(previous.payload):undefined,object);
+        await this.checkObjectAsset(tx,object);
         if(!previous&&object.deleted)throw Error('INVALID_BODY');
         await tx.query('INSERT INTO workspace.objects VALUES($1,$2,$3) ON CONFLICT(project_id,id) DO UPDATE SET current_revision=excluded.current_revision',[projectId,object.id,object.revision]);
-        await tx.query('INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)',[projectId,object.id,object.revision,object.type==='image'?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);
+        await tx.query('INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)',[projectId,object.id,object.revision,(object.type==='image'||object.type==='file')?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);
         revision++;
         await tx.query("INSERT INTO workspace.canvas_changes(project_id,revision,kind,object_id,object_revision,actor_id) VALUES($1,$2,'editor',$3,$4,$5)",[projectId,revision,object.id,object.revision,actorId]);
       }
@@ -172,6 +174,24 @@ export class LocalWorkspaceDatabase {
       await tx.query('INSERT INTO workspace.canvas_operations(project_id,id,actor_id,request_hash,result) VALUES($1,$2,$3,$4,$5)',[projectId,input.id,actorId,requestHash,JSON.stringify(result)]);
       return {...result,reused:false};
     });
+  }
+  private async checkObjectAsset(tx:Transaction,object:WorkspaceObject){
+    if(object.type!=='image'&&object.type!=='file')return;
+    const asset=(await tx.query<{kind:string}>('SELECT kind FROM workspace.asset_versions WHERE project_id=$1 AND id=$2',[object.projectId,object.assetVersionId])).rows[0];
+    if(!asset)throw Error('NOT_FOUND');if(asset.kind!==(object.type==='file'?'document':'image'))throw Error('ASSET_KIND_MISMATCH');
+  }
+  async registerLocalDocument(actorId:string,projectId:string,asset:{id:string;sha256:string;byteSize:number;mime:string;name:string;characterCount:number;lineCount:number;hasBom:boolean},writeBytes:()=>void){
+    return this.asActor(actorId,async tx=>{
+      const visible=(await tx.query<{allowed:boolean}>('SELECT workspace.can_edit(project_id) AS allowed FROM workspace.canvases WHERE project_id=$1',[projectId])).rows[0];if(!visible)throw Error('NOT_FOUND');if(!visible.allowed)throw Error('ACCESS_DENIED');
+      if(!(await tx.query('SELECT project_id FROM workspace.canvases WHERE project_id=$1 FOR UPDATE',[projectId])).rows.length)throw Error('NOT_FOUND');
+      const used=(await tx.query<{used:string}>('SELECT (coalesce((SELECT sum(byte_size) FROM workspace.asset_files WHERE project_id=$1),0)+coalesce((SELECT sum(byte_size) FROM workspace.asset_documents WHERE project_id=$1),0))::text AS used',[projectId])).rows[0].used;
+      if(Number(used)+asset.byteSize>64*1024*1024)throw Error('ASSET_QUOTA_EXCEEDED');writeBytes();
+      await tx.query("INSERT INTO workspace.asset_versions(project_id,id,sha256,state,storage_key,kind) VALUES($1,$2,$3,'ready',$4,'document')",[projectId,asset.id,asset.sha256,`${projectId}/${asset.id}.bin`]);
+      await tx.query('INSERT INTO workspace.asset_documents(project_id,id,byte_size,mime,original_name,character_count,line_count,has_bom) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[projectId,asset.id,asset.byteSize,asset.mime,asset.name,asset.characterCount,asset.lineCount,asset.hasBom]);
+    });
+  }
+  async readLocalDocument(actorId:string,projectId:string,id:string){
+    const row=(await this.asActor(actorId,tx=>tx.query<{id:string;sha256:string;mime:string;byte_size:number;original_name:string;character_count:number;line_count:number;has_bom:boolean}>('SELECT d.*,v.sha256 FROM workspace.asset_documents d JOIN workspace.asset_versions v ON v.project_id=d.project_id AND v.id=d.id AND v.kind=d.kind WHERE d.project_id=$1 AND d.id=$2',[projectId,id]))).rows[0];if(!row)throw Error('NOT_FOUND');return row;
   }
   async renewLease(actorId:string,projectId:string,lease:{token:string;fencing:number},now=new Date()){
     return this.asActor(actorId,async tx=>{
@@ -183,7 +203,7 @@ export class LocalWorkspaceDatabase {
   async registerLocalAsset(actorId:string,projectId:string,asset:{id:string;sha256:string;byteSize:number;mime:string;name:string;width:number;height:number},writeBytes:()=>void){
     return this.asActor(actorId,async tx=>{
       if(!(await tx.query('SELECT project_id FROM workspace.canvases WHERE project_id=$1 FOR UPDATE',[projectId])).rows.length)throw new Error('NOT_FOUND');
-      const size=(await tx.query<{used:string}>("SELECT coalesce(sum(byte_size),0)::text AS used FROM workspace.asset_files WHERE project_id=$1",[projectId])).rows[0].used;
+      const size=(await tx.query<{used:string}>("SELECT (coalesce((SELECT sum(byte_size) FROM workspace.asset_files WHERE project_id=$1),0)+coalesce((SELECT sum(byte_size) FROM workspace.asset_documents WHERE project_id=$1),0))::text AS used",[projectId])).rows[0].used;
       if(Number(size)+asset.byteSize>64*1024*1024)throw new Error('ASSET_QUOTA_EXCEEDED');
       writeBytes();
       await tx.query("INSERT INTO workspace.asset_versions VALUES($1,$2,$3,'ready',$4)",[projectId,asset.id,asset.sha256,`${projectId}/${asset.id}.bin`]);

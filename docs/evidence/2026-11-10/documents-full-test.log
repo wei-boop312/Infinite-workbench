@@ -1,0 +1,27 @@
+$ vitest run
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/canvas-operations.test.ts (7 tests | 1 failed) 1683ms
+   × 锁定规则覆盖两条保存入口，解锁必须独立修订；混合批次失败整体回滚 52ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/canvas-operations.test.ts > 锁定规则覆盖两条保存入口，解锁必须独立修订；混合批次失败整体回滚
+AssertionError: expected [Function] to throw error including 'OBJECT_IDENTITY_CONFLICT' but got 'NOT_FOUND'
+
+Expected: "OBJECT_IDENTITY_CONFLICT"
+Received: "NOT_FOUND"
+
+ ❯ tests/canvas-operations.test.ts:51:153
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 83 passed (84)
+      Tests  1 failed | 2957 passed (2958)
+   Start at  06:51:00
+   Duration  303.71s (tests 98%, import 1%)
+
+[ELIFECYCLE] Test failed. See above for more details.

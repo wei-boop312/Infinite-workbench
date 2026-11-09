@@ -30,6 +30,9 @@ function setup() {
 }
 
 describe("双层工作区迁移契约 FR-05/06 TASK-02/03", () => {
+  it('离线图片原型不假冒具备持久资料适配器，也不把图片资产当资料文件',()=>{
+    const f=setup();expect(()=>f.workspace.appendObjectRevision(f.projectId,{...f.image,id:randomUUID(),type:'file'},0)).toThrow('DOCUMENTS_REQUIRE_PERSISTENT_ADAPTER');
+  });
   it("普通对象不能携带节点配置，专业节点不能伪装对象", () => {
     const f = setup();
     expect(WorkspaceObjectSchema.safeParse({ ...f.image, nodes: [] }).success).toBe(false);

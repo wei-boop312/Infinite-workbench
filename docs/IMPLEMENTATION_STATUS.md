@@ -227,3 +227,24 @@ UI先持久不含lease的操作指针再POST，不自动重试。响应丢失可
 
 ### 第七次日常服务升级完成
 06:30备份升级完成：1096文件hash一致，独立restore-check副本迁移11→12，26张既有表所有原有列摘要一致；launcher18100。日常入口200且首页含“未归位结果”，账号/项目/素材未重置。私有原始报告在work/local-workspace/backups/20261110-063038-dc8e4122-303f-4cdd-9ad8-9347fb5093e7；脱敏统计unplaced-upgrade-summary.json。提交68432f9。最新周额度已用53%/剩余47%；继续私有文件卡与后续就绪任务，完整五场景/云端/模型与Agent仍未完成。
+
+## 2026-11-10 私有UTF-8资料文件卡（全量运行中）
+FR-02、TASK-06/07/09、T02/T03本地切片。迁移013新增asset_versions.kind（旧资产默认image）、只读asset_documents元数据，以及asset_files与object_revisions的类型复合FK。普通file对象只引用document，image对象只引用image；旧PATCH/原子保存两入口先检查类型，数据库生成asset_kind再强制约束，不能伪装文件进入图片端口。历史payload与字节不改写，原子编辑/锁定/组合/20步撤销继续适用。
+
+首个资料格式切片为UTF-8 TXT、Markdown、CSV，每文件2MiB、与图片共享每项目64MiB额度。服务端按文件名后缀/允许MIME及完整fatal UTF8解码校验，拒绝非法编码、NUL/非文本控制字节、主动格式后缀、伪MIME、超额和路径式文件名。存储保留原BOM/CRLF/Unicode字节，SHA覆盖原件；统计按解码后Unicode字符/行计算。JSON只读预览至多20000个UTF16单元且不拆代理对，原件下载每次鉴权、attachment/nosniff/CSP，完整字节不变。Markdown不解析成HTML，CSV不解释公式，资料内容不作为工具指令。
+
+上传先校验与配额/当前权限，再在私有目录WX+flush写字节，登记ready版本；预览先授权再读文件并核对长度/hash，损坏或失权拒绝。复制仅复用版本，软删卡片不删原件，不通过删卡释放历史资产额度。配额专项使用明确标注的元数据夹具，不当作真实64MiB吞吐/容量验收。
+
+HTTP新增POST /v1/projects/{p}/documents、GET /documents/{id}预览、?download=1下载；documentFilesEnabled控制入口。UI新增“添加资料”、资料卡、只读预览与下载、复制撤销和重开；预览弹窗内快捷键不影响背景画布。旧缓存服务不声明能力时隐藏新按钮。离线WorkspacePrototype仍只处理图片实验，明确拒绝资料，不能冒充真实身份/私有持久适配器。
+
+38项资产/资料/HTTP/版本/契约专项通过；7条本地浏览器通过，验证真实登录上传、BOM/中文/emoji/指令字符串预览、原件下载、复制/撤销/重开，脚本标签不执行、没有run提交、伪装image/直接file绑定均422。真实自有CPU回归c85a9b2f-5442-43b3-9883-408aac61612f通过。磁盘验收documents/764cf114-6190-4a91-8288-a97c049693e7关闭并重开真实PGlite目录：原件89字节/sha一致、3条不可变file修订、1活卡/1存储版本、跨项目拒绝、文件冒充图片拒绝。预览/文件卡截图已查看。无新依赖，无模型或付费调用。
+
+全量48943：work/documents-full-test.log；六包构建42751：work/documents-build.log。013未应用日常数据库，4310仍schema12。PDF/Office/任意二进制、资料编辑新版本、AI提取/确认/分析/策划、完整文件导出及云端仍待，不能标完整文件/五场景通过。最近周额度已用55%/剩余45%。
+
+### 资料卡最终边界修复与复核（待全量终态）
+首次全量84文件2958项中2957通过、1失败：旧对象改类型用例预期OBJECT_IDENTITY_CONFLICT，因新增资产查验顺序得到NOT_FOUND。调整为先执行既有对象身份/锁定约束，再查验引用资产；保留原断言，77项专项及第二次全量2958项全部通过，证据documents-full-test.log、documents-fixed-full-test.log，未放宽超时或worker。
+
+追加UUID大小写及缺失payload引用回归后，修复013内引用CHECK为UUID语义比较并显式拒绝NULL（原字符串比较误拒绝大写UUID）。before-fix用例实际失败，修复后27项专项通过。013尚未部署日常库，没有改写已部署迁移；最终磁盘验收新case bb316fdb-b026-44aa-bb4d-ae2ba3869d6a通过，旧case保留为早期证据。最终全量work/documents-final-full-test.log运行中，最终六包构建work/documents-final-build.log通过。周额度07:09已用57%/剩余43%。
+
+### 资料卡最终冻结结果
+最终全量88227：84文件2959项全部通过，301.77秒；最终六包构建通过。7条本地浏览器、实际自有CPU、最终磁盘重开证据与失败修复日志已保留。本阶段没有新增依赖、真实模型或付费调用。下一步先备份升级日常4310（schema12→13），再推进普通展示连线；完整文件格式、资料提取/事实确认/策划、Agent及云目标仍未完成。

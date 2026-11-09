@@ -1,0 +1,29 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/workspace-documents.test.ts (7 tests | 1 failed) 1548ms
+   × 资产UUID大小写按UUID语义相同，SQL仍拒绝缺失的payload资产引用 15ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/workspace-documents.test.ts > 资产UUID大小写按UUID语义相同，SQL仍拒绝缺失的payload资产引用
+error: new row for relation "object_revisions" violates check constraint "object_asset_payload"
+ ❯ pe.Oe ../../../%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/@electric-sql+pglite@0.5.15/node_modules/@electric-sql/pglite/dist/chunk-7WWLJV32.js:1:18112
+ ❯ pe.tt ../../../%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/@electric-sql+pglite@0.5.15/node_modules/@electric-sql/pglite/dist/chunk-7WWLJV32.js:1:15498
+ ❯ pe.parse ../../../%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/@electric-sql+pglite@0.5.15/node_modules/@electric-sql/pglite/dist/chunk-7WWLJV32.js:1:14172
+ ❯ q.Ce ../../../%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/@electric-sql+pglite@0.5.15/node_modules/@electric-sql/pglite/dist/chunk-O74Z5DUS.js:5:1759
+ ❯ ../../../%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/@electric-sql+pglite@0.5.15/node_modules/@electric-sql/pglite/dist/chunk-O74Z5DUS.js:5:1151
+ ❯ null.<anonymous> wasm:/wasm/022a9842:1:5417191
+ ❯ null.<anonymous> wasm:/wasm/022a9842:1:2185286
+ ❯ null.<anonymous> wasm:/wasm/022a9842:1:2215102
+ ❯ null.<anonymous> wasm:/wasm/022a9842:1:2215667
+ ❯ null.<anonymous> wasm:/wasm/022a9842:1:5074842
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 6 passed (7)
+   Start at  07:06:41
+   Duration  2.35s (tests 70%, transform 20%, import 10%)
+
