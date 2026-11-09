@@ -1,0 +1,53 @@
+{
+  "scope": "sanitized-local-archive-ui-upgrade",
+  "verifiedBackupFiles": 1076,
+  "beforeVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "origin": "http://127.0.0.1:4310",
+  "afterVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "ready": true,
+  "existingDataUnchanged": true,
+  "existingTableCount": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ]
+}
