@@ -9,11 +9,26 @@ export class ImageProviderContractError extends Error {
 }
 function reject(code: string): never { throw new ImageProviderContractError(code); }
 
+// Only literal property-name encodings are cached; no object/value/digest is
+// reused. The bounded table cannot preserve stale authorization or content.
+const encodedKeys=new Map<string,string>();
+function encodedKey(key:string){
+  let encoded=encodedKeys.get(key);
+  if(encoded===undefined){encoded=JSON.stringify(key);if(encodedKeys.size<1024)encodedKeys.set(key,encoded);}
+  return encoded;
+}
 function canonical(value: unknown): string {
+  if(typeof value==='number')return Number.isFinite(value)?String(value):'null';
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+    // Recompute every value; do not cache mutable security snapshots. Sorting
+    // keys directly avoids allocating/sorting entry tuples for large byte maps.
+    const object=value as Record<string,unknown>,parts:string[]=[];
+    for(const key of Object.keys(object).sort()){
+      const item=object[key];
+      if(item!==undefined)parts.push(`${encodedKey(key)}:${canonical(item)}`);
+    }
+    return `{${parts.join(",")}}`;
   }
   return JSON.stringify(value);
 }

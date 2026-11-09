@@ -1,0 +1,28 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/locked-production-billing-settlement.test.ts (78 tests | 1 failed) 346855ms
+   ❯ protected production zero-cap and multipart fees (7)
+     × 原multipart-image-array受保护费用不重建请求 5436ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/locked-production-billing-settlement.test.ts > protected production zero-cap and multipart fees > 原multipart-image-array受保护费用不重建请求
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-billing-settlement.test.ts:268:70
+    266|     await expect(t.artifact.ingest(principal,"project-a",t.v.batchId,t…
+    267|   });
+    268|   it.each(["multipart-image-array","multipart-image-single"] as const)…
+       |                                                                      ^
+    269|     const t=await fixture({protocol:"openai-compatible",encoding,manua…
+    270|     expect(s.service.settle(...s.args,s.request()).status).toBe("settl…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 79 passed (80)
+   Start at  02:51:54
+   Duration  347.74s (tests 100%)
+
