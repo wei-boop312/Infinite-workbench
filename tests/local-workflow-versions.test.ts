@@ -3,6 +3,7 @@ import { afterAll,beforeAll,expect,it } from 'vitest';
 import { LocalWorkspaceDatabase } from '../apps/api/src/localWorkspaceDatabase.ts';
 import { LocalWorkflowVersions } from '../apps/api/src/localWorkflowVersions.ts';
 import { LocalBoundRuns } from '../apps/api/src/localBoundRuns.ts';
+import { LocalRunExecution } from '../apps/api/src/localRunExecution.ts';
 let db:LocalWorkspaceDatabase,repo:LocalWorkflowVersions;
 const actor=randomUUID(),project=randomUUID(),other=randomUUID();
 const graph={id:randomUUID(),workflowId:randomUUID(),projectId:project,version:1,nodes:[
@@ -67,4 +68,49 @@ it('内置缩放模板重复安装只创建一个固定版本，不改变用户�
   expect(await repo.readWorkflow(actor,project,graph.id)).toEqual(graph);
   const count=(await db.asActor(actor,tx=>tx.query<{count:string}>('SELECT count(*)::text AS count FROM workspace.template_versions WHERE project_id=$1 AND template_id=$2',[project,installed[0].templateId]))).rows[0].count;
   expect(count).toBe('1');
+});
+it('执行领取只成功一次；提交前持久请求，旧令牌/重复提交被拒绝且事件可追踪',async()=>{
+  const binding=(await db.asActor(actor,tx=>tx.query<{id:string}>('SELECT id FROM workspace.bindings WHERE project_id=$1',[project]))).rows[0];
+  const runs=new LocalBoundRuns(db,'b'.repeat(64)),execution=new LocalRunExecution(db,'b'.repeat(64));
+  const run=await runs.create(actor,project,binding.id,{width:256,height:256},'execution-once'),worker=randomUUID();
+  const claims=await Promise.allSettled([execution.claim(actor,project,run.id,worker),execution.claim(actor,project,run.id,worker)]);
+  expect(claims.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+  const claimed=claims.find(r=>r.status==='fulfilled') as PromiseFulfilledResult<Awaited<ReturnType<typeof execution.claim>>>;
+  const lease=claimed.value.lease;
+  await expect(execution.beforeSubmit({...lease,token:'wrong'},{owned:true})).rejects.toThrow('EXECUTION_LEASE_INVALID');
+  await execution.beforeSubmit(lease,{owned:true});
+  await expect(execution.beforeSubmit(lease,{owned:true})).rejects.toThrow('ALREADY_SUBMITTED');
+  await execution.recordResponse(lease,'owned-request-1',{output:'not-an-artifact-acceptance'});
+  expect((await runs.read(actor,project,run.id)).state).toBe('archiving');
+  const events=(await db.asActor(actor,tx=>tx.query<{sequence:number;stage:string}>('SELECT sequence,stage FROM workspace.run_events WHERE project_id=$1 AND run_id=$2 ORDER BY sequence',[project,run.id]))).rows;
+  expect(events.map(e=>e.stage)).toEqual(['claimed','submitted','returned']);
+  await expect(db.asActor(actor,tx=>tx.query("UPDATE workspace.run_attempts SET request_payload='{}' WHERE project_id=$1 AND run_id=$2",[project,run.id]))).rejects.toThrow('ATTEMPT_REQUEST_IMMUTABLE');
+});
+it('领取后过期且未提交标失败；已提交后过期标unknown，均不自动重投',async()=>{
+  const binding=(await db.asActor(actor,tx=>tx.query<{id:string}>('SELECT id FROM workspace.bindings WHERE project_id=$1',[project]))).rows[0];
+  const runs=new LocalBoundRuns(db,'b'.repeat(64)),execution=new LocalRunExecution(db,'b'.repeat(64)),now=new Date(),later=new Date(now.getTime()+61_000);
+  const first=await runs.create(actor,project,binding.id,{width:256,height:256},'expire-before');
+  const a=await execution.claim(actor,project,first.id,randomUUID(),now);
+  await expect(execution.beforeSubmit(a.lease,{},later)).rejects.toThrow('EXECUTION_LEASE_INVALID');
+  expect(await execution.recoverExpired(actor,project,first.id,later)).toMatchObject({changed:true,state:'failed'});
+  const second=await runs.create(actor,project,binding.id,{width:256,height:256},'expire-after');
+  const b=await execution.claim(actor,project,second.id,randomUUID(),now);await execution.beforeSubmit(b.lease,{owned:true},now);
+  expect(await execution.recoverExpired(actor,project,second.id,later)).toMatchObject({changed:true,state:'unknown'});
+  expect(await execution.recoverExpired(actor,project,second.id,later)).toEqual({changed:false});
+  await expect(execution.claim(actor,project,second.id,randomUUID(),later)).rejects.toThrow('RUN_NOT_QUEUED');
+  await expect(new LocalRunExecution(db,'c'.repeat(64)).claim(actor,project,(await runs.create(actor,project,binding.id,{width:256,height:256},'wrong-manifest')).id,randomUUID())).rejects.toThrow('SNAPSHOT_INTEGRITY_FAILED');
+});
+it('领取之后撤销编辑角色，原有效令牌也不能开始提交',async()=>{
+  const binding=(await db.asActor(actor,tx=>tx.query<{id:string}>('SELECT id FROM workspace.bindings WHERE project_id=$1',[project]))).rows[0];
+  const runs=new LocalBoundRuns(db,'b'.repeat(64)),execution=new LocalRunExecution(db,'b'.repeat(64));
+  const run=await runs.create(actor,project,binding.id,{width:256,height:256},'revoked-after-claim');
+  const claim=await execution.claim(actor,project,run.id,randomUUID());
+  // Fault injection into this owned in-memory database, not a product admin API.
+  const admin=(db as unknown as {db:{query:(sql:string,params:unknown[])=>Promise<unknown>}}).db;
+  try{
+    await admin.query("UPDATE workspace.project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2",[project,actor]);
+    await expect(execution.beforeSubmit(claim.lease,{owned:true})).rejects.toThrow();
+    const attempt=(await db.asActor(actor,tx=>tx.query<{stage:string}>('SELECT stage FROM workspace.run_attempts WHERE project_id=$1 AND run_id=$2',[project,run.id]))).rows[0];
+    expect(attempt.stage).toBe('claimed');
+  }finally{await admin.query("UPDATE workspace.project_members SET role='owner' WHERE project_id=$1 AND user_id=$2",[project,actor]);}
 });
