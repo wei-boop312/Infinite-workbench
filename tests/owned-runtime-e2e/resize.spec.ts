@@ -76,10 +76,12 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   const waiting=page.waitForEvent('download');await form.getByRole('link',{name:'下载缩放结果'}).click();const download=await waiting,path=await download.path();if(!path)throw Error('NO_DOWNLOAD');
   const bytes=readFileSync(path),decoded=await sharp(bytes).removeAlpha().raw().toBuffer({resolveWithObject:true});
   expect(decoded.info).toMatchObject({width:256,height:256,channels:3});expect(decoded.data.every((value:number,index:number)=>value===[51,102,204][index%3])).toBe(true);writeFileSync(resolve(evidence,'result.png'),bytes);
+  await form.getByRole('button',{name:'添加任务卡',exact:true}).click();const taskCard=page.locator('[data-task-card]');await expect(taskCard.getByRole('status')).toHaveText('已完成，结果已归档');await expect(taskCard.locator('small')).toContainText('固定输入修订 1');const taskDownloadWaiting=page.waitForEvent('download');await taskCard.getByRole('link',{name:'下载任务结果',exact:true}).click();const taskDownload=await taskDownloadWaiting,taskPath=await taskDownload.path();if(!taskPath)throw Error('NO_TASK_CARD_DOWNLOAD');expect(readFileSync(taskPath)).toEqual(bytes);await page.screenshot({path:resolve(evidence,'task-card-completed.png'),fullPage:true});
   await form.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();await page.screenshot({path:resolve(evidence,'result-on-canvas.png'),fullPage:true});
   await page.reload();await expect(page.locator('[data-tool-form]').getByRole('status')).toHaveText('已完成，结果已归档');
   await expect(page.getByLabel('卡片内容')).toHaveValue('结果返回后补充的人工事实');
   const actor=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id;
+  await expect(page.locator('[data-task-card]').getByRole('status')).toHaveText('已完成，结果已归档');
   const runs=(await db.asActor(actor,tx=>tx.query('SELECT id,state FROM workspace.runs'))).rows;expect(runs).toHaveLength(1);expect(runs[0].state).toBe('succeeded');
   const outputs=(await db.asActor(actor,tx=>tx.query('SELECT * FROM workspace.run_outputs'))).rows;expect(outputs).toHaveLength(1);
   const preparation=(await db.asActor(actor,tx=>tx.query<{payload:{runtimeKind:string;coreFiles:unknown[]};content_hash:string}>('SELECT payload,content_hash FROM workspace.run_preparations'))).rows;expect(preparation).toHaveLength(1);expect(preparation[0].payload.runtimeKind).toBe('owned-cpu-comfy');expect(preparation[0].payload.coreFiles).toHaveLength(5);
@@ -92,7 +94,7 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   await page.screenshot({path:resolve(evidence,'task-history.png'),fullPage:true});
   const historyWaiting=page.waitForEvent('download');await history.getByRole('link',{name:'下载任务结果'}).click();const historyDownload=await historyWaiting,historyPath=await historyDownload.path();if(!historyPath)throw Error('NO_HISTORY_DOWNLOAD');expect(readFileSync(historyPath)).toEqual(bytes);
   await history.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();expect(runtimes).toHaveLength(1);
-  writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],userUndoPreservedBackgroundOutput:true,archiveRecoveredThroughUI:archiveFailure,reloaded:true,noSecondSubmission:true},null,2));
+  writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],userUndoPreservedBackgroundOutput:true,taskCardDownloadedSameBytes:true,taskCardReopened:true,archiveRecoveredThroughUI:archiveFailure,reloaded:true,noSecondSubmission:true},null,2));
 });
 
 

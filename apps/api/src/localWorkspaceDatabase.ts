@@ -15,7 +15,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql','013_private_documents.sql','014_display_edges.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql','013_private_documents.sql','014_display_edges.sql','015_task_cards.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{
@@ -193,6 +193,7 @@ export class LocalWorkspaceDatabase {
     });
   }
   private async checkObjectAsset(tx:Transaction,object:WorkspaceObject){
+    if(object.type==='task'){if(!(await tx.query('SELECT id FROM workspace.runs WHERE project_id=$1 AND id=$2',[object.projectId,object.runId])).rows.length)throw Error('NOT_FOUND');return;}
     if(object.type!=='image'&&object.type!=='file')return;
     const asset=(await tx.query<{kind:string}>('SELECT kind FROM workspace.asset_versions WHERE project_id=$1 AND id=$2',[object.projectId,object.assetVersionId])).rows[0];
     if(!asset)throw Error('NOT_FOUND');if(asset.kind!==(object.type==='file'?'document':'image'))throw Error('ASSET_KIND_MISMATCH');

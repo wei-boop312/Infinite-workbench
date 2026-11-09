@@ -30,6 +30,7 @@ export const WorkspaceObjectSchema = z.discriminatedUnion("type", [
   z.object({ ...ObjectBase, type: z.literal("file"), assetVersionId: Id }).strict(),
   z.object({ ...ObjectBase, type: z.literal("text"), text: z.string().max(100_000) }).strict(),
   z.object({ ...ObjectBase, type: z.literal("tool"), templateVersionId: Id }).strict(),
+  z.object({ ...ObjectBase, type: z.literal("task"), runId: Id }).strict(),
 ]);
 
 export const WorkspaceDisplayEdgeSchema=z.object({id:Id,projectId:Id,revision:Revision,sourceObjectId:Id,targetObjectId:Id,kind:z.literal('display'),label:z.string().max(240).optional(),deleted:z.boolean().optional()}).strict().refine(edge=>edge.sourceObjectId.toLowerCase()!==edge.targetObjectId.toLowerCase(),'Self relation rejected');

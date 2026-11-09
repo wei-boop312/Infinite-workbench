@@ -1,0 +1,16 @@
+{
+  "scope": "actual-task-card-disk-restart-no-worker-contract-fixture",
+  "caseId": "daf0bdd0-6ec8-4402-bc82-991ed3da358d",
+  "status": "passed",
+  "databaseReopened": true,
+  "activeTaskCards": 1,
+  "immutableObjectRevisions": 3,
+  "runCount": 1,
+  "runState": "queued",
+  "snapshotHashUnchanged": true,
+  "receiptReused": true,
+  "attemptCount": 0,
+  "outboxCount": 1,
+  "outsiderRows": 0,
+  "modelRequests": 0
+}

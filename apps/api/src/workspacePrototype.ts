@@ -105,6 +105,7 @@ export class WorkspacePrototype {
   appendObjectRevision(projectId: string, raw: unknown, baseRevision: number) {
     const object = WorkspaceObjectSchema.parse(raw); sameProject(projectId, object);
     if(object.type==='file')throw new Error("DOCUMENTS_REQUIRE_PERSISTENT_ADAPTER");
+    if(object.type==='task')throw new Error("TASK_CARDS_REQUIRE_PERSISTENT_ADAPTER");
     const history = this.objects.get(object.id) ?? [];
     if (history.length) sameProject(projectId, history[0]);
     if ((history.at(-1)?.revision ?? 0) !== baseRevision || object.revision !== baseRevision + 1) throw new Error("REVISION_CONFLICT");
