@@ -1,0 +1,39 @@
+{
+  "existingTableCount": 28,
+  "ready": true,
+  "verifiedBackupFiles": 1106,
+  "documentEntryPresent": true,
+  "origin": "http://127.0.0.1:4310",
+  "scope": "sanitized-local-private-documents-upgrade",
+  "afterVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13
+  ],
+  "entryStatus": 200,
+  "beforeVersions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
+  "existingDataUnchanged": true
+}
