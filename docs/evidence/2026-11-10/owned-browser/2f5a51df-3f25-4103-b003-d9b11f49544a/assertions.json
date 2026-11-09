@@ -1,0 +1,37 @@
+{
+  "scope": "actual-owned-cpu-unplaced-results",
+  "unplacedKind": "tool",
+  "snapshotHash": "913c74d025d285126709dd212cc9c714f40eb7eaa7f5366e2745fc08d5f2ca36",
+  "attempts": [
+    {
+      "id": "a3b2bb11-7b72-42cb-b0c3-892e4bfe08d5"
+    }
+  ],
+  "outputs": [
+    {
+      "project_id": "8444694c-86b8-46b4-9174-31863339eba3",
+      "run_id": "c40756be-0394-4227-8836-ddf784103b88",
+      "attempt_id": "a3b2bb11-7b72-42cb-b0c3-892e4bfe08d5",
+      "asset_version_id": "30a9bb92-6ba9-4455-a08e-3e9a66ae0021",
+      "object_id": null,
+      "object_revision": null,
+      "sha256": "6425e2de699dcf9c5d2759b36cedb914c37558558ccdbf5de12d9faa7773baec",
+      "created_at": "2026-11-09T22:22:55.192Z"
+    }
+  ],
+  "placements": [
+    {
+      "object_id": "29ac49ce-dc01-4451-8898-4846b5f7ae2f"
+    },
+    {
+      "object_id": "ec2389d4-a7ba-4af8-9511-3b6654867239"
+    },
+    {
+      "object_id": "96f50155-e606-4818-97d4-5bbe5a02a1a0"
+    }
+  ],
+  "placementRequests": 4,
+  "submissionEvents": 1,
+  "undoRedoPreservedOriginal": true,
+  "sourceUnchanged": true
+}

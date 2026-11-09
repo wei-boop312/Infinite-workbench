@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
-import {readFileSync} from 'node:fs';
+import {readFileSync,writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {beforeAll,afterAll,it,expect,vi} from 'vitest';
 import {LocalWorkspaceDatabase} from '../apps/api/src/localWorkspaceDatabase';
@@ -14,6 +14,8 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {OwnedRuntimeCancellation} from '../apps/worker/src/runtimeCancellation';
 import {LocalRunArtifactStore} from '../apps/api/src/localRunArtifactStore';
 import {LocalArchiveRecovery} from '../apps/api/src/localArchiveRecovery';
+import {LocalRunPlacement} from '../apps/api/src/localRunPlacement';
+import {LocalRunQueries} from '../apps/api/src/localRunQueries';
 let db:LocalWorkspaceDatabase,assets:LocalWorkspaceAssets,artifacts:LocalRunArtifactStore,artifactDirectory:string,runs:LocalBoundRuns,execution:LocalRunExecution,bindingId:string,sourceId:string,sourceBytes:Buffer,resultBytes:Buffer;
 const actor=randomUUID(),viewer=randomUUID(),project=randomUUID(),pin='b'.repeat(64);
 beforeAll(async()=>{
@@ -231,4 +233,62 @@ it('提交回复丢失没有持久产物证据，归档恢复不能猜测生成�
   await expect(new LocalResizeWorker(execution,assets,r,artifacts).execute(actor,project,run.id)).rejects.toThrow('unknown-reply');
   await expect(new LocalArchiveRecovery(execution,artifacts,assets).recover(actor,project,run.id)).rejects.toThrow('NO_VERIFIED_ARTIFACT');
   expect((await runs.read(actor,project,run.id)).state).toBe('unknown');expect(r.submit).toHaveBeenCalledTimes(1);
+});
+async function unplacedFixture(kind:'source'|'tool'|'none'){
+  const p=randomUUID();await db.seedProject(p,'owned unplaced result',[{userId:actor,role:'owner'},{userId:viewer,role:'viewer'}]);
+  const source=await assets.upload(actor,p,sourceBytes,'image/png','unplaced-owned.png'),repo=new LocalWorkflowVersions(db),template=await repo.ensureResizeTemplate(actor,p);
+  const image={id:randomUUID(),projectId:p,revision:1,type:'image' as const,assetVersionId:source.id,x:0,y:0,width:160,height:120},tool={id:randomUUID(),projectId:p,revision:1,type:'tool' as const,templateVersionId:template.id,x:200,y:0,width:330,height:510},lease=await db.acquireLease(actor,p);
+  await db.saveCanvasOperation(actor,p,{id:randomUUID(),baseRevision:0,objects:[image,tool]},lease);
+  const binding=await repo.bind(actor,p,{id:randomUUID(),projectId:p,taskLineId:randomUUID(),sourceObjectId:image.id,sourceObjectRevision:1,toolObjectId:tool.id,toolObjectRevision:1,templateVersionId:template.id});
+  const run=await runs.create(actor,p,binding.id,{width:256,height:256},'unplaced-owned-'+randomUUID()),r=runtime(),original=r.result;
+  if(kind!=='none')r.result=vi.fn(async(...args)=>{const result=await original(...args),parent=kind==='source'?image:tool;await db.saveCanvasOperation(actor,p,{id:randomUUID(),baseRevision:2,objects:[{...parent,revision:2,deleted:true}]},lease);return result;});
+  await new LocalResizeWorker(execution,assets,r,artifacts).execute(actor,p,run.id);return {p,run,r,lease,source,bindingId:binding.id};
+}
+it('执行中删源卡后只归档不追加结果，权限/租约/固定ID保护放置，删除与撤销不改历史回执',async()=>{
+  const fixture=await unplacedFixture('source'),{p,run,r,lease}=fixture,placement=new LocalRunPlacement(db,assets),queries=new LocalRunQueries(db);
+  const saved=await runs.read(actor,p,run.id);expect(saved).toMatchObject({state:'succeeded',canPlaceOutput:true,output:{object_id:null,unplaced:true}});
+  expect((await queries.list(viewer,p,{onlyUnplaced:true})).items.map(row=>row.id)).toEqual([run.id]);expect((await runs.read(viewer,p,run.id)).canPlaceOutput).toBe(false);
+  const input={id:randomUUID(),baseRevision:3,x:30,y:40},download=vi.spyOn(assets,'download');
+  try{await expect(placement.place(viewer,p,run.id,input,lease)).rejects.toThrow('ACCESS_DENIED');await expect(placement.place(randomUUID(),p,run.id,input,lease)).rejects.toThrow('NOT_FOUND');expect(download).not.toHaveBeenCalled();}finally{download.mockRestore();}
+  await expect(placement.place(actor,p,run.id,input,{...lease,token:'invalid'})).rejects.toThrow('LEASE_CONFLICT');
+  const [first,repeated]=await Promise.all([placement.place(actor,p,run.id,input,lease),placement.place(actor,p,run.id,input,lease)]);expect(first.objectId).toBe(repeated.objectId);expect([first.reused,repeated.reused].filter(Boolean)).toHaveLength(1);
+  expect(await placement.place(actor,p,run.id,input,{token:'expired-response',fencing:0})).toMatchObject({objectId:first.objectId,reused:true});
+  await expect(placement.place(actor,p,run.id,{...input,x:99},lease)).rejects.toThrow('IDEMPOTENCY_CONFLICT');
+  expect(await placement.place(actor,p,run.id,{...input,id:randomUUID()},lease)).toMatchObject({objectId:first.objectId,alreadyPlaced:true});expect((await queries.list(actor,p,{onlyUnplaced:true})).items).toEqual([]);
+  await db.saveCanvasOperation(actor,p,{id:randomUUID(),baseRevision:4,objects:[{...first.object,revision:2,deleted:true}]},lease);
+  expect((await queries.list(actor,p,{onlyUnplaced:true})).items).toHaveLength(1);
+  await db.saveCanvasOperation(actor,p,{id:randomUUID(),baseRevision:5,objects:[{...first.object,revision:3}]},lease);
+  expect((await runs.read(actor,p,run.id)).output).toMatchObject({object_id:first.objectId,unplaced:false});
+  await db.saveCanvasOperation(actor,p,{id:randomUUID(),baseRevision:6,objects:[{...first.object,revision:4,deleted:true}]},lease);
+  const second=await placement.place(actor,p,run.id,{...input,id:randomUUID(),baseRevision:7},lease);expect(second.objectId).not.toBe(first.objectId);
+  const original=(await db.asActor(actor,tx=>tx.query<{object_id:null}>('SELECT object_id FROM workspace.run_outputs WHERE project_id=$1 AND run_id=$2',[p,run.id]))).rows;expect(original).toEqual([{object_id:null}]);
+  expect((await db.asActor(actor,tx=>tx.query('SELECT id FROM workspace.run_output_placements WHERE project_id=$1',[p]))).rows).toHaveLength(2);
+  await expect(db.asActor(actor,tx=>tx.query("UPDATE workspace.run_output_placements SET actor_id=$1 WHERE project_id=$2",[viewer,p]))).rejects.toThrow();
+  expect((await assets.download(actor,p,second.assetVersionId)).bytes).toEqual(resultBytes);expect((await assets.download(actor,p,fixture.source.id)).bytes).toEqual(sourceBytes);expect((await runs.read(actor,p,run.id)).snapshotHash).toBe(saved.snapshotHash);expect(r.submit).toHaveBeenCalledTimes(1);
+  expect((await db.asActor(randomUUID(),tx=>tx.query('SELECT * FROM workspace.current_run_outputs WHERE project_id=$1',[p]))).rows).toEqual([]);
+});
+it('删工具卡也进入未归位；缓存文件损坏拒绝放置且不写入新卡片/回执',async()=>{
+  const {p,run,lease}=await unplacedFixture('tool'),saved=await runs.read(actor,p,run.id),output=saved.output as {asset_version_id:string};expect(output).toMatchObject({object_id:null,unplaced:true});
+  const path=resolve((assets as unknown as {root:string}).root,p,output.asset_version_id+'.bin'),original=readFileSync(path);writeFileSync(path,Buffer.from('owned-tampered-result'));
+  try{await expect(new LocalRunPlacement(db,assets).place(actor,p,run.id,{id:randomUUID(),baseRevision:3,x:0,y:0},lease)).rejects.toThrow('ASSET_INTEGRITY_FAILED');}finally{writeFileSync(path,original);}
+  expect((await db.asActor(actor,tx=>tx.query('SELECT * FROM workspace.run_placement_requests WHERE project_id=$1',[p]))).rows).toHaveLength(0);
+  expect((await runs.read(actor,p,run.id)).output).toMatchObject({object_id:null,unplaced:true});
+});
+it('未归位清单保留微秒游标且绑定筛选条件，不与全部任务游标混用',async()=>{
+  const {p,run,bindingId}=await unplacedFixture('source'),ids=[run.id],queries=new LocalRunQueries(db);
+  for(let n=0;n<2;n++){const next=await runs.create(actor,p,bindingId,{width:256,height:256},'unplaced-page-'+randomUUID());await new LocalResizeWorker(execution,assets,runtime(),artifacts).execute(actor,p,next.id);ids.push(next.id);}
+  await db.asActor(actor,tx=>tx.query("UPDATE workspace.runs SET created_at='2026-11-10 01:00:00.123456+00' WHERE project_id=$1",[p]));
+  const found:string[]=[];let cursor:string|undefined,firstCursor='';
+  do{const page=await queries.list(viewer,p,{limit:1,cursor,onlyUnplaced:true});found.push(...page.items.map(item=>item.id));cursor=page.nextCursor??undefined;if(!firstCursor&&cursor)firstCursor=cursor;}while(cursor);
+  expect(found.sort()).toEqual(ids.sort());expect(new Set(found).size).toBe(3);expect(JSON.parse(Buffer.from(firstCursor,'base64url').toString('utf8'))).toMatchObject({filter:'unplaced',createdAt:expect.stringContaining('123456')});
+  await expect(queries.list(actor,p,{cursor:firstCursor})).rejects.toThrow('INVALID_BODY');
+  const value=JSON.parse(Buffer.from(firstCursor,'base64url').toString('utf8'));delete value.filter;
+  await expect(queries.list(actor,p,{cursor:Buffer.from(JSON.stringify(value)).toString('base64url'),onlyUnplaced:true})).rejects.toThrow('INVALID_BODY');
+});
+it('最初自动回填的结果卡删除后同样可找回，新放置不改原run输出历史',async()=>{
+  const {p,run,lease}=await unplacedFixture('none'),saved=await runs.read(actor,p,run.id),output=saved.output as {object_id:string;asset_version_id:string};expect(output.object_id).toBeTruthy();
+  const object=(await db.asActor(actor,tx=>tx.query<{payload:Record<string,unknown>}>('SELECT payload FROM workspace.object_revisions WHERE project_id=$1 AND object_id=$2',[p,output.object_id]))).rows[0].payload;
+  await db.saveCanvasOperation(actor,p,{id:randomUUID(),baseRevision:3,objects:[{...object,revision:2,deleted:true}]},lease);expect((await runs.read(actor,p,run.id)).output).toMatchObject({object_id:null,unplaced:true});
+  const placed=await new LocalRunPlacement(db,assets).place(actor,p,run.id,{id:randomUUID(),baseRevision:4,x:400,y:30},lease);expect(placed.objectId).not.toBe(output.object_id);expect(placed.assetVersionId).toBe(output.asset_version_id);
+  expect((await db.asActor(actor,tx=>tx.query<{object_id:string}>('SELECT object_id FROM workspace.run_outputs WHERE project_id=$1 AND run_id=$2',[p,run.id]))).rows).toEqual([{object_id:output.object_id}]);
 });

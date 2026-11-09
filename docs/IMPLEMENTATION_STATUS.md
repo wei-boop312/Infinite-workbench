@@ -204,3 +204,23 @@ GET runtime新增canvasSelectionEnabled；旧缓存服务不声明则隐藏高�
 
 ### 第六次日常服务升级完成
 05:58备份升级完成：1096文件hash一致，独立restore-check副本11→11，26张既有表所有原有列摘要一致；launcher63920。日常入口200、首页含新能力判定，重开项目后可多选/组合/属性/锁定。未重置账号、项目或素材；私有备份work/local-workspace/backups/20261110-055813-242817fe-e635-4598-9566-5581bdf05590；脱敏统计canvas-selection-upgrade-summary.json。最新周额度已用49%/剩余51%；下一优先任务为原卡删除后的未归位结果保留与显式放置，再继续其余文件/资料/策划及云目标，完整项目未完成。
+
+## 2026-11-10 未归位结果与显式再放置（全量运行中）
+TASK-15/23、T09/T10本地闭环：迁移012允许初始run_outputs的object_id/object_revision成对为空，仍保留ready资产、原attempt、SHA和原始输出回执。完成归档时在canvas锁内检查当前源卡和工具卡；任何原卡已删则只归档、记录result_unplaced/completed，不追加结果卡或虚增画布修订。原始输出回执不可修改。
+
+新增不可变run_output_placements和run_placement_requests；current_run_outputs为security_invoker视图，在调用者权限与底层强制RLS下读取最新仍存活且引用同一资产的卡片。原自动回填或后续放置的卡片删掉/更换资产即再次未归位，撤销删除可重新找回已有放置；不篡改旧placement或run输出。该视图不是owner权限旁路，专项验证跨项目读取为零。
+
+LocalRunPlacement仅有DB/私有资产端口，无runtime、compiler、provider URL或生成端口。每次重新验证当前编辑权限、原快照hash、私有字节hash及PNG资产；新写入需要有效租约、基准修订和固定操作ID。固定ID重试复用回执，异参拒绝；不同ID但已有活卡只返回既有卡，不新增。用户放置写editor日志并可撤销，更新output_placed持久事件；不会创建run/attempt/outbox或再次prompt。
+
+GET /v1/projects/{p}/unplaced-results提供微秒游标分页，游标绑定unplaced筛选，不能与全部任务游标混用。POST runs/{r}/place-output严格接收操作ID/baseRevision/x/y/lease，不接收actor、asset ID或URL。“未归位结果”入口提供下载、放置及查看；viewer只读，服务能力未声明时隐藏新动作。
+
+UI先持久不含lease的操作指针再POST，不自动重试。响应丢失可显式确认同一ID，确认前阻止继续编辑，重开仍能核查；旧回执确认时卡已移除则清理旧指针并允许新的显式放置。新放置计入20步用户撤销。默认同步当前画布并寻找空位，避免挡住现有卡片；此修正来自实际浏览器首次失败，不使用force click。
+
+43项专项及11项契约通过；6条本地浏览器、正常CPU和归档故障恢复回归通过。最终真实CPU删源卡5b9e77b6-1dcb-4e3f-9785-b78fd9c50248、删工具卡2f5a51df-3f25-4103-b003-d9b11f49544a通过：执行中删除→只归档→重开→下载→真实放置成功但回复丢失→固定ID确认→撤销/重做→删结果后再次放置，快照/资产不变，原件字节完全一致，只一run/attempt/初始output及一次本机prompt提交，自有进程停止；无模型或付费请求。工具卡用例额外覆盖旧放置卡已删后的重开确认。截图已查看。正常/归档回归证据分别a4ccb394-777c-4527-a3c9-d9f99c48cd7b、50bc9816-e893-40ab-869f-af06655adb7e。
+
+首轮真实用例96ac1915-6908-43f5-ab58-798c63deee5b在放置/响应确认/撤销重做已通过后，因默认坐标与文字卡重叠导致真实点击被遮挡而失败；日志和图片保留，修复空位算法后通过，没有增加timeout/worker或弱化点击断言。原件完整性最终增加直接前后字节对比。
+
+全量32768：work/unplaced-full-test.log；六包构建42289：work/unplaced-build.log。012尚未应用日常数据库，当前4310仍为上一多选/属性阶段schema11。最新周额度已用52%/剩余48%；文件卡、展示连线、资料事实/策划、模型网关、Agent和云端目标仍待，不标完整项目完成。
+
+### 未归位结果阶段冻结结果
+全量32768已结束：83文件2951项全部通过，308.21秒；六包构建通过。专项、契约、6条本地与4类真实CPU浏览器证据归档unplaced-*.log；保留首次遮挡失败日志与图片。准备第七次本机备份升级，按原26张表数据核验前向迁移11→12，不删除旧回执或重置用户资料。

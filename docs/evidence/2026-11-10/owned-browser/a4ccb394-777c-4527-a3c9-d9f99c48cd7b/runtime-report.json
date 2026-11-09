@@ -1,0 +1,12 @@
+{
+  "caseId": "a4ccb394-777c-4527-a3c9-d9f99c48cd7b",
+  "errors": [],
+  "runtimes": [
+    {
+      "directory": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\work\\owned-comfy-worker-ae665800-1740-4152-a9de-fc3d6c82c2e3",
+      "ownedPid": 62292,
+      "submitted": true,
+      "stopped": true
+    }
+  ]
+}

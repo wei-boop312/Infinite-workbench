@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {beforeAll,afterAll,it,expect} from 'vitest';
 import {LocalWorkspaceDatabase} from '../apps/api/src/localWorkspaceDatabase';
-import {BoundedEditHistory,expandedSelection,boxSelection,translatedSelection,copiedSelection,sameEdit} from '../apps/web/workspace-editor.js';
+import {BoundedEditHistory,expandedSelection,boxSelection,translatedSelection,copiedSelection,sameEdit,freePlacementPosition} from '../apps/web/workspace-editor.js';
 import {contentHash} from '../apps/api/src/workspacePrototype';
 let db:LocalWorkspaceDatabase;const owner=randomUUID(),viewer=randomUUID(),project=randomUUID();
 beforeAll(async()=>{db=await LocalWorkspaceDatabase.open(process.cwd());await db.seedProject(project,'owned canvas operations',[{userId:owner,role:'owner'},{userId:viewer,role:'viewer'}]);});
@@ -61,4 +61,9 @@ it('平面组合选择展开、反向框选、整体移动和复制保留成员�
   expect(()=>translatedSelection([{...a,locked:true},b],selection,1,1)).toThrow('OBJECT_LOCKED');
   const copies=copiedSelection(all,selection,randomUUID);expect(copies).toHaveLength(2);expect(copies[0].groupId).toBe(copies[1].groupId);expect(copies[0].groupId).not.toBe(groupId);expect(copies.every(o=>!selection.has(o.id)&&o.revision===0&&!o.locked)).toBe(true);
   expect(sameEdit({x:1,y:2,revision:1},{y:2,x:1,revision:8})).toBe(true);
+});
+it('默认结果放置绕过当前卡片，删除卡不占位且不改动任何原对象',()=>{
+  const a=object(),b={...object(),x:300},deleted={...object(),x:600,deleted:true},all=[a,b,deleted],before=structuredClone(all);
+  expect(freePlacementPosition(all,{x:10,y:10},{width:256,height:256})).toEqual({x:600,y:10});expect(all).toEqual(before);
+  expect(freePlacementPosition(all,{x:-400,y:10},{width:128,height:128})).toEqual({x:-400,y:10});
 });

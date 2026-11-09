@@ -15,7 +15,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{

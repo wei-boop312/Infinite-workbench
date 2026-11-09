@@ -8,6 +8,15 @@ export function selectionBounds(objects){if(!objects.length)return null;const x=
 export function boxSelection(objects,rectangle){const x=Math.min(rectangle.x,rectangle.x+rectangle.width),y=Math.min(rectangle.y,rectangle.y+rectangle.height),right=Math.max(rectangle.x,rectangle.x+rectangle.width),bottom=Math.max(rectangle.y,rectangle.y+rectangle.height);return expandedSelection(objects,objects.filter(o=>!o.deleted&&o.x<=right&&o.x+o.width>=x&&o.y<=bottom&&o.y+Math.max(o.type==='tool'?510:0,o.height)>=y).map(o=>o.id));}
 export function translatedSelection(objects,ids,dx,dy){if(!Number.isFinite(dx)||!Number.isFinite(dy))throw Error('INVALID_GEOMETRY');const selected=objects.filter(o=>!o.deleted&&ids.has(o.id));if(selected.some(o=>o.locked))throw Error('OBJECT_LOCKED');return selected.map(o=>({...o,x:o.x+dx,y:o.y+dy}));}
 export function copiedSelection(objects,ids,newId){const groups=new Map();return objects.filter(o=>!o.deleted&&ids.has(o.id)).map(object=>{const next={...structuredClone(object),id:newId(),revision:0,x:object.x+32,y:object.y+32,locked:false,title:('副本 · '+(object.title??'卡片')).slice(0,240)};if(object.groupId){if(!groups.has(object.groupId))groups.set(object.groupId,newId());next.groupId=groups.get(object.groupId);}return next;});}
+export function freePlacementPosition(objects,anchor,size){
+  let x=anchor.x;const y=anchor.y;if(![x,y,size.width,size.height].every(Number.isFinite)||size.width<=0||size.height<=0)throw Error('INVALID_GEOMETRY');
+  const obstacles=objects.filter(o=>!o.deleted);
+  for(let step=0;step<=obstacles.length;step++){
+    const collisions=obstacles.filter(o=>x<o.x+o.width+20&&x+size.width+20>o.x&&y<o.y+Math.max(o.type==='tool'?510:0,o.height)+20&&y+size.height+20>o.y);
+    if(!collisions.length)return {x,y};x=Math.max(...collisions.map(o=>o.x+o.width))+40;if(!Number.isFinite(x))throw Error('INVALID_GEOMETRY');
+  }
+  throw Error('INVALID_GEOMETRY');
+}
 export class BoundedEditHistory {
   constructor(){this.past=[];this.future=[];}
   clear(){this.past=[];this.future=[];}

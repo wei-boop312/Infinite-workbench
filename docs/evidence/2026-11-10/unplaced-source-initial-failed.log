@@ -1,0 +1,64 @@
+
+Running 1 test using 1 worker
+
+(node:66048) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  x  1 tests\owned-runtime-e2e\resize.spec.ts:34:1 › 真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投 (1.5m)
+
+
+  1) tests\owned-runtime-e2e\resize.spec.ts:34:1 › 真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投 ───────
+
+    Test timeout of 90000ms exceeded.
+
+    Error: locator.click: Test timeout of 90000ms exceeded.
+    Call log:
+      - waiting for locator('.handle').filter({ hasText: '缩放结果' })
+        - locator resolved to <div class="handle">缩放结果</div>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <div class="handle">文字卡</div> from <article class="card" data-locked="false" aria-selected="false" data-object-id="8016810e-9852-41c8-a09c-b954c4d01671">…</article> subtree intercepts pointer events
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <div class="handle">文字卡</div> from <article class="card" data-locked="false" aria-selected="false" data-object-id="8016810e-9852-41c8-a09c-b954c4d01671">…</article> subtree intercepts pointer events
+        - retrying click action
+          - waiting 100ms
+        153 × waiting for element to be visible, enabled and stable
+            - element is visible, enabled and stable
+            - scrolling into view if needed
+            - done scrolling
+            - <div class="handle">文字卡</div> from <article class="card" data-locked="false" aria-selected="false" data-object-id="8016810e-9852-41c8-a09c-b954c4d01671">…</article> subtree intercepts pointer events
+          - retrying click action
+            - waiting 500ms
+
+
+      116 |   const waiting=page.waitForEvent('download');await dialog.getByRole('link',{name:'下载任务结果'}).click();const download=await waiting,path=await download.path();if(!path)throw Error('NO_RESULT_DOWNLOAD');expect(readFileSync(path)).toEqual(resultBytes);
+      117 |   await dialog.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();await page.getByRole('button',{name:'撤销',exact:true}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toHaveCount(0);expect((await read()).output.unplaced).toBe(true);await page.getByRole('button',{name:'重做',exact:true}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();expect((await read()).output.object_id).toBe(committed.output.object_id);
+    > 118 |   await page.locator('.handle').filter({hasText:'缩放结果'}).click();await page.getByRole('region',{name:'对象属性'}).getByRole('button',{name:'删除所选'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toHaveCount(0);await page.getByRole('button',{name:'未归位结果',exact:true}).click();await dialog.locator('.task-row').click();await dialog.getByRole('button',{name:'放到画布',exact:true}).click();await expect(dialog.locator('#history-state')).toHaveText('已完成，结果已归档');await dialog.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();await page.screenshot({path:resolve(evidence,'unplaced-result-restored.png'),fullPage:true});
+          |                                                          ^
+      119 |   const after=await read();expect(after.snapshotHash).toBe(before.snapshotHash);expect(after.output.asset_version_id).toBe(before.output.asset_version_id);expect(after.output.object_id).not.toBe(committed.output.object_id);expect(requests).toBe(3);expect(runtimes).toHaveLength(1);await expect.poll(()=>runtimes[0].evidence.stopped).toBe(true);expect(errors).toEqual([]);
+      120 |   const attempts=(await db.asActor(actor,tx=>tx.query('SELECT id FROM workspace.run_attempts WHERE project_id=$1',[p]))).rows,outputs=(await db.asActor(actor,tx=>tx.query('SELECT * FROM workspace.run_outputs WHERE project_id=$1',[p]))).rows,placements=(await db.asActor(actor,tx=>tx.query('SELECT object_id FROM workspace.run_output_placements WHERE project_id=$1',[p]))).rows,events=(await db.asActor(actor,tx=>tx.query<{stage:string}>('SELECT stage FROM workspace.run_events WHERE project_id=$1',[p]))).rows;
+      121 |   expect(attempts).toHaveLength(1);expect(outputs).toHaveLength(1);expect(outputs[0].object_id).toBeNull();expect(placements).toHaveLength(2);expect(events.filter(e=>e.stage==='submitted')).toHaveLength(1);expect(events.filter(e=>e.stage==='output_placed')).toHaveLength(2);
+        at acceptUnplacedThroughUI (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\tests\owned-runtime-e2e\resize.spec.ts:118:58)
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\tests\owned-runtime-e2e\resize.spec.ts:44:20
+
+    Error Context: test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\error-context.md
+
+    Error Context: test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    tests\owned-runtime-e2e\resize.spec.ts:34:1 › 真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投 ────────

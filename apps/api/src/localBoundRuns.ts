@@ -56,12 +56,13 @@ export class LocalBoundRuns {
     return this.db.asActor(actorId,async tx=>{
       const r=(await tx.query<{id:string;state:string;event_sequence:number;payload:unknown;content_hash:string}>('SELECT r.id,r.state,r.event_sequence,s.payload,s.content_hash FROM workspace.runs r JOIN workspace.run_snapshots s ON s.project_id=r.project_id AND s.id=r.snapshot_id WHERE r.project_id=$1 AND r.id=$2',[projectId,id])).rows[0];
       if(!r)throw Error('NOT_FOUND');if(contentHash(r.payload)!==r.content_hash)throw Error('SNAPSHOT_INTEGRITY_FAILED');
-      const output=(await tx.query('SELECT asset_version_id,object_id,object_revision,sha256 FROM workspace.run_outputs WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0]??null;
+      const output=(await tx.query('SELECT asset_version_id,object_id,object_revision,sha256,unplaced FROM workspace.current_run_outputs WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0]??null;
       const cancellation=(await tx.query('SELECT requested_by,reason,created_at FROM workspace.run_cancellations WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0]??null;
       const a=(await tx.query<{stage:string;provider_request_id:string|null}>('SELECT stage,provider_request_id FROM workspace.run_attempts WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0];
       const attempt=a?{stage:a.stage,providerRequestId:a.provider_request_id}:null;
       const archiveRecoveryAvailable=['unknown','archiving'].includes(r.state)&&(await tx.query<{available:boolean}>("SELECT workspace.can_edit($1) AND EXISTS(SELECT 1 FROM workspace.run_artifacts WHERE project_id=$1 AND run_id=$2) AS available",[projectId,id])).rows[0].available;
-      return {id:r.id,state:r.state,eventSequence:Number(r.event_sequence),snapshot:r.payload,snapshotHash:r.content_hash,output,cancellation,attempt,archiveRecoveryAvailable};
+      const canPlaceOutput=!!output&&(await tx.query<{allowed:boolean}>('SELECT workspace.can_edit($1) AS allowed',[projectId])).rows[0].allowed;
+      return {canPlaceOutput,id:r.id,state:r.state,eventSequence:Number(r.event_sequence),snapshot:r.payload,snapshotHash:r.content_hash,output,cancellation,attempt,archiveRecoveryAvailable};
     });
   }
   async cancel(actorId:string,projectId:string,id:string,reason:string){
