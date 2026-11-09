@@ -25,7 +25,7 @@ describe('本地身份到项目/租约/保存的真实HTTP闭环',()=>{
     expect(login.status).toBe(200);expect(login.headers.get('set-cookie')).toContain('HttpOnly');
     cookie=login.headers.get('set-cookie')!.split(';')[0];expect(JSON.stringify(await login.json())).not.toContain('token');
     const other=await request('/v1/auth/login','POST',{username:'other_http',password},'');otherCookie=other.headers.get('set-cookie')!.split(';')[0];
-    expect((await(await request('/v1/runtime')).json()).data).toEqual({resizeEnabled:true,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:false,canvasOperationsEnabled:true,scope:'local-cpu-resize-only'});
+    expect((await(await request('/v1/runtime')).json()).data).toEqual({resizeEnabled:true,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:false,canvasOperationsEnabled:true,canvasSelectionEnabled:true,scope:'local-cpu-resize-only'});
   });
   it('项目归属由session决定，不接受伪造actor，其他用户看不到',async()=>{
     expect((await request('/v1/projects','POST',{name:'产品',actorId:randomUUID()})).status).toBe(422);
@@ -103,6 +103,18 @@ describe('本地身份到项目/租约/保存的真实HTTP闭环',()=>{
       const reader=stream.body!.getReader(),decoder=new TextDecoder();let text='';while(!text.includes('\n\n')){const part=await reader.read();if(part.done)break;text+=decoder.decode(part.value,{stream:true});}
       expect(text).toContain('event: access_revoked');expect(text).not.toContain('event: run_event');await reader.cancel();
     }finally{controller.abort();await admin.query("INSERT INTO workspace.project_members VALUES($1,$2,'owner')",[project,actor]);}
+  });
+  it('HTTP锁定对象不能借旧PATCH或原子操作同时解锁移动，先解锁再编辑才成功',async()=>{
+    const p=(await(await request('/v1/projects','POST',{name:'owned HTTP locked geometry'})).json()).data.id;
+    try{const rawLease=(await(await request(`/v1/projects/${p}/lease`,'POST',{})).json()).data,lease={token:rawLease.token,fencing:rawLease.fencing};
+    const object={id:randomUUID(),projectId:p,revision:1,type:'text',text:'owned locked fact',x:0,y:0,width:260,height:180,locked:true};
+    expect((await request(`/v1/projects/${p}/canvas-operations`,'POST',{id:randomUUID(),baseRevision:0,objects:[object],lease})).status).toBe(200);
+    expect((await request(`/v1/projects/${p}/canvas`,'PATCH',{object:{...object,revision:2,x:90},baseRevision:1,lease})).status).toBe(409);
+    expect((await request(`/v1/projects/${p}/canvas-operations`,'POST',{id:randomUUID(),baseRevision:1,objects:[{...object,revision:2,locked:false,x:90}],lease})).status).toBe(409);
+    expect((await request(`/v1/projects/${p}/canvas-operations`,'POST',{id:randomUUID(),baseRevision:1,objects:[{...object,revision:2,locked:false}],lease})).status).toBe(200);
+    expect((await request(`/v1/projects/${p}/canvas-operations`,'POST',{id:randomUUID(),baseRevision:2,objects:[{...object,revision:3,locked:false,x:90}],lease})).status).toBe(200);
+    expect((await(await request(`/v1/projects/${p}/canvas`)).json()).data.objects[0]).toMatchObject({revision:3,locked:false,x:90});
+    }finally{expect((await request(`/v1/projects/${p}`,'DELETE')).status).toBe(200);}
   });
   it('项目软删后RLS和API都不再返回对象；注销后cookie立即无效',async()=>{
     expect((await request(`/v1/projects/${project}`,'DELETE')).status).toBe(200);

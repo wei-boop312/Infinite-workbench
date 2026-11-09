@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { createHash, randomUUID, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema } from "@canvas/contracts";
 import { contentHash } from "./workspacePrototype.ts";
+import {validateObjectMutation} from './objectMutation.ts';
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const passwordHash = (password:string,salt:string):Promise<Buffer> => new Promise((done,reject)=>
@@ -126,8 +127,9 @@ export class LocalWorkspaceDatabase {
         const changes=(await tx.query<{count:string;only_outputs:boolean}>("SELECT count(*)::text AS count,bool_and(kind='run_output') AS only_outputs FROM workspace.canvas_changes WHERE project_id=$1 AND revision>$2 AND revision<=$3",[projectId,baseCanvasRevision,currentRevision])).rows[0];
         if(baseCanvasRevision<0||!Number.isInteger(baseCanvasRevision)||Number(changes.count)!==currentRevision-baseCanvasRevision||changes.only_outputs!==true)throw new Error('REVISION_CONFLICT');
       }
-      const previous=(await tx.query<{current_revision:number}>("SELECT current_revision FROM workspace.objects WHERE project_id=$1 AND id=$2",[projectId,object.id])).rows[0];
+      const previous=(await tx.query<{current_revision:number;payload:unknown}>('SELECT o.current_revision,r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id=$2',[projectId,object.id])).rows[0];
       if(object.revision!==Number(previous?.current_revision??0)+1) throw new Error("OBJECT_REVISION_CONFLICT");
+      validateObjectMutation(previous?WorkspaceObjectSchema.parse(previous.payload):undefined,object);
       await tx.query("INSERT INTO workspace.objects VALUES($1,$2,$3) ON CONFLICT(project_id,id) DO UPDATE SET current_revision=excluded.current_revision",[projectId,object.id,object.revision]);
       await tx.query("INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)",[projectId,object.id,object.revision,object.type==='image'?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);
       await tx.query("UPDATE workspace.canvases SET revision=revision+1 WHERE project_id=$1",[projectId]);
@@ -156,9 +158,9 @@ export class LocalWorkspaceDatabase {
       }
       let revision=startRevision;
       for(const object of input.objects){
-        const previous=(await tx.query<{current_revision:number;payload:{type:string}}>('SELECT o.current_revision,r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id=$2',[projectId,object.id])).rows[0];
+        const previous=(await tx.query<{current_revision:number;payload:unknown}>('SELECT o.current_revision,r.payload FROM workspace.objects o JOIN workspace.object_revisions r ON r.project_id=o.project_id AND r.object_id=o.id AND r.revision=o.current_revision WHERE o.project_id=$1 AND o.id=$2',[projectId,object.id])).rows[0];
         if(object.revision!==Number(previous?.current_revision??0)+1)throw Error('OBJECT_REVISION_CONFLICT');
-        if(previous&&previous.payload.type!==object.type)throw Error('OBJECT_IDENTITY_CONFLICT');
+        validateObjectMutation(previous?WorkspaceObjectSchema.parse(previous.payload):undefined,object);
         if(!previous&&object.deleted)throw Error('INVALID_BODY');
         await tx.query('INSERT INTO workspace.objects VALUES($1,$2,$3) ON CONFLICT(project_id,id) DO UPDATE SET current_revision=excluded.current_revision',[projectId,object.id,object.revision]);
         await tx.query('INSERT INTO workspace.object_revisions VALUES($1,$2,$3,$4,$5,$6)',[projectId,object.id,object.revision,object.type==='image'?object.assetVersionId:null,JSON.stringify(object),contentHash(object)]);

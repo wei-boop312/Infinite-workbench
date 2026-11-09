@@ -17,6 +17,7 @@ const ObjectBase = {
   id: Id, projectId: Id, revision: Revision,
   title: z.string().max(240).optional(),
   deleted: z.boolean().optional(),
+  locked: z.boolean().optional(), groupId: Id.nullable().optional(),
   x: z.number().finite(), y: z.number().finite(),
   width: z.number().positive().finite(), height: z.number().positive().finite(),
 };

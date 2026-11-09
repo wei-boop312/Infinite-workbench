@@ -1,0 +1,14 @@
+{
+  "caseId": "5d30ce09-0b6f-460a-8aa7-b97ceeb3eddf",
+  "errors": [
+    "Error: owned-browser-archive-storage-failure"
+  ],
+  "runtimes": [
+    {
+      "directory": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\work\\owned-comfy-worker-344ad4f7-68f0-4584-b231-9ad26aa67bc9",
+      "ownedPid": 64756,
+      "submitted": true,
+      "stopped": true
+    }
+  ]
+}
