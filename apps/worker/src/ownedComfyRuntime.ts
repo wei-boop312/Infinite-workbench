@@ -1,14 +1,15 @@
 import {spawn,type ChildProcess} from 'node:child_process';
 import {createServer} from 'node:net';
 import {createWriteStream,mkdirSync,readFileSync,realpathSync,statSync} from 'node:fs';
-import {resolve,relative,isAbsolute} from 'node:path';
-import {randomUUID} from 'node:crypto';
+import {resolve,relative,isAbsolute,dirname,basename} from 'node:path';
+import {randomUUID,createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {recordedCompilerPin} from './compileResize.ts';
 import {contentHash} from '../../api/src/workspacePrototype.ts';
 import type {OwnedResizeRuntime} from './localResizeWorker.ts';
 import {isInterruptedWithoutOutput} from '../../api/src/ownedCancellationReceipt.ts';
 import {OwnedRuntimeCancellation} from './runtimeCancellation.ts';
+import {WorkspaceRuntimeEvidenceSchema,type WorkspaceRuntimeEvidence} from '@canvas/contracts';
 
 type Options={root:string;pythonExecutable:string;comfyMain:string;compilerSourceSha256:string};
 /** A private CPU-only instance per task; never connects to a daily Comfy URL. */
@@ -16,6 +17,8 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
   readonly directory:string;
   private child:ChildProcess|undefined;private origin='';private submitted=false;private prompt:unknown;
   private exited:Promise<void>|undefined;private processError:Error|undefined;
+  private sourceEvidence:Pick<WorkspaceRuntimeEvidence,'pythonExecutableSha256'|'bridgeSha256'|'coreFiles'>|undefined;
+  private registrySha256:string|undefined;private versions:WorkspaceRuntimeEvidence['versions']={python:null,pytorch:null,comfyui:null};
   constructor(private options:Options){
     if(!isAbsolute(options.root)||!isAbsolute(options.pythonExecutable)||!isAbsolute(options.comfyMain))throw Error('EXPLICIT_RUNTIME_PATHS_REQUIRED');
     if(!statSync(options.pythonExecutable).isFile()||!statSync(options.comfyMain).isFile())throw Error('RUNTIME_MISSING');
@@ -23,8 +26,20 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
   }
   private alive(){if(!this.child||this.child.exitCode!==null||this.child.signalCode!==null||this.processError)throw Error('OWNED_COMFY_NOT_RUNNING');}
   private pin(){if(recordedCompilerPin(this.options.root).sourceTreeSha256!==this.options.compilerSourceSha256)throw Error('COMPILER_ENVIRONMENT_CHANGED');}
+  private sourceHashes(){
+    const hashFile=(path:string)=>createHash('sha256').update(readFileSync(path)).digest('hex');
+    const paths=['nodes.py','execution.py','server.py','comfy/utils.py','comfy/model_management.py'] as const;
+    return {pythonExecutableSha256:hashFile(this.options.pythonExecutable),bridgeSha256:hashFile(resolve(this.options.root,'tools/compile_live_resize.py')),
+      coreFiles:paths.map(path=>({path,sha256:hashFile(resolve(dirname(this.options.comfyMain),path))}))};
+  }
+  private sourceStable(){if(!this.sourceEvidence||contentHash(this.sourceEvidence)!==contentHash(this.sourceHashes()))throw Error('RUNTIME_SOURCE_CHANGED');}
+  async provenance(){
+    this.alive();this.pin();this.sourceStable();if(!this.registrySha256)throw Error('PREPARATION_NOT_AVAILABLE');
+    return WorkspaceRuntimeEvidenceSchema.parse({schemaVersion:1,adapterVersion:'local-owned-resize-v1',runtimeKind:'owned-cpu-comfy',runtimeRef:basename(this.directory),
+      compilerSourceSha256:this.options.compilerSourceSha256,registrySha256:this.registrySha256,versions:this.versions,...this.sourceEvidence});
+  }
   async start(){
-    if(this.child)throw Error('RUNTIME_ALREADY_STARTED');this.pin();
+    if(this.child)throw Error('RUNTIME_ALREADY_STARTED');this.pin();this.sourceEvidence=this.sourceHashes();
     mkdirSync(this.directory,{recursive:false});
     for(const name of ['input','output','user','temp','frontend','cache'])mkdirSync(resolve(this.directory,name));
     const probe=createServer();await new Promise<void>((done,reject)=>{probe.once('error',reject);probe.listen(0,'127.0.0.1',done);});
@@ -38,7 +53,7 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
     child.stdout!.pipe(createWriteStream(resolve(this.directory,'stdout.log'),{flags:'wx'}));child.stderr!.pipe(createWriteStream(resolve(this.directory,'stderr.log'),{flags:'wx'}));
     this.exited=new Promise(done=>{child.once('exit',()=>done());child.once('error',error=>{this.processError=error;done();});});
     const deadline=Date.now()+40_000;
-    while(Date.now()<deadline){this.alive();try{await this.json('/system_stats');return;}catch{await delay(200);}}
+    while(Date.now()<deadline){this.alive();try{const stats=await this.json('/system_stats');const version=(value:unknown)=>typeof value==='string'&&value.length<=256?value:null;this.versions={python:version(stats.system?.python_version),pytorch:version(stats.system?.pytorch_version),comfyui:version(stats.system?.comfyui_version)};return;}catch{await delay(200);}}
     throw Error('OWNED_COMFY_READINESS_TIMEOUT');
   }
   private environment():NodeJS.ProcessEnv{
@@ -74,6 +89,7 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
   async compile(parameters:unknown,uploadedFilename:string){
     this.pin();const registry:Record<string,unknown>={};
     for(const name of ['LoadImage','ImageScale','SaveImage'])Object.assign(registry,await this.json('/object_info/'+name));
+    this.registrySha256=contentHash(registry);
     const input=JSON.stringify({registry,parameters,source_image:uploadedFilename});
     const result=await new Promise<string>((done,reject)=>{
       const child=spawn(this.options.pythonExecutable,['-B',resolve(this.options.root,'tools/compile_live_resize.py')],{cwd:this.options.root,windowsHide:true,shell:false,env:this.environment(),stdio:['pipe','pipe','pipe']});
@@ -84,7 +100,7 @@ export class OwnedComfyRuntime implements OwnedResizeRuntime {
       child.once('error',error=>{clearTimeout(timer);reject(error);});child.once('close',code=>{clearTimeout(timer);code===0?done(Buffer.concat(output).toString('utf8')):reject(Error('COMPILE_FAILED: '+Buffer.concat(errors).toString('utf8').slice(0,300)));});
       child.stdin.on('error',()=>{});child.stdin.end(input);
     });
-    this.pin();return JSON.parse(result);
+    this.pin();this.sourceStable();return JSON.parse(result);
   }
   async submit(request:{prompt:unknown;client_id:string}){
     if(this.submitted)throw Error('OWNED_COMFY_ALREADY_SUBMITTED');this.submitted=true;this.prompt=structuredClone(request.prompt);

@@ -64,6 +64,25 @@ export type WorkspaceTemplate = z.infer<typeof WorkspaceTemplateSchema>;
 export type WorkspaceBindingRequest = z.infer<typeof WorkspaceBindingRequestSchema>;
 export type WorkspaceParameters = z.infer<typeof WorkspaceParametersSchema>;
 
+const Sha256=z.string().regex(/^[a-f0-9]{64}$/);
+export const WorkspaceRuntimeEvidenceSchema=z.object({
+  schemaVersion:z.literal(1),adapterVersion:z.literal('local-owned-resize-v1'),
+  runtimeKind:z.enum(['owned-cpu-comfy','contract-fixture-not-real']),
+  runtimeRef:z.string().regex(/^(owned-comfy-worker|owned-fixture)-[a-f0-9-]{36}$/),
+  compilerSourceSha256:Sha256,registrySha256:Sha256,pythonExecutableSha256:Sha256,bridgeSha256:Sha256,
+  versions:z.object({python:z.string().max(256).nullable(),pytorch:z.string().max(256).nullable(),comfyui:z.string().max(256).nullable()}).strict(),
+  coreFiles:z.array(z.object({path:z.enum(['nodes.py','execution.py','server.py','comfy/utils.py','comfy/model_management.py']),sha256:Sha256}).strict()).length(5),
+}).strict().refine(value=>new Set(value.coreFiles.map(file=>file.path)).size===5,'Duplicate core source paths');
+export type WorkspaceRuntimeEvidence=z.infer<typeof WorkspaceRuntimeEvidenceSchema>;
+export const WorkspaceArtifactManifestSchema=z.object({
+  schemaVersion:z.literal(1),projectId:Id,runId:Id,attemptId:Id,
+  snapshotHash:Sha256,requestHash:Sha256,runtimeEvidenceHash:Sha256,
+  providerRequestId:z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+  sha256:Sha256,byteSize:z.number().int().min(1).max(8*1024*1024),mime:z.literal('image/png'),
+  width:z.number().int().min(64).max(8192),height:z.number().int().min(64).max(8192),history:z.unknown(),
+}).strict().refine(value=>value.width*value.height<=16_000_000,'Output pixel limit exceeded');
+export type WorkspaceArtifactManifest=z.infer<typeof WorkspaceArtifactManifestSchema>;
+
 export const ResizeParameterJsonSchema = z.toJSONSchema(WorkspaceParametersSchema, {
   unrepresentable: "any",
 });
@@ -74,5 +93,7 @@ export function workspaceJsonSchemas() {
     "object-revision.schema": z.toJSONSchema(WorkspaceObjectSchema),
     "workflow-version.schema": z.toJSONSchema(WorkspaceWorkflowSchema),
     "binding-request.schema": z.toJSONSchema(WorkspaceBindingRequestSchema),
+    "runtime-evidence.schema":z.toJSONSchema(WorkspaceRuntimeEvidenceSchema),
+    "artifact-manifest.schema":z.toJSONSchema(WorkspaceArtifactManifestSchema),
   };
 }

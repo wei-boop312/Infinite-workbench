@@ -1,0 +1,26 @@
+[
+  {
+    "sequence": 1,
+    "stage": "claimed"
+  },
+  {
+    "sequence": 2,
+    "stage": "submitted"
+  },
+  {
+    "sequence": 3,
+    "stage": "returned"
+  },
+  {
+    "sequence": 4,
+    "stage": "unknown"
+  },
+  {
+    "sequence": 5,
+    "stage": "archive_recovery_started"
+  },
+  {
+    "sequence": 6,
+    "stage": "completed"
+  }
+]

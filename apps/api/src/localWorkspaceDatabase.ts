@@ -14,7 +14,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{
@@ -108,7 +108,7 @@ export class LocalWorkspaceDatabase {
     return (await this.db.query<{project_id:string;run_id:string;actor_id:string}>(`SELECT a.project_id,a.run_id,a.actor_id FROM workspace.run_attempts a
       JOIN workspace.projects p ON p.id=a.project_id AND p.deleted_at IS NULL
       JOIN workspace.project_members m ON m.project_id=p.id AND m.user_id=a.actor_id AND m.role IN ('owner','creator','designer')
-      WHERE a.lease_expires_at<=now() AND a.stage IN ('claimed','submitted','returned') LIMIT 100`)).rows;
+      WHERE a.lease_expires_at<=now() AND a.stage IN ('claimed','submitted','returned') AND NOT EXISTS(SELECT 1 FROM workspace.run_archive_claims c WHERE c.project_id=a.project_id AND c.run_id=a.run_id AND c.status='claimed' AND c.expires_at>now()) LIMIT 100`)).rows;
   }
   async saveObject(actorId:string,projectId:string,raw:unknown,baseCanvasRevision:number,lease:{token:string;fencing:number},now=new Date()) {
     const object=WorkspaceObjectSchema.parse(raw);

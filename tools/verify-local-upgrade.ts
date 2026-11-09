@@ -10,15 +10,18 @@ const root=process.cwd(),backupRoot=realpathSync(resolve('work/local-workspace/b
 const directory=realpathSync(resolve(process.argv[2]??'')),rel=relative(backupRoot,directory);
 if(rel.startsWith('..')||isAbsolute(rel)||!/(?:^|[\\/])restore-check-[0-9a-f-]{36}[\\/]postgres$/.test(rel))throw Error('OWNED_RESTORE_COPY_REQUIRED');
 const {PGlite}=createRequire(new URL('../apps/api/package.json',import.meta.url))('@electric-sql/pglite');
-async function inspect(tables?:{schemaname:string;tablename:string}[]){
+async function inspect(tables?:{schemaname:string;tablename:string;columns?:string[]}[]){
   const db=await PGlite.create(directory);
   try{
     tables??=(await db.query("SELECT schemaname,tablename FROM pg_tables WHERE schemaname IN ('workspace','workspace_auth') ORDER BY schemaname,tablename")).rows;
     const summary:Record<string,{count:number;digest:string}>={};
     for(const table of tables!){
       if(!/^[a-z_]+$/.test(table.schemaname)||!/^[a-z_]+$/.test(table.tablename))throw Error('INVALID_TABLE_NAME');
-      const rows=(await db.query(`SELECT to_jsonb(t)-'binding_order'-'event_sequence' AS item FROM "${table.schemaname}"."${table.tablename}" t`)).rows;
-      summary[table.schemaname+'.'+table.tablename]={count:rows.length,digest:contentHash(rows.map((row:{item:unknown})=>contentHash(row.item)).sort())};
+      table.columns??=(await db.query('SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position',[table.schemaname,table.tablename])).rows.map((row:{column_name:string})=>row.column_name);
+      const rows=(await db.query(`SELECT to_jsonb(t) AS item FROM "${table.schemaname}"."${table.tablename}" t`)).rows;
+      // Compare every column that existed BEFORE this upgrade. New additive
+      // fields are excluded only once; future upgrades must preserve them too.
+      summary[table.schemaname+'.'+table.tablename]={count:rows.length,digest:contentHash(rows.map((row:{item:Record<string,unknown>})=>contentHash(Object.fromEntries(table.columns!.map(column=>[column,row.item[column]])))).sort())};
     }
     const versions=(await db.query('SELECT version FROM public.workspace_migrations ORDER BY version')).rows.map((row:{version:number})=>row.version);
     return {tables:tables!,summary,versions};

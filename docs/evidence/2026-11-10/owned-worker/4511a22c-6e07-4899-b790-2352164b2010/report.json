@@ -1,0 +1,42 @@
+{
+  "scope": "actual-private-cpu-worker-not-ui-no-model",
+  "caseId": "4511a22c-6e07-4899-b790-2352164b2010",
+  "project": "3155e4c3-29a6-4f71-ac55-da800b3f3787",
+  "parameters": {
+    "width": 256,
+    "height": 256
+  },
+  "compilerSourceSha256": "147e8f274d2711b29b1ec523832d4d246ea3877344a3013b8b407c8982419099",
+  "status": "passed",
+  "runId": "16193e95-45d3-4aff-a1fc-68deba0474a8",
+  "archiveRecoveredAfterDatabaseRestart": true,
+  "historicalCompilerAccepted": true,
+  "archiveRecoveryRepeatedWithoutDuplicate": true,
+  "runtimeEvidencePersisted": true,
+  "outcome": "completed",
+  "outputSha256": "d5325865a8bda6e596b351268ba283a7f8b0aa92cdf184980a1ca9503507630e",
+  "output": {
+    "asset_version_id": "e7105a9b-82ba-44ea-88fe-3e9af98f291b",
+    "object_id": "87537639-2f2d-48f9-8b06-1a4da66fdfac",
+    "object_revision": 1,
+    "sha256": "d5325865a8bda6e596b351268ba283a7f8b0aa92cdf184980a1ca9503507630e"
+  },
+  "pixels": "256x256 uniform RGB(51,102,204)",
+  "cachedArtifactReopened": true,
+  "state": "succeeded",
+  "sourceSha256": "a17ad49249d86a6a46554148c0d6eaf1511d0ab2291fc1a1755f2d67e2986680",
+  "attempt": {
+    "provider_request_id": "3d3bc97b-cbe4-4d7a-a6f8-d061f6b2195a",
+    "stage": "completed",
+    "request_hash": "ce26de3b474c11e119d9d5d64de8a27f10ac0e0d0c149586f29010027eafa27f"
+  },
+  "sourceUnchanged": true,
+  "databaseReopened": true,
+  "replayRefused": true,
+  "providerRequests": 0,
+  "modelsLoaded": false,
+  "directory": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\work\\owned-comfy-worker-2c8cbbb0-2fbe-479f-a648-ecf5e581a9b8",
+  "ownedPid": 63408,
+  "submitted": true,
+  "stopped": true
+}

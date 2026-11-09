@@ -12,6 +12,7 @@ import {LocalRunDispatcher} from '../../apps/worker/src/localRunDispatcher';
 import {LocalResizeWorker} from '../../apps/worker/src/localResizeWorker';
 import {OwnedComfyRuntime} from '../../apps/worker/src/ownedComfyRuntime';
 import {recordedCompilerPin} from '../../apps/worker/src/compileResize';
+import {LocalRunArtifactStore} from '../../apps/api/src/localRunArtifactStore';
 let db:LocalWorkspaceDatabase,server:Server,dispatcher:LocalRunDispatcher,origin='';
 const runtimes:OwnedComfyRuntime[]=[],errors:unknown[]=[];
 const caseId=randomUUID(),evidence=resolve('docs/evidence/2026-11-10/owned-browser',caseId);
@@ -19,7 +20,8 @@ test.beforeAll(async()=>{
   mkdirSync(evidence,{recursive:true});db=await LocalWorkspaceDatabase.open(process.cwd());
   const assets=new LocalWorkspaceAssets(db,resolve('work','owned-browser-'+caseId)),pin=recordedCompilerPin(process.cwd()).sourceTreeSha256;
   if(!process.env.WORKSPACE_COMFY_PYTHON||!process.env.WORKSPACE_COMFY_MAIN)throw Error('EXPLICIT_OWNED_RUNTIME_REQUIRED');
-  dispatcher=new LocalRunDispatcher(db,()=>{const runtime=new OwnedComfyRuntime({root:process.cwd(),pythonExecutable:process.env.WORKSPACE_COMFY_PYTHON!,comfyMain:process.env.WORKSPACE_COMFY_MAIN!,compilerSourceSha256:pin});runtimes.push(runtime);return new LocalResizeWorker(new LocalRunExecution(db,pin),assets,runtime);},error=>errors.push(String(error)));
+  const artifacts=new LocalRunArtifactStore(resolve('work','owned-browser-artifacts-'+caseId));
+  dispatcher=new LocalRunDispatcher(db,()=>{const runtime=new OwnedComfyRuntime({root:process.cwd(),pythonExecutable:process.env.WORKSPACE_COMFY_PYTHON!,comfyMain:process.env.WORKSPACE_COMFY_MAIN!,compilerSourceSha256:pin});runtimes.push(runtime);return new LocalResizeWorker(new LocalRunExecution(db,pin),assets,runtime,artifacts);},error=>errors.push(String(error)));
   server=createLocalWorkspaceHttp(db,{origin:()=>origin,assets,compilerSourceSha256:pin,clientFile:resolve('apps/web/local-workspace.html'),onRunQueued:()=>dispatcher.wake()});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw Error('NO_ADDRESS');origin=`http://127.0.0.1:${address.port}`;dispatcher.start();
 });
@@ -48,6 +50,9 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   const actor=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id;
   const runs=(await db.asActor(actor,tx=>tx.query('SELECT id,state FROM workspace.runs'))).rows;expect(runs).toHaveLength(1);expect(runs[0].state).toBe('succeeded');
   const outputs=(await db.asActor(actor,tx=>tx.query('SELECT * FROM workspace.run_outputs'))).rows;expect(outputs).toHaveLength(1);
+  const preparation=(await db.asActor(actor,tx=>tx.query<{payload:{runtimeKind:string;coreFiles:unknown[]};content_hash:string}>('SELECT payload,content_hash FROM workspace.run_preparations'))).rows;expect(preparation).toHaveLength(1);expect(preparation[0].payload.runtimeKind).toBe('owned-cpu-comfy');expect(preparation[0].payload.coreFiles).toHaveLength(5);
+  const artifact=(await db.asActor(actor,tx=>tx.query<{manifest:{runtimeEvidenceHash:string};manifest_hash:string}>('SELECT manifest,manifest_hash FROM workspace.run_artifacts'))).rows;expect(artifact).toHaveLength(1);expect(artifact[0].manifest.runtimeEvidenceHash).toBe(preparation[0].content_hash);
+  writeFileSync(resolve(evidence,'runtime-evidence.json'),JSON.stringify(preparation[0],null,2));writeFileSync(resolve(evidence,'artifact-evidence.json'),JSON.stringify(artifact[0],null,2));
   expect(runtimes).toHaveLength(1);await expect.poll(()=>runtimes[0].evidence.stopped).toBe(true);expect(errors).toEqual([]);
   await page.evaluate(()=>{for(const key of Object.keys(localStorage))if(key.startsWith('workspace.tool-run.'))localStorage.removeItem(key);});await page.reload();
   await page.getByRole('button',{name:'任务与用量',exact:true}).click();const history=page.getByRole('dialog',{name:'任务与用量'});await expect(history.locator('.task-row')).toHaveCount(1);await history.locator('.task-row').click();

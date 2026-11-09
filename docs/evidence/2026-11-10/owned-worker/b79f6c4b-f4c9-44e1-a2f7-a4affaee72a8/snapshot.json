@@ -1,0 +1,104 @@
+{
+  "tool": {
+    "x": 240,
+    "y": 0,
+    "id": "a7b99b1e-1bd9-4980-ae77-724121ccf1d3",
+    "type": "tool",
+    "width": 300,
+    "height": 300,
+    "revision": 1,
+    "projectId": "3fd22d46-424d-498d-9e85-893add266686",
+    "templateVersionId": "dc590320-84c0-4a5d-9570-698a53014ba2"
+  },
+  "asset": {
+    "id": "2efaa431-0344-49df-bfd6-3b4204af5c82",
+    "sha256": "a17ad49249d86a6a46554148c0d6eaf1511d0ab2291fc1a1755f2d67e2986680"
+  },
+  "source": {
+    "x": 0,
+    "y": 0,
+    "id": "ab5eaecc-f88a-4546-bbb6-f7054169f649",
+    "type": "image",
+    "width": 160,
+    "height": 120,
+    "revision": 1,
+    "projectId": "3fd22d46-424d-498d-9e85-893add266686",
+    "assetVersionId": "2efaa431-0344-49df-bfd6-3b4204af5c82"
+  },
+  "binding": {
+    "id": "afe2af68-3fd7-466c-8ea9-aaa46447fda1",
+    "projectId": "3fd22d46-424d-498d-9e85-893add266686",
+    "taskLineId": "78db8f5c-5825-477a-bb89-eb27ea88fdf6",
+    "toolObjectId": "a7b99b1e-1bd9-4980-ae77-724121ccf1d3",
+    "sourceObjectId": "ab5eaecc-f88a-4546-bbb6-f7054169f649",
+    "templateVersionId": "dc590320-84c0-4a5d-9570-698a53014ba2",
+    "toolObjectRevision": 1,
+    "sourceObjectRevision": 1
+  },
+  "compiler": {
+    "version": "2.15.2",
+    "sourceSha256": "147e8f274d2711b29b1ec523832d4d246ea3877344a3013b8b407c8982419099",
+    "registryValidation": "required-before-worker-execution"
+  },
+  "template": {
+    "id": "dc590320-84c0-4a5d-9570-698a53014ba2",
+    "version": 1,
+    "operation": "image.resize",
+    "projectId": "3fd22d46-424d-498d-9e85-893add266686",
+    "parameters": "resize-parameters-v1",
+    "templateId": "62ae1c0b-7681-58c7-8fda-a6b97bd6168c",
+    "workflowVersionId": "d6b9d9f6-08f7-4c1c-947f-7cd3a2c9d9b1"
+  },
+  "workflow": {
+    "id": "d6b9d9f6-08f7-4c1c-947f-7cd3a2c9d9b1",
+    "edges": [
+      {
+        "source": "source",
+        "target": "resize",
+        "sourcePort": "asset",
+        "targetPort": "asset"
+      },
+      {
+        "source": "resize",
+        "target": "output",
+        "sourcePort": "asset",
+        "targetPort": "asset"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "source",
+        "type": "input.asset",
+        "config": {}
+      },
+      {
+        "id": "resize",
+        "type": "comfy.execute",
+        "config": {
+          "templateId": "core_image_resize_v2"
+        }
+      },
+      {
+        "id": "output",
+        "type": "output.asset",
+        "config": {}
+      }
+    ],
+    "version": 1,
+    "projectId": "3fd22d46-424d-498d-9e85-893add266686",
+    "workflowId": "5deea624-72e9-506f-8672-a508d8b4a202"
+  },
+  "parameters": {
+    "width": 256,
+    "height": 256
+  },
+  "templateHash": "beb41684b688c255aadbca545b1777f0115a2b1b03791d297456fa1f5c90a148",
+  "workflowHash": "4cf2a0cd692fc3ebfd8f4b4179f3217899bc399db23b972275cf1f8e01b8fba6",
+  "authorization": {
+    "scope": "local-resize-only-v1",
+    "actorId": "eeeeeb24-1a66-4394-a69b-cb2944517462",
+    "currency": "USD",
+    "providerCost": "0"
+  },
+  "schemaVersion": 1
+}

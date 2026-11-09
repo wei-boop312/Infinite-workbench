@@ -28,7 +28,7 @@ foreach($ownedProcessId in @($listeners.OwningProcess | Select-Object -Unique)){
 $caseName=(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString()
 $backupRoot=Join-Path $storeRoot ('backups/'+$caseName)
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-foreach($name in @('postgres','assets')){
+foreach($name in @('postgres','assets','run-artifacts')){
   $sourcePath=Join-Path $storeRoot $name
   if(Test-Path -LiteralPath $sourcePath){Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $backupRoot $name) -Recurse}
 }
@@ -37,7 +37,7 @@ foreach($name in @('runtime.json','server.stdout.log','server.stderr.log')){
   if(Test-Path -LiteralPath $sourcePath){Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $backupRoot $name)}
 }
 $verifiedFiles=0
-foreach($name in @('postgres','assets')){
+foreach($name in @('postgres','assets','run-artifacts')){
   $sourceDirectory=Join-Path $storeRoot $name
   if(Test-Path -LiteralPath $sourceDirectory){
     foreach($sourceFile in Get-ChildItem -LiteralPath $sourceDirectory -File -Recurse){
