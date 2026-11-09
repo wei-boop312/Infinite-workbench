@@ -153,3 +153,13 @@ GET runs/events提供JSON分页与Accept:text/event-stream的SSE；按序号续�
 
 ### 归档阶段冻结结果
 会话2498已结束：82文件、2939项全部通过，301.43秒；会话74479六包构建通过（保留现有web分包体积提示）。日志归档在docs/evidence/2026-11-10/archive-{full-test,build,recovery-tests,migration-drill}.log。服务层可作为下一HTTP/UI切片的基线，日常服务仍是迁移008，009/010尚未加载。
+
+## 2026-11-10 用户可操作的归档恢复入口（全量运行中）
+TASK-23/T10/T12本地部分：新增严格空body的POST /v1/projects/{p}/runs/{r}/recover-archive。服务器session决定actor，同源/loopback校验、项目角色先于执行，不能传入artifact/lease/URL。GET run返回仅供UI展示的archiveRecoveryAvailable候选字段；真正恢复重新验证历史快照、DB证据和私有缓存。旧服务没有archiveRecoveryEnabled时隐藏按钮，viewer不可操作。任务详情中的恢复按钮不会触发生成，日志显示开始恢复及完成；SSE推进详情与列表状态，失败保留产物待核查。
+
+36项专项及API构建通过。真实CPU浏览器故障验收fad4cad8-37ae-464d-b425-38440bc97f0d通过：资产存储失败→刷新→服务器历史找回unknown→按钮恢复→下载原字节→只一run/attempt/output，原件不变、自有进程停止。额外验证伪造actor/产物参数422、外站请求403、临时viewer403、再次POST复用结果；截图已查看。初次截图发现列表状态滞后，修正后补断言并复跑通过。正常CPU浏览器b171a870-fb10-412e-a891-75f41db17f81通过；2条本地登录/保存/旧runtime兼容通过。首次普通浏览器命令误写不存在配置文件，失败记录work/archive-local-browser.log保留，改为实际playwright.workspace.config.ts后通过work/archive-local-browser-corrected.log。
+
+全量会话46990：work/archive-ui-full-test.log；构建会话34532：work/archive-ui-build.log。前节2939通过尚不覆盖本节HTTP/UI；当前日常4310仍迁移008，待通过后再备份升级。周额度最近44%已用/56%剩余。
+
+### 恢复入口冻结结果
+全量46990已结束：82文件2939项全部通过，300.95秒；六包构建及真实故障/正常CPU浏览器、2条本地浏览器已通过，证据归档archive-ui-*.log等。未提高超时或减少worker。准备第四次本机备份升级，原始核验报告留私有备份目录，仅交付脱敏统计。

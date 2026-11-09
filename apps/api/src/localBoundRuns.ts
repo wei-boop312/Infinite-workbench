@@ -60,7 +60,8 @@ export class LocalBoundRuns {
       const cancellation=(await tx.query('SELECT requested_by,reason,created_at FROM workspace.run_cancellations WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0]??null;
       const a=(await tx.query<{stage:string;provider_request_id:string|null}>('SELECT stage,provider_request_id FROM workspace.run_attempts WHERE project_id=$1 AND run_id=$2',[projectId,id])).rows[0];
       const attempt=a?{stage:a.stage,providerRequestId:a.provider_request_id}:null;
-      return {id:r.id,state:r.state,eventSequence:Number(r.event_sequence),snapshot:r.payload,snapshotHash:r.content_hash,output,cancellation,attempt};
+      const archiveRecoveryAvailable=['unknown','archiving'].includes(r.state)&&(await tx.query<{available:boolean}>("SELECT workspace.can_edit($1) AND EXISTS(SELECT 1 FROM workspace.run_artifacts WHERE project_id=$1 AND run_id=$2) AS available",[projectId,id])).rows[0].available;
+      return {id:r.id,state:r.state,eventSequence:Number(r.event_sequence),snapshot:r.payload,snapshotHash:r.content_hash,output,cancellation,attempt,archiveRecoveryAvailable};
     });
   }
   async cancel(actorId:string,projectId:string,id:string,reason:string){

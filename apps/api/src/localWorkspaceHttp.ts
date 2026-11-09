@@ -8,6 +8,7 @@ import { LocalWorkflowVersions } from './localWorkflowVersions.ts';
 import { LocalBoundRuns } from './localBoundRuns.ts';
 import {LocalRunQueries} from './localRunQueries.ts';
 import {openLocalRunEventStream} from './localRunEventStream.ts';
+import type {LocalArchiveRecovery} from './localArchiveRecovery.ts';
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function reply(response:ServerResponse,status:number,data:unknown){
@@ -26,7 +27,7 @@ function fields(data:Record<string,unknown>,keys:string[]){if(Object.keys(data).
 function cookie(request:IncomingMessage){return (request.headers.cookie??'').split(';').map(s=>s.trim()).find(s=>s.startsWith('workspace_session='))?.slice(18)??'';}
 
 /** Loopback development API. No cloud OIDC, CORS, public registration or model execution. */
-export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{origin:()=>string;clientFile?:string;assets?:LocalWorkspaceAssets;compilerSourceSha256?:string;onRunQueued?:()=>void}){
+export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{origin:()=>string;clientFile?:string;assets?:LocalWorkspaceAssets;compilerSourceSha256?:string;onRunQueued?:()=>void;archiveRecovery?:LocalArchiveRecovery}){
   const failures=new Map<string,{count:number;until:number}>();
   const versions=new LocalWorkflowVersions(db);
   const boundRuns=new LocalBoundRuns(db,options.compilerSourceSha256??null);
@@ -64,7 +65,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       }
       const user=await db.authenticate(cookie(request));
       if(url.pathname==='/v1/me'&&method==='GET'){reply(response,200,{user});return;}
-      if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,scope:'local-cpu-resize-only'});return;}
+      if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:!!options.archiveRecovery,scope:'local-cpu-resize-only'});return;}
       if(url.pathname==='/v1/auth/logout'&&method==='POST'){
         await db.logout(cookie(request));response.setHeader('set-cookie','workspace_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');reply(response,200,{logged_out:true});return;
       }
@@ -77,7 +78,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
           reply(response,201,{id:projectId,name:input.name.trim()});return;
         }
       }
-      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs|tools|usage)(?:\/([^/]+)(?:\/(cancel|events))?)?)?$/.exec(url.pathname);
+      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs|tools|usage)(?:\/([^/]+)(?:\/(cancel|events|recover-archive))?)?)?$/.exec(url.pathname);
       if(!route||!uuid.test(route[1])||(route[4]&&(route[2]!=='runs'||!uuid.test(route[3])))){reply(response,404,'NOT_FOUND');return;}
       const projectId=route[1],role=(await db.asActor(user.id,tx=>tx.query<{role:string}>("SELECT m.role FROM workspace.project_members m JOIN workspace.projects p ON p.id=m.project_id WHERE p.id=$1 AND p.deleted_at IS NULL",[projectId]))).rows[0]?.role;
       if(!role){reply(response,404,'NOT_FOUND');return;}
@@ -124,6 +125,11 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
         }));reply(response,200,result);return;
       }
       if(role==='viewer'){reply(response,403,'ACCESS_DENIED');return;}
+      if(method==='POST'&&route[2]==='runs'&&route[4]==='recover-archive'){
+        const input=await body(request);fields(input,[]);
+        if(!options.archiveRecovery){reply(response,503,'ARCHIVE_RECOVERY_NOT_CONFIGURED');return;}
+        reply(response,200,await options.archiveRecovery.recover(user.id,projectId,route[3]));return;
+      }
       if(method==='POST'&&route[2]==='runs'&&route[4]==='cancel'){
         const input=await body(request);fields(input,['reason']);if(typeof input.reason!=='string')throw Error('INVALID_BODY');
         reply(response,202,await boundRuns.cancel(user.id,projectId,route[3],input.reason));return;
@@ -175,7 +181,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       const message=error instanceof Error?error.message:'';
       if(message==='COMPILER_NOT_CONFIGURED'){reply(response,503,message);return;}
       const status=['UNAUTHENTICATED','LOGIN_FAILED'].includes(message)?401:message==='ACCESS_DENIED'?403:message==='NOT_FOUND'?404:
-        ['LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','LOCAL_SETUP_COMPLETE','IDEMPOTENCY_CONFLICT'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED'].includes(message)?413:
+        ['LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','LOCAL_SETUP_COMPLETE','IDEMPOTENCY_CONFLICT','ARCHIVE_BUSY','ARCHIVE_NOT_RECOVERABLE','NO_VERIFIED_ARTIFACT','ARCHIVE_LEASE_INVALID','ARTIFACT_NOT_FOUND','ARTIFACT_INTEGRITY_FAILED'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED'].includes(message)?413:
         ['INVALID_BODY','INVALID_LOCAL_CREDENTIALS','ASSET_TYPE_REJECTED','INVALID_ASSET_NAME','INVALID_BINDING','INVALID_IDEMPOTENCY_KEY'].includes(message)||error instanceof SyntaxError||error instanceof URIError||(error instanceof Error&&error.name==='ZodError')?422:500;
       reply(response,status,status===500?'INTERNAL_ERROR':message==='INVALID_BODY'?'INVALID_BODY':status===422?'INVALID_INPUT':message);
     }

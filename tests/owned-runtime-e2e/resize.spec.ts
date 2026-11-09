@@ -12,17 +12,20 @@ import {LocalRunDispatcher} from '../../apps/worker/src/localRunDispatcher';
 import {LocalResizeWorker} from '../../apps/worker/src/localResizeWorker';
 import {OwnedComfyRuntime} from '../../apps/worker/src/ownedComfyRuntime';
 import {recordedCompilerPin} from '../../apps/worker/src/compileResize';
+import {LocalArchiveRecovery} from '../../apps/api/src/localArchiveRecovery';
 import {LocalRunArtifactStore} from '../../apps/api/src/localRunArtifactStore';
 let db:LocalWorkspaceDatabase,server:Server,dispatcher:LocalRunDispatcher,origin='';
 const runtimes:OwnedComfyRuntime[]=[],errors:unknown[]=[];
+const archiveFailure=process.env.WORKSPACE_ACCEPT_ARCHIVE_FAILURE==='1';
 const caseId=randomUUID(),evidence=resolve('docs/evidence/2026-11-10/owned-browser',caseId);
 test.beforeAll(async()=>{
   mkdirSync(evidence,{recursive:true});db=await LocalWorkspaceDatabase.open(process.cwd());
   const assets=new LocalWorkspaceAssets(db,resolve('work','owned-browser-'+caseId)),pin=recordedCompilerPin(process.cwd()).sourceTreeSha256;
   if(!process.env.WORKSPACE_COMFY_PYTHON||!process.env.WORKSPACE_COMFY_MAIN)throw Error('EXPLICIT_OWNED_RUNTIME_REQUIRED');
   const artifacts=new LocalRunArtifactStore(resolve('work','owned-browser-artifacts-'+caseId));
+  if(archiveFailure){const original=assets.upload.bind(assets);let failed=false;assets.upload=async(...args)=>{if(!failed&&String(args[4]).startsWith('resize-')){failed=true;throw Error('owned-browser-archive-storage-failure');}return original(...args);};}
   dispatcher=new LocalRunDispatcher(db,()=>{const runtime=new OwnedComfyRuntime({root:process.cwd(),pythonExecutable:process.env.WORKSPACE_COMFY_PYTHON!,comfyMain:process.env.WORKSPACE_COMFY_MAIN!,compilerSourceSha256:pin});runtimes.push(runtime);return new LocalResizeWorker(new LocalRunExecution(db,pin),assets,runtime,artifacts);},error=>errors.push(String(error)));
-  server=createLocalWorkspaceHttp(db,{origin:()=>origin,assets,compilerSourceSha256:pin,clientFile:resolve('apps/web/local-workspace.html'),onRunQueued:()=>dispatcher.wake()});
+  server=createLocalWorkspaceHttp(db,{origin:()=>origin,assets,compilerSourceSha256:pin,clientFile:resolve('apps/web/local-workspace.html'),archiveRecovery:new LocalArchiveRecovery(new LocalRunExecution(db,pin),artifacts,assets),onRunQueued:()=>dispatcher.wake()});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw Error('NO_ADDRESS');origin=`http://127.0.0.1:${address.port}`;dispatcher.start();
 });
 test.afterAll(async()=>{if(server){server.emit('workspace-shutdown');await new Promise<void>(done=>server.close(()=>done()));}if(dispatcher)await dispatcher.close();for(const runtime of runtimes)await runtime.close();if(db)await db.close();writeFileSync(resolve(evidence,'runtime-report.json'),JSON.stringify({caseId,errors,runtimes:runtimes.map(r=>r.evidence)},null,2));});
@@ -36,6 +39,29 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   await page.getByRole('button',{name:'添加缩放工具'}).click();const form=page.locator('[data-tool-form]');
   await form.getByLabel('工具输入图片').selectOption({label:'owned-product.png'});await form.getByRole('button',{name:'固定输入',exact:true}).click();
   await expect(form.getByRole('status')).toContainText('已固定图片修订');await form.getByRole('button',{name:'提交缩放任务'}).click();
+  if(archiveFailure){
+    await expect(form.getByRole('status')).toHaveText('执行结果待核查；未自动重试',{timeout:60_000});
+    await page.reload();await page.getByRole('button',{name:'任务与用量',exact:true}).click();
+    const dialog=page.getByRole('dialog',{name:'任务与用量'});await dialog.locator('.task-row').click();
+    await expect(dialog.getByRole('button',{name:'恢复归档（不重新生成）'})).toBeVisible();
+    await page.screenshot({path:resolve(evidence,'archive-recovery-needed.png'),fullPage:true});
+    const actor=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id;
+    const row=(await db.asActor(actor,tx=>tx.query<{project_id:string;id:string}>('SELECT project_id,id FROM workspace.runs'))).rows[0];
+    const path=`/v1/projects/${row.project_id}/runs/${row.id}/recover-archive`;
+    expect((await page.request.post(origin+path,{headers:{origin,'x-workspace-local':'1'},data:{actorId:actor,artifactId:'injected'}})).status()).toBe(422);
+    expect((await page.request.post(origin+path,{headers:{origin:'https://outside.example','x-workspace-local':'1'},data:{}})).status()).toBe(403);
+    const admin=(db as unknown as {db:{query:(sql:string,args:unknown[])=>Promise<unknown>}}).db;
+    await admin.query("UPDATE workspace.project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2",[row.project_id,actor]);
+    expect((await page.request.post(origin+path,{headers:{origin,'x-workspace-local':'1'},data:{}})).status()).toBe(403);
+    await admin.query("UPDATE workspace.project_members SET role='owner' WHERE project_id=$1 AND user_id=$2",[row.project_id,actor]);
+    await dialog.getByRole('button',{name:'恢复归档（不重新生成）'}).click();
+    await expect(dialog.locator('#history-state')).toHaveText('已完成，结果已归档');await expect(dialog.locator('.task-row')).toContainText('已完成，结果已归档');
+    await expect(dialog.getByRole('button',{name:'恢复归档（不重新生成）'})).toBeHidden();
+    expect((await(await page.request.post(origin+path,{headers:{origin,'x-workspace-local':'1'},data:{}})).json()).data.reused).toBe(true);
+    await expect(dialog.getByRole('log')).toContainText('开始恢复归档');
+    await page.screenshot({path:resolve(evidence,'archive-recovered.png'),fullPage:true});
+    await dialog.getByRole('button',{name:'关闭',exact:true}).click();await page.reload();
+  }
   await expect(form.getByRole('status')).toHaveText('已完成，结果已归档',{timeout:60_000});
   // The page still holds its pre-output canvas revision. A result append may
   // rebase this independent edit; an intervening editor write still may not.
@@ -53,12 +79,12 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   const preparation=(await db.asActor(actor,tx=>tx.query<{payload:{runtimeKind:string;coreFiles:unknown[]};content_hash:string}>('SELECT payload,content_hash FROM workspace.run_preparations'))).rows;expect(preparation).toHaveLength(1);expect(preparation[0].payload.runtimeKind).toBe('owned-cpu-comfy');expect(preparation[0].payload.coreFiles).toHaveLength(5);
   const artifact=(await db.asActor(actor,tx=>tx.query<{manifest:{runtimeEvidenceHash:string};manifest_hash:string}>('SELECT manifest,manifest_hash FROM workspace.run_artifacts'))).rows;expect(artifact).toHaveLength(1);expect(artifact[0].manifest.runtimeEvidenceHash).toBe(preparation[0].content_hash);
   writeFileSync(resolve(evidence,'runtime-evidence.json'),JSON.stringify(preparation[0],null,2));writeFileSync(resolve(evidence,'artifact-evidence.json'),JSON.stringify(artifact[0],null,2));
-  expect(runtimes).toHaveLength(1);await expect.poll(()=>runtimes[0].evidence.stopped).toBe(true);expect(errors).toEqual([]);
+  expect(runtimes).toHaveLength(1);await expect.poll(()=>runtimes[0].evidence.stopped).toBe(true);expect(errors).toEqual(archiveFailure?['Error: owned-browser-archive-storage-failure']:[]);
   await page.evaluate(()=>{for(const key of Object.keys(localStorage))if(key.startsWith('workspace.tool-run.'))localStorage.removeItem(key);});await page.reload();
   await page.getByRole('button',{name:'任务与用量',exact:true}).click();const history=page.getByRole('dialog',{name:'任务与用量'});await expect(history.locator('.task-row')).toHaveCount(1);await history.locator('.task-row').click();
   await expect(history.locator('#history-state')).toHaveText('已完成，结果已归档');await expect(history.getByRole('log')).toContainText('已归档完成');
   await page.screenshot({path:resolve(evidence,'task-history.png'),fullPage:true});
   const historyWaiting=page.waitForEvent('download');await history.getByRole('link',{name:'下载任务结果'}).click();const historyDownload=await historyWaiting,historyPath=await historyDownload.path();if(!historyPath)throw Error('NO_HISTORY_DOWNLOAD');expect(readFileSync(historyPath)).toEqual(bytes);
   await history.getByRole('button',{name:'查看画布结果'}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();expect(runtimes).toHaveLength(1);
-  writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],reloaded:true,noSecondSubmission:true},null,2));
+  writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],archiveRecoveredThroughUI:archiveFailure,reloaded:true,noSecondSubmission:true},null,2));
 });

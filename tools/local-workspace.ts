@@ -9,6 +9,7 @@ import {LocalResizeWorker} from '../apps/worker/src/localResizeWorker.ts';
 import {OwnedComfyRuntime} from '../apps/worker/src/ownedComfyRuntime.ts';
 import {LocalRunDispatcher} from '../apps/worker/src/localRunDispatcher.ts';
 import {LocalRunArtifactStore} from '../apps/api/src/localRunArtifactStore.ts';
+import {LocalArchiveRecovery} from '../apps/api/src/localArchiveRecovery.ts';
 const directory=resolve('work/local-workspace');mkdirSync(directory,{recursive:true});
 const db=await LocalWorkspaceDatabase.open(process.cwd(),resolve(directory,'postgres'));
 const origin='http://127.0.0.1:4310';
@@ -20,7 +21,7 @@ const pythonExecutable=process.env.WORKSPACE_COMFY_PYTHON??config.pythonExecutab
 const dispatcher=pythonExecutable&&comfyMain?new LocalRunDispatcher(db,()=>new LocalResizeWorker(new LocalRunExecution(db,pin),assets,
   new OwnedComfyRuntime({root:process.cwd(),pythonExecutable,comfyMain,compilerSourceSha256:pin}),artifacts),(error,runId)=>console.error('本地缩放任务异常',runId,(error as Error).message),
   (actor,project,run)=>new LocalRunExecution(db,pin).recoverExpired(actor,project,run)):undefined;
-const server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets,compilerSourceSha256:pin,onRunQueued:dispatcher?()=>dispatcher.wake():undefined});
+const server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets,compilerSourceSha256:pin,onRunQueued:dispatcher?()=>dispatcher.wake():undefined,archiveRecovery:new LocalArchiveRecovery(new LocalRunExecution(db,pin),artifacts,assets)});
 server.on('error',async error=>{console.error(error.message);await db.close();process.exitCode=1;});
 server.listen(4310,'127.0.0.1',()=>{dispatcher?.start();console.log(`本地工作台：${origin}；仅监听本机，数据保存在work/local-workspace。CPU缩放：${dispatcher?'已配置':'未配置'}。`);});
 let closing=false;const close=()=>{if(closing)return;closing=true;server.emit('workspace-shutdown');server.close(()=>{void (async()=>{await dispatcher?.close();await db.close();})();});};

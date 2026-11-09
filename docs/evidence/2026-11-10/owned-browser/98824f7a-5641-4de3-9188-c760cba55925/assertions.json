@@ -1,0 +1,29 @@
+{
+  "scope": "real-browser-owned-cpu-no-model",
+  "runs": [
+    {
+      "id": "db670bed-b312-4fec-bd9f-7f4c16927c04",
+      "state": "succeeded"
+    }
+  ],
+  "outputs": [
+    {
+      "project_id": "15884742-260a-45a0-b831-20910363e135",
+      "run_id": "db670bed-b312-4fec-bd9f-7f4c16927c04",
+      "attempt_id": "35917baa-95e4-448a-8f4e-633eca4a6183",
+      "asset_version_id": "89639043-0086-4a97-99a3-20193503fe88",
+      "object_id": "a6522574-f171-40ad-a97b-6050a2bee56e",
+      "object_revision": 1,
+      "sha256": "fe56d177d6771f0d597d69c839b69c5a058ed5525cc692623401b38551550317",
+      "created_at": "2026-11-09T21:14:21.336Z"
+    }
+  ],
+  "sourcePixels": "RGB(51,102,204)",
+  "resultDimensions": [
+    256,
+    256
+  ],
+  "archiveRecoveredThroughUI": true,
+  "reloaded": true,
+  "noSecondSubmission": true
+}
