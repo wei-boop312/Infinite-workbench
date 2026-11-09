@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { LocalWorkspaceDatabase } from "./localWorkspaceDatabase.ts";
 import type { LocalWorkspaceAssets } from './localWorkspaceAssets.ts';
 import { RunKernelError } from './runKernel.ts';
+import { LocalWorkflowVersions } from './localWorkflowVersions.ts';
+import { LocalBoundRuns } from './localBoundRuns.ts';
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function reply(response:ServerResponse,status:number,data:unknown){
@@ -22,8 +24,10 @@ function fields(data:Record<string,unknown>,keys:string[]){if(Object.keys(data).
 function cookie(request:IncomingMessage){return (request.headers.cookie??'').split(';').map(s=>s.trim()).find(s=>s.startsWith('workspace_session='))?.slice(18)??'';}
 
 /** Loopback development API. No cloud OIDC, CORS, public registration or model execution. */
-export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{origin:()=>string;clientFile?:string;assets?:LocalWorkspaceAssets}){
+export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{origin:()=>string;clientFile?:string;assets?:LocalWorkspaceAssets;compilerSourceSha256?:string}){
   const failures=new Map<string,{count:number;until:number}>();
+  const versions=new LocalWorkflowVersions(db);
+  const boundRuns=new LocalBoundRuns(db,options.compilerSourceSha256??null);
   return createServer(async(request,response)=>{
     try{
       const expected=new URL(options.origin());
@@ -69,10 +73,20 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
           reply(response,201,{id:projectId,name:input.name.trim()});return;
         }
       }
-      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets)(?:\/([^/]+))?)?$/.exec(url.pathname);
+      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs)(?:\/([^/]+))?)?$/.exec(url.pathname);
       if(!route||!uuid.test(route[1])){reply(response,404,'NOT_FOUND');return;}
       const projectId=route[1],role=(await db.asActor(user.id,tx=>tx.query<{role:string}>("SELECT m.role FROM workspace.project_members m JOIN workspace.projects p ON p.id=m.project_id WHERE p.id=$1 AND p.deleted_at IS NULL",[projectId]))).rows[0]?.role;
       if(!role){reply(response,404,'NOT_FOUND');return;}
+      if(method==='GET'&&route[2]==='runs'&&uuid.test(route[3]??'')){
+        reply(response,200,await boundRuns.read(user.id,projectId,route[3]));return;
+      }
+      if(method==='GET'&&route[2]==='workflow-versions'&&uuid.test(route[3]??'')){
+        reply(response,200,await versions.readWorkflow(user.id,projectId,route[3]));return;
+      }
+      if(method==='GET'&&route[2]==='references'){
+        const objectId=url.searchParams.get('object_id');if(!objectId||!uuid.test(objectId))throw new Error('INVALID_BODY');
+        reply(response,200,{items:await versions.references(user.id,projectId,objectId)});return;
+      }
       if(method==='GET'&&route[2]==='assets'&&uuid.test(route[3]??'')&&options.assets){
         const result=await options.assets.download(user.id,projectId,route[3]);
         response.writeHead(200,{'content-type':result.asset.mime,'content-length':result.bytes.length,'cache-control':'no-store','x-content-type-options':'nosniff',
@@ -86,6 +100,18 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
         }));reply(response,200,result);return;
       }
       if(role==='viewer'){reply(response,403,'ACCESS_DENIED');return;}
+      if(method==='POST'&&route[2]==='runs'&&!route[3]){
+        const input=await body(request);fields(input,['bindingId','parameters']);
+        const key=request.headers['idempotency-key'];
+        if(typeof input.bindingId!=='string'||!uuid.test(input.bindingId)||typeof key!=='string')throw Error('INVALID_BODY');
+        reply(response,202,await boundRuns.create(user.id,projectId,input.bindingId,input.parameters,key));return;
+      }
+      if(method==='POST'&&!route[3]&&['workflow-versions','template-versions','bindings'].includes(route[2])){
+        const input=await body(request);
+        const result=route[2]==='workflow-versions'?await versions.publishWorkflow(user.id,projectId,input):
+          route[2]==='template-versions'?await versions.publishTemplate(user.id,projectId,input):await versions.bind(user.id,projectId,input);
+        reply(response,201,result);return;
+      }
       if(method==='POST'&&route[2]==='assets'&&!route[3]&&options.assets){
         let size=0;const parts:Buffer[]=[];
         for await(const part of request){const bytes=Buffer.from(part);size+=bytes.length;if(size>8*1024*1024)throw new Error('ASSET_SIZE_EXCEEDED');parts.push(bytes);}
@@ -115,9 +141,10 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
     }catch(error){
       if(error instanceof RunKernelError){reply(response,error.status,error.code);return;}
       const message=error instanceof Error?error.message:'';
+      if(message==='COMPILER_NOT_CONFIGURED'){reply(response,503,message);return;}
       const status=['UNAUTHENTICATED','LOGIN_FAILED'].includes(message)?401:message==='NOT_FOUND'?404:
-        ['LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','LOCAL_SETUP_COMPLETE'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED'].includes(message)?413:
-        ['INVALID_BODY','INVALID_LOCAL_CREDENTIALS','ASSET_TYPE_REJECTED','INVALID_ASSET_NAME'].includes(message)||error instanceof SyntaxError||error instanceof URIError||(error instanceof Error&&error.name==='ZodError')?422:500;
+        ['LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','LOCAL_SETUP_COMPLETE','IDEMPOTENCY_CONFLICT'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED'].includes(message)?413:
+        ['INVALID_BODY','INVALID_LOCAL_CREDENTIALS','ASSET_TYPE_REJECTED','INVALID_ASSET_NAME','INVALID_BINDING','INVALID_IDEMPOTENCY_KEY'].includes(message)||error instanceof SyntaxError||error instanceof URIError||(error instanceof Error&&error.name==='ZodError')?422:500;
       reply(response,status,status===500?'INTERNAL_ERROR':message==='INVALID_BODY'?'INVALID_BODY':status===422?'INVALID_INPUT':message);
     }
   });

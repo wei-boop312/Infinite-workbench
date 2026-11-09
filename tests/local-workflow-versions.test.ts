@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll,beforeAll,expect,it } from 'vitest';
 import { LocalWorkspaceDatabase } from '../apps/api/src/localWorkspaceDatabase.ts';
 import { LocalWorkflowVersions } from '../apps/api/src/localWorkflowVersions.ts';
+import { LocalBoundRuns } from '../apps/api/src/localBoundRuns.ts';
 let db:LocalWorkspaceDatabase,repo:LocalWorkflowVersions;
 const actor=randomUUID(),project=randomUUID(),other=randomUUID();
 const graph={id:randomUUID(),workflowId:randomUUID(),projectId:project,version:1,nodes:[
@@ -41,4 +42,21 @@ it('绑定固定源修订与资产hash；双向查看一致，源修改只提示
   expect((ref.payload.source as {revision:number}).revision).toBe(1);
   await expect(repo.bind(other,project,{...request,id:randomUUID()})).rejects.toThrow('NOT_FOUND');
   await expect(db.asActor(actor,tx=>tx.query("UPDATE workspace.bindings SET payload='{}' WHERE project_id=$1",[project]))).rejects.toThrow('IMMUTABLE_HISTORY');
+});
+it('从权威绑定冻结运行快照，幂等提交只写一次run/outbox且不读取latest',async()=>{
+  const binding=(await db.asActor(actor,tx=>tx.query<{id:string}>('SELECT id FROM workspace.bindings WHERE project_id=$1',[project]))).rows[0];
+  const runs=new LocalBoundRuns(db,'b'.repeat(64));
+  const results=await Promise.all([1,2,3].map(()=>runs.create(actor,project,binding.id,{width:256,height:256},'owned-once')));
+  expect(new Set(results.map(r=>r.id)).size).toBe(1);
+  const result=await runs.read(actor,project,results[0].id);
+  expect(result.state).toBe('queued');
+  const snapshot=result.snapshot as {source:{revision:number;x:number};authorization:{actorId:string;providerCost:string}};
+  expect(snapshot.source).toMatchObject({revision:1,x:0});
+  expect(snapshot.authorization).toMatchObject({actorId:actor,providerCost:'0'});
+  expect((await db.asActor(actor,tx=>tx.query('SELECT * FROM workspace.outbox WHERE project_id=$1',[project]))).rows).toHaveLength(1);
+  await expect(runs.create(actor,project,binding.id,{width:512,height:256},'owned-once')).rejects.toThrow('IDEMPOTENCY_CONFLICT');
+  await expect(runs.create(other,project,binding.id,{width:256,height:256},'forbidden')).rejects.toThrow('NOT_FOUND');
+  await expect(runs.read(other,project,result.id)).rejects.toThrow('NOT_FOUND');
+  await expect(runs.create(actor,project,binding.id,{width:256,height:256,authorized:true},'forged')).rejects.toThrow();
+  await expect(db.asActor(actor,tx=>tx.query("UPDATE workspace.run_snapshots SET payload='{}' WHERE project_id=$1",[project]))).rejects.toThrow('IMMUTABLE_HISTORY');
 });
