@@ -54,3 +54,11 @@ test('首个真实账号→登录态→项目→文字卡拖动编辑→刷新�
   expect((await db.asActor(user,tx=>tx.query('SELECT * FROM workspace.runs'))).rows).toHaveLength(1);
   await page.screenshot({path:'docs/evidence/2026-11-10/tool-card-queued.png',fullPage:true});
 });
+test('滚动升级时运行配置接口尚未提供，仍能登录并打开已有项目',async({page})=>{
+  await page.route('**/v1/runtime',route=>route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({error:{code:'NOT_FOUND'}})}));
+  await page.goto(origin);await expect(page.getByRole('heading',{name:'登录工作台'})).toBeVisible();
+  await page.getByLabel('用户名',{exact:true}).fill('preview_owner');await page.getByLabel('密码',{exact:true}).fill('owned-browser-password-very-long-2026');
+  await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByText('我的项目',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'本地产品项目',exact:true}).click();await expect(page.getByLabel('卡片内容')).toHaveValue('由人确认：接口数量和外观不得猜测');
+  await expect(page.locator('.hint')).toContainText('缩放执行尚未配置');
+});
