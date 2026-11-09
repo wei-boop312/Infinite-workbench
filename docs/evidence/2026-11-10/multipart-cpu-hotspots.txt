@@ -1,0 +1,28 @@
+2087.9ms canonical file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/apps/api/src/imageProviderContract.ts:27
+1104.3ms (anonymous) file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/apps/api/src/imageProviderContract.ts:30
+672.7ms structuredClone node:internal/worker/js_transferable:113
+474.3ms update node:internal/crypto/hash:186
+447.0ms (anonymous) :3
+426.7ms inst._zod.run file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/schemas.js:97
+340.3ms update :0
+325.0ms inst._zod.parse file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/schemas.js:1171
+294.3ms prepare :0
+233.6ms runChecks file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/schemas.js:34
+225.4ms (garbage collector) :0
+144.3ms exec :0
+138.7ms (anonymous) file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/packages/contracts/src/index.ts:378
+97.3ms get :0
+96.4ms read file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/apps/api/src/sqliteRunKernelStore.ts:552
+96.3ms Hash :0
+95.8ms RegExp: ^[a-f0-9]{64}$ :0
+82.1ms readImageMetadata file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/apps/api/src/sqliteRunKernelStore.ts:531
+76.1ms (anonymous) file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/packages/contracts/src/index.ts:343
+70.1ms hash file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/apps/api/src/imageProviderContract.ts:34
+55.8ms (anonymous) :0
+49.0ms structuredClone :0
+46.4ms inst._zod.parse file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/schemas.js:1987
+45.9ms assertLockedConfirmationState file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/apps/api/src/lockedProductionImageProtocol.ts:99
+44.7ms inst._zod.parse file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/schemas.js:1695
+43.9ms canParse :0
+41.1ms digest :0
+38.8ms handleCatchall file:///C:/Users/MECHREVO/Documents/ChatGPT/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/zod@4.6.5/node_modules/zod/v4/core/schemas.js:923

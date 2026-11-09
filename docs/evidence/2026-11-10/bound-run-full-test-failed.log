@@ -1,0 +1,206 @@
+$ vitest run
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/locked-production-billing-settlement.test.ts (78 tests | 2 failed) 195701ms
+   ❯ protected production zero-cap and multipart fees (7)
+     × 原multipart-image-array受保护费用不重建请求 7747ms
+     × 原multipart-image-single受保护费用不重建请求 6673ms
+ ❯ tests/locked-production-attempts.test.ts (74 tests | 2 failed) 167952ms
+   ❯ protected response rollback and recovery boundaries (37)
+     × noncooperative ports retain both slots after timeout, late responses never commit 5861ms
+   ❯ protected first live attempt and complete raw transaction (37)
+     × openai true commits actual attempt before callback, retains max 5433ms
+ ❯ tests/locked-production-artifacts.test.ts (67 tests | 2 failed) 270545ms
+   ❯ locked actual artifact failure/recovery (61)
+     × zero-cap unknown估价和实费不补0 7640ms
+     × 不合作解码绝对客户端期限结束，不延长等待或迟到提交 3882ms
+ ❯ tests/locked-production-public-http.test.ts (81 tests | 8 failed) 61352ms
+   ❯ B10A full persisted protected artifact/fee history, never reprocess or send (8)
+     × 删全task结果/产物且重算合法unknown投影仍拒绝孤立raw/产物 6397ms
+     × unknown/独立超额结算=false后完整历史 6897ms
+     × unknown/独立超额结算=true后完整历史 7506ms
+     × raw getter后revoke复查/回滚，清借出副本 5765ms
+     × raw getter后input复查/回滚，清借出副本 6169ms
+     × 原proof字段损坏，部分重算SQLite SHA仍失败关闭 5817ms
+     × 原fees字段损坏，部分重算SQLite SHA仍失败关闭 5732ms
+     × 原result字段损坏，部分重算SQLite SHA仍失败关闭 5845ms
+ ❯ tests/locked-production-image-ui.test.ts (65 tests | 2 failed) 24002ms
+   ❯ 实际上传登记与服务端收据身份各自冻结 (9)
+     × 上传实际规范存储收据到完整保护产物 manual=false，不混同注册SHA 5060ms
+     × 上传实际规范存储收据到完整保护产物 manual=true，不混同注册SHA 6668ms
+ ❯ tests/locked-production-generated-result-canvas.test.ts (53 tests | 4 failed) 40307ms
+   ❯ B9C independent protected canvas observations (53)
+     × openai/true actual protected chain graph with independent nullable money 6633ms
+     × openai-compatible/true actual protected chain graph with independent nullable money 6124ms
+     × openai-compatible/false actual protected chain graph with independent nullable money 6070ms
+     × repeat validates relationships without rewriting old unknown after actual independent overage settlement 7967ms
+ ❯ tests/locked-production-generated-asset-cache.test.ts (52 tests | 1 failed) 38922ms
+   ❯ B9B protected original browser boundary (52)
+     × actual protected overage settlement preserves frozen artifact identity and nullable estimate 6963ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 21 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/locked-production-artifacts.test.ts > locked actual artifact failure/recovery > zero-cap unknown估价和实费不补0
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-artifacts.test.ts:152:3
+    150|     await expect(t.ingest()).rejects.toBeDefined();expect(()=>t.servic…
+    151|   });
+    152|   it("zero-cap unknown估价和实费不补0", async () => {
+       |   ^
+    153|     const z=await fixture({manual:true,cap:0}),r=await z.ingest();expe…
+    154|     expect(state(z).aggregate.jobs[0].actualCostMinor).toBeUndefined()…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/21]⎯
+
+ FAIL  tests/locked-production-artifacts.test.ts > locked actual artifact failure/recovery > 不合作解码绝对客户端期限结束，不延长等待或迟到提交
+AssertionError: expected undefined to be defined
+ ❯ tests/locked-production-artifacts.test.ts:206:21
+    204|     const service=new LockedImageProductionArtifactHarness({...t.optio…
+    205|     const start=performance.now();await expect(service.ingest(...t.arg…
+    206|     expect(release).toBeDefined();release();spy.mockRestore();await vi…
+       |                     ^
+    207|   });
+    208|   it("实际task SQL写后额外合法预算变动也不能混入提交", async () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/21]⎯
+
+ FAIL  tests/locked-production-attempts.test.ts > protected response rollback and recovery boundaries > noncooperative ports retain both slots after timeout, late responses never commit
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-attempts.test.ts:72:3
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/21]⎯
+
+ FAIL  tests/locked-production-attempts.test.ts > protected first live attempt and complete raw transaction > openai true commits actual attempt before callback, retains max
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-attempts.test.ts:120:103
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/21]⎯
+
+ FAIL  tests/locked-production-billing-settlement.test.ts > protected production zero-cap and multipart fees > 原multipart-image-array受保护费用不重建请求
+ FAIL  tests/locked-production-billing-settlement.test.ts > protected production zero-cap and multipart fees > 原multipart-image-single受保护费用不重建请求
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-billing-settlement.test.ts:268:70
+    266|     await expect(t.artifact.ingest(principal,"project-a",t.v.batchId,t…
+    267|   });
+    268|   it.each(["multipart-image-array","multipart-image-single"] as const)…
+       |                                                                      ^
+    269|     const t=await fixture({protocol:"openai-compatible",encoding,manua…
+    270|     expect(s.service.settle(...s.args,s.request()).status).toBe("settl…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/21]⎯
+
+ FAIL  tests/locked-production-generated-asset-cache.test.ts > B9B protected original browser boundary > actual protected overage settlement preserves frozen artifact identity and nullable estimate
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-generated-asset-cache.test.ts:101:3
+     99|     await vi.advanceTimersByTimeAsync(30001);await denied;resolve(repl…
+    100|   });
+    101|   it("actual protected overage settlement preserves frozen artifact id…
+       |   ^
+    102|     const t=await ownedLockedGeneratedTask({manual:true});owned.push(t…
+    103|     const after=t.reader().lineage(t.actor,"project-a",t.id);expect(af…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/21]⎯
+
+ FAIL  tests/locked-production-generated-result-canvas.test.ts > B9C independent protected canvas observations > openai/true actual protected chain graph with independent nullable money
+ FAIL  tests/locked-production-generated-result-canvas.test.ts > B9C independent protected canvas observations > openai-compatible/true actual protected chain graph with independent nullable money
+ FAIL  tests/locked-production-generated-result-canvas.test.ts > B9C independent protected canvas observations > openai-compatible/false actual protected chain graph with independent nullable money
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-generated-result-canvas.test.ts:21:98
+     19| const doc=(s:CanvasSnapshot)=>snapshotToDocument("owned-locked-result-…
+     20| describe("B9C independent protected canvas observations",()=>{
+     21|   for(const protocol of ["openai","openai-compatible"] as const)for(co…
+       |                                                                                                  ^
+     22|     const t=await ownedLockedGeneratedTask({protocol,manual});owned.pu…
+     23|     const g=buildLockedProductionResultGraph(empty,v,"project-a",asset…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/21]⎯
+
+ FAIL  tests/locked-production-generated-result-canvas.test.ts > B9C independent protected canvas observations > repeat validates relationships without rewriting old unknown after actual independent overage settlement
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-generated-result-canvas.test.ts:37:3
+     35|     expect(JSON.stringify(doc(g))).not.toMatch(/Base64|blob:|https:|cr…
+     36|   });
+     37|   it("repeat validates relationships without rewriting old unknown aft…
+       |   ^
+     38|     const t=await ownedLockedGeneratedTask({manual:true});owned.push(t…
+     39|     const first=buildLockedProductionResultGraph(empty,v,"project-a",a…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/21]⎯
+
+ FAIL  tests/locked-production-image-ui.test.ts > 实际上传登记与服务端收据身份各自冻结 > 上传实际规范存储收据到完整保护产物 manual=false，不混同注册SHA
+ FAIL  tests/locked-production-image-ui.test.ts > 实际上传登记与服务端收据身份各自冻结 > 上传实际规范存储收据到完整保护产物 manual=true，不混同注册SHA
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-image-ui.test.ts:178:24
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/21]⎯
+
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > 删全task结果/产物且重算合法unknown投影仍拒绝孤立raw/产物
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-public-http.test.ts:245:3
+    243| });
+    244| describe("B10A full persisted protected artifact/fee history, never re…
+    245|   it("删全task结果/产物且重算合法unknown投影仍拒绝孤立raw/产物", async () => {
+       |   ^
+    246|     const t = await ownedLockedGeneratedTask(); owned.push(t); const {…
+    247|     t.advance(30_000); j.finishedAt = new Date(t.clock()).toISOString(…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/21]⎯
+
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > unknown/独立超额结算=false后完整历史
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > unknown/独立超额结算=true后完整历史
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-public-http.test.ts:255:24
+    253|     expect(() => port.getConfirmation(principal, "project-a", t.prepar…
+    254|   });
+    255|   it.each([false, true])("unknown/独立超额结算=%s后完整历史", async settled => {
+       |                        ^
+    256|     const t = await ownedLockedGeneratedTask({ manual: true }); owned.…
+    257|     for (const x of ["run:execute", "run:create", "run:confirm", "run:…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/21]⎯
+
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > raw getter后revoke复查/回滚，清借出副本
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > raw getter后input复查/回滚，清借出副本
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-public-http.test.ts:264:30
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/21]⎯
+
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > 原proof字段损坏，部分重算SQLite SHA仍失败关闭
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > 原fees字段损坏，部分重算SQLite SHA仍失败关闭
+ FAIL  tests/locked-production-public-http.test.ts > B10A full persisted protected artifact/fee history, never reprocess or send > 原result字段损坏，部分重算SQLite SHA仍失败关闭
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-public-http.test.ts:270:38
+    268|     expect(() => port.getConfirmation(principal, "project-a", t.prepar…
+    269|   });
+    270|   it.each(["proof", "fees", "result"])("原%s字段损坏，部分重算SQLite SHA仍失败关闭", …
+       |                                      ^
+    271|     const t = await ownedLockedGeneratedTask(); owned.push(t); if (bad…
+    272|     try { const row = db.prepare("SELECT payload FROM kernel_state WHE…
+
+
+ Test Files  7 failed | 69 passed (76)
+      Tests  21 failed | 2878 passed (2899)
+   Start at  02:33:48
+   Duration  543.36s (tests 99%, import 1%)
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/21]⎯
+
+
+[ELIFECYCLE] Test failed. See above for more details.
