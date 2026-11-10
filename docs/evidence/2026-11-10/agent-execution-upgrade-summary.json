@@ -1,0 +1,12 @@
+{
+  "unauthenticatedExecutionCatalogStatus": 401,
+  "entryStatus": 200,
+  "fromVersion": 18,
+  "launcherPid": 30224,
+  "scope": "local-agent-execution-backup-copy-upgrade",
+  "codeCommit": "512c1e3",
+  "toVersion": 19,
+  "ready": true,
+  "existingTablesPreserved": 44,
+  "verifiedBackupFiles": 1163
+}
