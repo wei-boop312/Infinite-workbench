@@ -10,3 +10,10 @@ export const AgentReviewProposalSchema=z.object({
   arguments:z.object({bindingId:Id,parameters:WorkspaceParametersSchema}).strict(),argumentsHash:Sha,inputScope:AgentReviewScopeSchema,capabilityHash:Sha,maxProviderCost:z.literal('0'),currency:z.literal('USD'),expiresAt:z.iso.datetime(),approvalHash:Sha,
 }).strict();
 export const AgentReviewApprovalRequestSchema=z.object({hash:Sha,nonce:Id}).strict();
+// Separate explicit consent. Existing review_only payloads never match these.
+export const AgentExecutionGrantSchema=AgentReviewGrantSchema.extend({mode:z.literal('local_resize_execute'),policyVersion:z.literal('local-agent-execute-v1')});
+export const AgentExecutionProposalSchema=AgentReviewProposalSchema.extend({mode:z.literal('local_resize_execute'),policyVersion:z.literal('local-agent-execute-v1')});
+export const AgentAuthorityGrantSchema=z.discriminatedUnion('mode',[AgentReviewGrantSchema,AgentExecutionGrantSchema]);
+export const AgentAuthorityProposalSchema=z.discriminatedUnion('mode',[AgentReviewProposalSchema,AgentExecutionProposalSchema]);
+export const AgentExecutionRequestSchema=z.object({id:Id,proposalId:Id,hash:Sha,nonce:Id.nullable()}).strict();
+export const AgentExecutionPinSchema=z.object({mode:z.literal('local_resize_execute'),policyVersion:z.literal('local-agent-execute-v1'),consumptionId:Id,grantId:Id,proposalId:Id,grantHash:Sha,proposalHash:Sha,approvalHash:Sha,nonce:Id.nullable()}).strict();

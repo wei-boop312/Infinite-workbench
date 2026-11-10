@@ -1,6 +1,6 @@
 import type {Transaction} from '@electric-sql/pglite';
 import { randomUUID } from 'node:crypto';
-import { WorkspaceParametersSchema, WorkspaceWorkflowSchema, WorkspaceTemplateSchema, WorkspaceObjectSchema, WorkspaceBindingRequestSchema } from '@canvas/contracts';
+import { AgentExecutionPinSchema, WorkspaceParametersSchema, WorkspaceWorkflowSchema, WorkspaceTemplateSchema, WorkspaceObjectSchema, WorkspaceBindingRequestSchema } from '@canvas/contracts';
 import { LocalWorkspaceDatabase } from './localWorkspaceDatabase.ts';
 import {WorkspaceModelGateway} from './workspaceModelGateway.ts';
 import { contentHash,validateWorkflow } from './workspacePrototype.ts';
@@ -16,11 +16,12 @@ export class LocalBoundRuns {
   /** Internal server port: caller owns the transaction, including any future
    * one-time action consumption. No commit, nested transaction or client scope.
    * Review-only records are not an execution authority accepted by this port. */
-  async createInTransaction(tx:Transaction,actorId:string,projectId:string,bindingId:string,input:unknown,key:string){
+  async createInTransaction(tx:Transaction,actorId:string,projectId:string,bindingId:string,input:unknown,key:string,agentExecution?:ReturnType<typeof AgentExecutionPinSchema.parse>){
     if(this.compilerSourceSha256===null)throw Error('COMPILER_NOT_CONFIGURED');
     const parameters=WorkspaceParametersSchema.parse(input),modelCapability=this.gateway.resizeSnapshot(input);
     if(!/^[a-zA-Z0-9_-]{1,128}$/.test(key))throw Error('INVALID_IDEMPOTENCY_KEY');
-    const requestHash=contentHash({bindingId,parameters,policy:'local-resize-only-v1'});
+    const pin=agentExecution===undefined?undefined:AgentExecutionPinSchema.parse(agentExecution);
+    const requestHash=contentHash(pin?{bindingId,parameters,policy:'local-agent-execute-v1',agentExecution:pin}:{bindingId,parameters,policy:'local-resize-only-v1'});
     const principal=(await tx.query<{actor:string;allowed:boolean}>('SELECT workspace.actor_id()::text AS actor,workspace.can_edit(project_id) AS allowed FROM workspace.canvases WHERE project_id=$1',[projectId])).rows[0];
     if(!principal)throw Error('NOT_FOUND');
     if(principal.actor.toLowerCase()!==actorId.toLowerCase())throw Error('EXECUTION_AUTHORITY_MISMATCH');
@@ -52,7 +53,7 @@ export class LocalBoundRuns {
       if(source.type!=='image'||tool.type!=='tool'||tool.templateVersionId!==template.id||contentHash(source)!==contentHash(p.source)||contentHash(tool)!==contentHash(p.tool))throw Error('BINDING_INTEGRITY_FAILED');
       const asset=(await tx.query<{sha256:string;state:string}>('SELECT sha256,state FROM workspace.asset_versions WHERE project_id=$1 AND id=$2',[projectId,source.assetVersionId])).rows[0];
       if(!asset||asset.state!=='ready'||asset.sha256!==p.assetSha256||source.assetVersionId!==p.assetVersionId)throw Error('ASSET_INTEGRITY_FAILED');
-      const snapshot={schemaVersion:2,modelCapability,binding,workflow,workflowHash:w.content_hash,template,templateHash:t.content_hash,source,tool,
+      const snapshot={schemaVersion:pin?3:2,...(pin?{agentExecution:pin}:{}),modelCapability,binding,workflow,workflowHash:w.content_hash,template,templateHash:t.content_hash,source,tool,
         asset:{id:source.assetVersionId,sha256:asset.sha256},parameters,
         compiler:{version:'2.15.2',sourceSha256:this.compilerSourceSha256,registryValidation:'required-before-worker-execution'},
         authorization:{actorId,scope:'local-resize-only-v1',providerCost:'0',currency:'USD'}};

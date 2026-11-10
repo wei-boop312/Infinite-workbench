@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {WorkspaceParametersSchema} from "./workspaceParameters.ts";
-import {AgentReviewGrantRequestSchema,AgentReviewGrantSchema,AgentReviewProposalRequestSchema,AgentReviewProposalSchema,AgentReviewApprovalRequestSchema} from "./workspaceAgentReview.ts";
+import {AgentExecutionGrantSchema,AgentExecutionProposalSchema,AgentExecutionRequestSchema,AgentExecutionPinSchema,AgentReviewGrantRequestSchema,AgentReviewGrantSchema,AgentReviewProposalRequestSchema,AgentReviewProposalSchema,AgentReviewApprovalRequestSchema} from "./workspaceAgentReview.ts";
 import {WorkspacePlanRevisionSchema,WorkspacePlanCommandSchema} from "./workspacePlans.ts";
 import {WorkspaceFactRevisionSchema,WorkspaceFactCommandSchema} from "./workspaceFacts.ts";
 import {WorkspaceModelCapabilitySchema,WorkspaceModelCostSchema,WorkspaceModelPreflightSchema} from "./workspaceModels.ts";
@@ -110,6 +110,10 @@ export function workspaceJsonSchemas() {
     "document-fact-command.schema":z.toJSONSchema(WorkspaceFactCommandSchema),
     "visual-plan-revision.schema":z.toJSONSchema(WorkspacePlanRevisionSchema),
     "visual-plan-command.schema":z.toJSONSchema(WorkspacePlanCommandSchema),
+    "agent-execution-grant.schema":z.toJSONSchema(AgentExecutionGrantSchema),
+    "agent-execution-proposal.schema":z.toJSONSchema(AgentExecutionProposalSchema),
+    "agent-execution-request.schema":z.toJSONSchema(AgentExecutionRequestSchema),
+    "agent-execution-pin.schema":z.toJSONSchema(AgentExecutionPinSchema),
     "agent-review-grant-request.schema":z.toJSONSchema(AgentReviewGrantRequestSchema),
     "agent-review-grant.schema":z.toJSONSchema(AgentReviewGrantSchema),
     "agent-review-proposal-request.schema":z.toJSONSchema(AgentReviewProposalRequestSchema),

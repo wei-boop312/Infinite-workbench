@@ -1,0 +1,21 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/agent-execution.test.ts (6 tests | 1 failed) 2254ms
+   × real HTTP has an explicit execution namespace; approval, dedup and revocation cancel a queued run 99ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/agent-execution.test.ts > real HTTP has an explicit execution namespace; approval, dedup and revocation cancel a queued run
+TypeError: Cannot read properties of null (reading 'split')
+ ❯ tests/agent-execution.test.ts:66:183
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 4 passed (5)
+      Tests  1 failed | 32 passed (33)
+   Start at  09:35:09
+   Duration  4.92s (tests 83%, transform 10%, import 8%)
+

@@ -1,0 +1,25 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/agent-execution.test.ts (5 tests | 1 failed) 2151ms
+   × current input, capability and actor permissions are rechecked at claim and beforeSubmit 110ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/agent-execution.test.ts > current input, capability and actor permissions are rechecked at claim and beforeSubmit
+AssertionError: expected [Function] to throw error including 'ACCESS_DENIED' but got 'EXECUTION_LEASE_INVALID'
+
+Expected: "ACCESS_DENIED"
+Received: "EXECUTION_LEASE_INVALID"
+
+ ❯ tests/agent-execution.test.ts:57:188
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 4 passed (5)
+      Tests  1 failed | 31 passed (32)
+   Start at  09:33:57
+   Duration  4.91s (tests 83%, transform 9%, import 7%)
+

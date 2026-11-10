@@ -21,6 +21,7 @@ export class LocalResizeWorker {
   async execute(actorId:string,projectId:string,runId:string){
     let lease:LocalExecutionLease|undefined,startupComplete=false;
     try{
+      await this.execution.preflightStart(actorId,projectId,runId);
       // Startup precedes the short execution lease and cannot submit a graph.
       await this.runtime.start();
       startupComplete=true;

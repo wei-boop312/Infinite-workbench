@@ -1,3 +1,4 @@
+import {WorkspaceModelGateway} from '../apps/api/src/workspaceModelGateway.ts';
 import { resolve } from "node:path";
 import { mkdirSync,existsSync,readFileSync } from "node:fs";
 import { LocalWorkspaceDatabase } from "../apps/api/src/localWorkspaceDatabase.ts";
@@ -18,10 +19,11 @@ const artifacts=new LocalRunArtifactStore(resolve(directory,'run-artifacts'));
 const pin=recordedCompilerPin(process.cwd()).sourceTreeSha256;
 const configFile=resolve(directory,'runtime.json'),config=existsSync(configFile)?JSON.parse(readFileSync(configFile,'utf8')):{};
 const pythonExecutable=process.env.WORKSPACE_COMFY_PYTHON??config.pythonExecutable,comfyMain=process.env.WORKSPACE_COMFY_MAIN??config.comfyMain;
-const dispatcher=pythonExecutable&&comfyMain?new LocalRunDispatcher(db,()=>new LocalResizeWorker(new LocalRunExecution(db,pin),assets,
+const executionGateway=new WorkspaceModelGateway({compilerConfigured:true,localResizeExecutor:!!(pythonExecutable&&comfyMain)});
+const dispatcher=pythonExecutable&&comfyMain?new LocalRunDispatcher(db,()=>new LocalResizeWorker(new LocalRunExecution(db,pin,executionGateway),assets,
   new OwnedComfyRuntime({root:process.cwd(),pythonExecutable,comfyMain,compilerSourceSha256:pin}),artifacts),(error,runId)=>console.error('本地缩放任务异常',runId,(error as Error).message),
-  (actor,project,run)=>new LocalRunExecution(db,pin).recoverExpired(actor,project,run)):undefined;
-const server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets,compilerSourceSha256:pin,onRunQueued:dispatcher?()=>dispatcher.wake():undefined,archiveRecovery:new LocalArchiveRecovery(new LocalRunExecution(db,pin),artifacts,assets)});
+  (actor,project,run)=>new LocalRunExecution(db,pin,executionGateway).recoverExpired(actor,project,run)):undefined;
+const server=createLocalWorkspaceHttp(db,{origin:()=>origin,clientFile:resolve('apps/web/local-workspace.html'),assets,compilerSourceSha256:pin,onRunQueued:dispatcher?()=>dispatcher.wake():undefined,archiveRecovery:new LocalArchiveRecovery(new LocalRunExecution(db,pin,executionGateway),artifacts,assets)});
 server.on('error',async error=>{console.error(error.message);await db.close();process.exitCode=1;});
 server.listen(4310,'127.0.0.1',()=>{dispatcher?.start();console.log(`本地工作台：${origin}；仅监听本机，数据保存在work/local-workspace。CPU缩放：${dispatcher?'已配置':'未配置'}。`);});
 let closing=false;const close=()=>{if(closing)return;closing=true;server.emit('workspace-shutdown');server.close(()=>{void (async()=>{await dispatcher?.close();await db.close();})();});};

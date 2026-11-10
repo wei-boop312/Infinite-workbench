@@ -1,0 +1,28 @@
+{
+  "caseId": "e9b44695-c3ed-4132-9d52-89336de237d9",
+  "status": "passed",
+  "scope": "actual-disk-restart-and-owned-cpu-agent-action-no-model",
+  "databaseReopened": true,
+  "snapshotVersion": 3,
+  "snapshotHash": "1eb198638c390878b64c38a99ba43f402b762ccba10878feea59e9363e62eefa",
+  "approvalConsumedOnce": true,
+  "requestRetryReused": true,
+  "counts": {
+    "runs": 1,
+    "run_snapshots": 1,
+    "outbox": 1,
+    "run_attempts": 1,
+    "agent_execution_consumptions": 1,
+    "run_outputs": 1
+  },
+  "resultSha256": "0407d5e9e1a0f463884a424754dd91cc1e6afea36fc170d804c0a8ddf43ac03c",
+  "resultDimensions": [
+    64,
+    64
+  ],
+  "originalBytesUnchanged": true,
+  "readyResultPreservedAfterRevoke": true,
+  "runtimeStopped": true,
+  "modelRequests": 0,
+  "providerCost": "0"
+}

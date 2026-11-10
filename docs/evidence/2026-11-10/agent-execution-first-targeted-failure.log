@@ -1,0 +1,22 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/agent-execution.test.ts (5 tests | 1 failed) 2123ms
+   × current input, capability and actor permissions are rechecked at claim and beforeSubmit 46ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/agent-execution.test.ts > current input, capability and actor permissions are rechecked at claim and beforeSubmit
+Error: REVISION_CONFLICT
+ ❯ apps/api/src/localWorkspaceDatabase.ts:128:167
+
+ ❯ ../../../%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83%E6%8E%A2%E7%B4%A2/AI-Commercial-Workspace/implementation/node_modules/.pnpm/@electric-sql+pglite@0.5.15/node_modules/@electric-sql/pglite/dist/chunk-44NZIGN2.js:8:1744
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 3 passed (4)
+      Tests  1 failed | 23 passed (24)
+   Start at  09:33:02
+   Duration  3.14s (tests 80%, transform 11%, import 8%)
+

@@ -1,32 +1,41 @@
-# Agent执行授权接线设计与未完成门槛
+# 本地Agent执行授权接线
 
-2026-11-10。这是下一阶段实施设计，下面标“待接线”的内容尚未交付，不能作为执行权限或验收证据。
+2026-11-10，FR-10 / TASK-19/20 / T15 LOCAL_PARTIAL。本文记录当前后端单action实现；不是完整Agent工具循环或界面验收。
 
-## 已核对的当前调用链
+## 明确授权与模式隔离
 
-- HTTP持有可信session actor，LocalBoundRuns.create通过db.asActor进入workspace_app强制RLS事务。
-- createInTransaction由服务内部调用方持有同一Transaction；不自行commit，不开启嵌套事务；核对当前actor与项目编辑权限。
-- 现有创建顺序为预算行FOR UPDATE、同项目幂等run查询、不可变绑定/模板/工作流/源对象/资产核验、snapshot、run、outbox。全部在同一事务。
-- 原手工requestHash仍是bindingId、parameters和local-resize-only-v1；快照仍v2，不从客户端接收authorization。
-- LocalRunDispatcher从持久outbox枚举，串行执行；进程内observed仅避免反复尝试，不是持久审批消费或授权。
-- LocalResizeWorker启动自有CPU运行时，claim后上传，编译/验证固定图，recordPreparation，beforeSubmit持久提交意图后才单次POST。submitted后的不明确结果不重投。
-- LocalRunExecution.claim锁run；beforeSubmit锁attempt再锁run。归档/取消及预算结算有各自既有锁，不能直接在撤销事务持有grant锁后遍历锁所有run。
-- 现有LocalAgentReview固定review_only，无run创建端口；记录同意不产生执行权。不能修改这些旧payload或让它们自动成为可执行授权。
+旧review_only/local-agent-review-v1保持仅审查。新建local_resize_execute/local-agent-execute-v1授权、提案及L1审批后，才可调用新的执行入口。共享既有不可变授权表，但解析器校验各自mode/policy，列表/游标绑定模式，跨命名空间拒绝；旧记录不自动升级。新执行UUID统一小写，旧审查请求hash保持。
 
-## 待接线的真正执行路径
+工具仅为固定local-comfy-resize-v1，供应商费用0 USD，不含模型、任意URL、Shell、删除、覆盖、发布或支付。L0不能执行；L1逐提案校验hash与nonce；L2/L3仅在明确授予的固定来源/工具/期限/次数/像素范围内执行，不代表无限授权。
 
-1. 新的明确执行mode/policy以及新授权、新提案和对应审批。工具仅允许固定本地零供应商费用resize，沿用来源/版本/参数hash和期限/次数/像素门槛。L0禁止执行，L1逐项确认，L2/L3须明确授予范围内执行权限。
-2. 审批消费与run创建必须共享createInTransaction的Transaction：锁预算和授权状态、核对当前主体/范围/hash/期限/撤销、插入唯一消费回执、快照/run/outbox，一起commit或一起rollback。禁止先consume再调用外部create，也禁止先create后另写消费记录。
-3. 每提案唯一消费记录；L1绑定新的审批nonce，不能复用review_only nonce。固定执行请求重试返回原receipt/run，换参数/提案/授权拒绝。Agent请求hash必须包含授权/提案/policy身份，不能与原手工键空间中的同参数run混用。
-4. 新执行快照需明确版本并冻结grant/proposal/approval/consumption身份与hash；worker从DB校验完整关系，不相信单个payload中的authorized字段。旧v1/v2手工记录及原requestHash保持兼容。
-5. claim与beforeSubmit都重新核对原授权actor当前编辑权限、授权有效期/撤销、当前输入修订、固定scope与配置能力。当前用户的permission不能由快照历史声明代替。
-6. 给授权状态定义一致锁顺序。候选顺序：创建budget→grant→新run；worker既有attempt/run后再grant。撤销只锁grant并提交，再在独立事务请求现有run取消，禁止grant锁内调用cancel造成反向锁等待。需以代码与测试验证，不宣称已获原生多连接证明。
-7. beforeSubmit成功事务是“已开始提交”的持久边界。撤销先于该边界必须阻止新的POST许可；该边界先于撤销，则任务按已提交处理、尽力取消/核对，不能承诺收回已发出的请求。绝不重POST来核对。
-8. 撤销、过期或权限丧失不能破坏已就绪成果，也不能使历史固定版本失真。已提交的结果核验/归档恢复需保留，与新执行许可分开；恢复不能发起生成。
-9. Dispatcher、用量统计、快照pin校验与归档恢复必须明确支持新快照版本；未支持时拒绝，不降级为手工执行。
+## 原子消费与快照
 
-## 已有事务故障证据与后续验收
+LocalAgentExecution.execute在同一db.asActor事务内核对当前编辑权限，锁budget后锁grant state，验证完整提案/授权/当前来源/能力/期限/撤销及审批。createInTransaction写入schema3 snapshot、run、outbox，再插入不可变agent_execution_consumptions，一起commit或rollback。消费记录唯一project/proposal、project/run，以及非空project/nonce，L1 nonce通过复合FK关联原审批。SQL触发器额外核对明确执行mode/policy、L0、撤销、期限、主体、审批及快照参数/绑定/消费身份。消费插入失败不会残留run或outbox。
 
-local-run-transaction.test.ts覆盖调用方创建后抛错时完整rollback、最后outbox INSERT故障时无孤立snapshot/run、重试可重新创建、手工hash/去重保持、其他designer不能替换actor、viewer不能写。该测试不等同于nonce已经接入消费。
+schema3 agentExecution冻结consumptionId、grantId、proposalId、对应hash、approvalHash、nonce与policy；原手工schema1/2和requestHash不改。Agent requestHash另包含完整消费pin，不能撞成普通手工run。相同固定执行ID与完整参数重试只返回原receipt/run，已撤销后也可确认旧回执，但当前编辑权限仍需满足；不会重新入队。换ID或参数复用已消费提案拒绝。
 
-下一阶段必须实际验证审批消费后崩溃rollback、同nonce并发仅一个run/outbox、不同请求冲突、源变更、过期、撤销在claim前/claim后提交前、权限撤回、历史授权不能升级、已提交后撤销/归档、磁盘重开重试，以及自有CPU真实执行与原件/结果hash。最终再跑完整测试与构建，保留所有失败。完整Agent工具循环及真实模型仍须单独完成。
+HTTP返回creationState=queued表示创建时状态，实际状态必须读取GET /runs/{id}，不能把创建回执称为提交或成功。
+
+## 执行前检查与提交边界
+
+LocalResizeWorker先preflightStart，避免为已阻断任务启动运行时或读取输入。启动后claim重新校验；beforeSubmit再校验：原actor当前编辑权限、消费记录与快照关系、授权mode/policy/hash、能力配置、来源当前修订、期限及撤销。未消费或伪造pin不能启动。
+
+beforeSubmit持久submitted意图成功是提交边界。撤销先于此边界阻止新POST许可；此边界已先完成的任务按已提交处理，尽力取消/核查，不能承诺撤回已发请求。原单次POST、unknown不重投、私有图像解码/hash/归档状态机保持。
+
+撤销先提交grant状态并释放grant锁，再调用原run取消事务，避免grant→既有run与worker run→grant形成反向等待。queued取消关闭outbox，submitted请求取消；ready成果不改写。当前角色不足等导致取消不可用会返回cancellationUnavailableCount，撤销本身仍持久生效；不擅自提高权限。已撤销且未消费的新任务被阻断；历史回执确认不是重新授权。
+
+## 归档与兼容
+
+已提交结果的纯归档恢复不重跑active授权检查，不发生成请求；当前有权限的其他编辑者可凭已验证缓存归档，原actor撤权/降为只读不抹除历史证据。旧schema1/2手工流程保持。新schema3用量识别固定本地零供应商费用并校验能力与Agent pin。
+
+019新增消费表与审批nonce复合唯一约束，不改旧payload。写入新执行模式后，旧schema18审查列表解析器和worker不能保证识别新模式/v3；优先前向修复，降级需要按私有备份恢复并核对升级后新增数据，不能声称无损二进制回滚。
+
+## 证据及未完成范围
+
+65项七文件专项通过，包含并发重试单消费、消费写入故障全回滚、L0/L1/L2/L3、旧review不能升级、nonce/hash、来源/权限/能力/过期/撤销、提交后取消、HTTP隔离、UUID和伪造pin、阻断任务不启动runtime。六包构建通过。真实CPU+磁盘重开62568892-fc11-4845-8254-56219b08359c生成64×64、原件不变、各一消费/run/snapshot/outbox/attempt/output，ready后撤销保留成果；685cb617-75ff-4b93-b988-a1ea7ec0f510注入归档故障，撤销并将原actor降为只读后由另一编辑者成功恢复，未二次生成。原手工浏览器CPU回归a6c937ed-e712-4c82-a78a-bb041bb8fdf5通过。
+
+PGlite为真实PostgreSQL WASM但不是原生多连接并发证明；本轮没有提高超时/worker或修改断言掩盖失败。初始类型推断、夹具画布base、RLS拒绝代码、HTTP本机header夹具问题保留失败日志，未为通过增加权限。
+
+待办：用户可操作的授权/提案/审批/撤销界面、有限Agent工具循环与完整审计/纠错额度、真实模型/云图及完整T15/五场景、原生PG多连接压力和性能。已写后端不等于完整FR-10完成。全量测试正在运行，019尚未升级日常库。
+
+最终冻结：全量92文件3001项全部通过（298.52秒），原测试期限与4worker不变；准备日常库备份升级18→19。

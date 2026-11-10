@@ -1,3 +1,4 @@
+import {LocalAgentExecution} from './localAgentExecution.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import {dirname,resolve} from "node:path";
@@ -17,7 +18,7 @@ import {LocalRunPlacement} from './localRunPlacement.ts';
 import type {LocalArchiveRecovery} from './localArchiveRecovery.ts';
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const nestedActions:Record<string,readonly string[]>={runs:['cancel','events','recover-archive','place-output'],'agent-review-grants':['proposals','revoke'],'agent-review-proposals':['approve']};
+const nestedActions:Record<string,readonly string[]>={runs:['cancel','events','recover-archive','place-output'],'agent-review-grants':['proposals','revoke'],'agent-review-proposals':['approve'],'agent-execution-grants':['proposals','revoke'],'agent-execution-proposals':['approve']};
 function reply(response:ServerResponse,status:number,data:unknown){
   response.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});
   response.end(JSON.stringify(status>=400?{error:{code:data},request_id:randomUUID()}:{data,request_id:randomUUID()}));
@@ -40,7 +41,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
   const failures=new Map<string,{count:number;until:number}>();
   const versions=new LocalWorkflowVersions(db),plans=new LocalVisualPlans(db);
   const gateway=new WorkspaceModelGateway({compilerConfigured:!!options.compilerSourceSha256,localResizeExecutor:!!options.onRunQueued});
-  const boundRuns=new LocalBoundRuns(db,options.compilerSourceSha256??null,gateway),agentReview=new LocalAgentReview(db,gateway);
+  const boundRuns=new LocalBoundRuns(db,options.compilerSourceSha256??null,gateway),agentReview=new LocalAgentReview(db,gateway),agentExecution=new LocalAgentExecution(db,boundRuns,gateway);
   const queries=new LocalRunQueries(db),streams=new Map<()=>void,string>();
   const server=createServer(async(request,response)=>{
     try{
@@ -78,6 +79,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       }
       const user=await db.authenticate(cookie(request));
       if(url.pathname==='/v1/me'&&method==='GET'){reply(response,200,{user});return;}
+      if(url.pathname==='/v1/agent-execution-tools'&&method==='GET'){if(url.search)throw Error('INVALID_BODY');reply(response,200,agentExecution.authority.catalog());return;}
       if(url.pathname==='/v1/agent-review-tools'&&method==='GET'){if(url.search)throw Error('INVALID_BODY');reply(response,200,agentReview.catalog());return;}
       if(url.pathname==='/v1/model-capabilities'&&method==='GET'){if(url.search)throw Error('INVALID_BODY');reply(response,200,{items:gateway.catalog(),scope:'server-owned-local-catalog',externalProvidersEnabled:false});return;}
       if(url.pathname==='/v1/runtime'&&method==='GET'){reply(response,200,{resizeEnabled:!!options.onRunQueued,runCancellationEnabled:true,runHistoryEnabled:true,eventStreamsEnabled:true,archiveRecoveryEnabled:!!options.archiveRecovery,canvasOperationsEnabled:true,canvasSelectionEnabled:true,unplacedResultsEnabled:true,resultPlacementEnabled:!!placement,documentFilesEnabled:!!options.assets,displayEdgesEnabled:true,taskCardsEnabled:true,documentFactsEnabled:!!documentFacts,visualPlansEnabled:true,scope:'local-cpu-resize-only'});return;}
@@ -93,7 +95,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
           reply(response,201,{id:projectId,name:input.name.trim()});return;
         }
       }
-      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs|tools|usage|canvas-operations|unplaced-results|documents|model-preflight|document-facts|visual-plans|confirmed-facts|agent-review-grants|agent-review-proposals)(?:\/([^/]+)(?:\/(cancel|events|recover-archive|place-output|proposals|approve|revoke))?)?)?$/.exec(url.pathname);
+      const route=/^\/v1\/projects\/([^/]+)(?:\/(canvas|lease|assets|workflow-versions|template-versions|bindings|references|runs|tools|usage|canvas-operations|unplaced-results|documents|model-preflight|document-facts|visual-plans|confirmed-facts|agent-review-grants|agent-review-proposals|agent-execution-grants|agent-execution-proposals|agent-executions)(?:\/([^/]+)(?:\/(cancel|events|recover-archive|place-output|proposals|approve|revoke))?)?)?$/.exec(url.pathname);
       if(!route||!uuid.test(route[1])||(route[4]&&(!uuid.test(route[3])||!(nestedActions[route[2]]??[]).includes(route[4])))){reply(response,404,'NOT_FOUND');return;}
       const projectId=route[1],role=(await db.asActor(user.id,tx=>tx.query<{role:string}>("SELECT m.role FROM workspace.project_members m JOIN workspace.projects p ON p.id=m.project_id WHERE p.id=$1 AND p.deleted_at IS NULL",[projectId]))).rows[0]?.role;
       if(!role){reply(response,404,'NOT_FOUND');return;}
@@ -154,10 +156,17 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
           edges:(await tx.query<{payload:unknown}>("SELECT r.payload FROM workspace.display_edges e JOIN workspace.display_edge_revisions r ON r.project_id=e.project_id AND r.edge_id=e.id AND r.revision=e.current_revision WHERE e.project_id=$1 AND coalesce((r.payload->>'deleted')::boolean,false)=false ORDER BY e.id",[projectId])).rows.map(r=>r.payload),
         }));reply(response,200,result);return;
       }
+      if(method==='GET'&&route[2]==='agent-execution-grants'&&!route[3]){if([...url.searchParams.keys()].some(key=>!['limit','cursor'].includes(key)))throw Error('INVALID_BODY');reply(response,200,await agentExecution.authority.list(user.id,projectId,{limit:url.searchParams.has('limit')?Number(url.searchParams.get('limit')):undefined,cursor:url.searchParams.get('cursor')??undefined}));return;}
+      if(method==='GET'&&route[2]==='agent-execution-proposals'&&uuid.test(route[3]??'')&&!route[4]){if(url.search)throw Error('INVALID_BODY');reply(response,200,await agentExecution.authority.inspect(user.id,projectId,route[3]));return;}
+      if(method==='POST'&&route[2]==='agent-execution-grants'&&uuid.test(route[3]??'')&&route[4]==='revoke'){if(url.search)throw Error('INVALID_BODY');const input=await body(request);fields(input,['reason']);if(typeof input.reason!=='string')throw Error('INVALID_BODY');reply(response,200,await agentExecution.revoke(user.id,projectId,route[3],input.reason));return;}
       if(method==='GET'&&route[2]==='agent-review-grants'&&!route[3]){if([...url.searchParams.keys()].some(key=>!['limit','cursor'].includes(key)))throw Error('INVALID_BODY');reply(response,200,await agentReview.list(user.id,projectId,{limit:url.searchParams.has('limit')?Number(url.searchParams.get('limit')):undefined,cursor:url.searchParams.get('cursor')??undefined}));return;}
       if(method==='GET'&&route[2]==='agent-review-proposals'&&uuid.test(route[3]??'')&&!route[4]){if(url.search)throw Error('INVALID_BODY');reply(response,200,await agentReview.inspect(user.id,projectId,route[3]));return;}
       if(method==='POST'&&route[2]==='agent-review-grants'&&uuid.test(route[3]??'')&&route[4]==='revoke'){if(url.search)throw Error('INVALID_BODY');const input=await body(request);fields(input,['reason']);if(typeof input.reason!=='string')throw Error('INVALID_BODY');reply(response,200,await agentReview.revoke(user.id,projectId,route[3],input.reason));return;}
       if(role==='viewer'){reply(response,403,'ACCESS_DENIED');return;}
+      if(method==='POST'&&route[2]==='agent-execution-grants'&&!route[3]){if(url.search)throw Error('INVALID_BODY');reply(response,201,await agentExecution.authority.createGrant(user.id,projectId,await body(request)));return;}
+      if(method==='POST'&&route[2]==='agent-execution-grants'&&uuid.test(route[3]??'')&&route[4]==='proposals'){if(url.search)throw Error('INVALID_BODY');reply(response,201,await agentExecution.authority.propose(user.id,projectId,route[3],await body(request)));return;}
+      if(method==='POST'&&route[2]==='agent-execution-proposals'&&uuid.test(route[3]??'')&&route[4]==='approve'){if(url.search)throw Error('INVALID_BODY');reply(response,200,await agentExecution.authority.approve(user.id,projectId,route[3],await body(request)));return;}
+      if(method==='POST'&&route[2]==='agent-executions'&&!route[3]){if(url.search)throw Error('INVALID_BODY');const result=await agentExecution.execute(user.id,projectId,await body(request));options.onRunQueued?.();reply(response,result.reused?200:201,{...result,creationState:'queued'});return;}
       if(method==='POST'&&route[2]==='agent-review-grants'&&!route[3]){if(url.search)throw Error('INVALID_BODY');reply(response,201,await agentReview.createGrant(user.id,projectId,await body(request)));return;}
       if(method==='POST'&&route[2]==='agent-review-grants'&&uuid.test(route[3]??'')&&route[4]==='proposals'){if(url.search)throw Error('INVALID_BODY');reply(response,201,await agentReview.propose(user.id,projectId,route[3],await body(request)));return;}
       if(method==='POST'&&route[2]==='agent-review-proposals'&&uuid.test(route[3]??'')&&route[4]==='approve'){if(url.search)throw Error('INVALID_BODY');reply(response,200,await agentReview.approve(user.id,projectId,route[3],await body(request)));return;}
@@ -239,7 +248,7 @@ export function createLocalWorkspaceHttp(db:LocalWorkspaceDatabase,options:{orig
       const message=error instanceof Error?error.message:'';
       if(message==='COMPILER_NOT_CONFIGURED'){reply(response,503,message);return;}
       const status=['UNAUTHENTICATED','LOGIN_FAILED'].includes(message)?401:message==='ACCESS_DENIED'?403:['NOT_FOUND','CAPABILITY_NOT_FOUND'].includes(message)?404:
-        ['AGENT_SCOPE_INVALID','AGENT_INPUT_CHANGED','AGENT_INTEGRITY_FAILED','AGENT_GRANT_REVOKED','AGENT_GRANT_EXPIRED','AGENT_CAPABILITY_CHANGED','AGENT_SCOPE_DENIED','AGENT_PIXEL_LIMIT','AGENT_ACTION_LIMIT','AGENT_APPROVAL_CHANGED','AGENT_NONCE_REUSED','AGENT_L0_ADVISORY','PLAN_REVISION_CONFLICT','PLAN_INTEGRITY_FAILED','PLAN_FACT_REFERENCE_STALE','PLAN_FACT_UNCONFIRMED','PLAN_FACT_CONFLICT','FACT_REVISION_CONFLICT','FACT_IDENTITY_CONFLICT','FACT_UNKNOWN_UNCONFIRMABLE','FACT_CONFLICT_UNRESOLVED','FACT_INTEGRITY_FAILED','CAPABILITY_CHANGED','CAPABILITY_NOT_CONFIGURED','LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','OBJECT_IDENTITY_CONFLICT','EDGE_REVISION_CONFLICT','EDGE_IDENTITY_CONFLICT','EDGE_ENDPOINT_NOT_FOUND','OBJECT_LOCKED','RESULT_NOT_READY','LOCAL_SETUP_COMPLETE','IDEMPOTENCY_CONFLICT','ARCHIVE_BUSY','ARCHIVE_NOT_RECOVERABLE','NO_VERIFIED_ARTIFACT','ARCHIVE_LEASE_INVALID','ARTIFACT_NOT_FOUND','ARTIFACT_INTEGRITY_FAILED'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED','DOCUMENT_SIZE_EXCEEDED'].includes(message)?413:
+        ['AGENT_MODE_MISMATCH','AGENT_APPROVAL_REQUIRED','AGENT_EXECUTION_DENIED','AGENT_CONSUMPTION_INTEGRITY_FAILED','EXECUTION_AUTHORITY_MISMATCH','AGENT_SCOPE_INVALID','AGENT_INPUT_CHANGED','AGENT_INTEGRITY_FAILED','AGENT_GRANT_REVOKED','AGENT_GRANT_EXPIRED','AGENT_CAPABILITY_CHANGED','AGENT_SCOPE_DENIED','AGENT_PIXEL_LIMIT','AGENT_ACTION_LIMIT','AGENT_APPROVAL_CHANGED','AGENT_NONCE_REUSED','AGENT_L0_ADVISORY','PLAN_REVISION_CONFLICT','PLAN_INTEGRITY_FAILED','PLAN_FACT_REFERENCE_STALE','PLAN_FACT_UNCONFIRMED','PLAN_FACT_CONFLICT','FACT_REVISION_CONFLICT','FACT_IDENTITY_CONFLICT','FACT_UNKNOWN_UNCONFIRMABLE','FACT_CONFLICT_UNRESOLVED','FACT_INTEGRITY_FAILED','CAPABILITY_CHANGED','CAPABILITY_NOT_CONFIGURED','LEASE_CONFLICT','REVISION_CONFLICT','OBJECT_REVISION_CONFLICT','OBJECT_IDENTITY_CONFLICT','EDGE_REVISION_CONFLICT','EDGE_IDENTITY_CONFLICT','EDGE_ENDPOINT_NOT_FOUND','OBJECT_LOCKED','RESULT_NOT_READY','LOCAL_SETUP_COMPLETE','IDEMPOTENCY_CONFLICT','ARCHIVE_BUSY','ARCHIVE_NOT_RECOVERABLE','NO_VERIFIED_ARTIFACT','ARCHIVE_LEASE_INVALID','ARTIFACT_NOT_FOUND','ARTIFACT_INTEGRITY_FAILED'].includes(message)?409:['BODY_TOO_LARGE','ASSET_SIZE_EXCEEDED','ASSET_QUOTA_EXCEEDED','DOCUMENT_SIZE_EXCEEDED'].includes(message)?413:
         ['CAPABILITY_OPERATION_MISMATCH','INVALID_BODY','INVALID_LOCAL_CREDENTIALS','ASSET_TYPE_REJECTED','INVALID_ASSET_NAME','INVALID_BINDING','INVALID_IDEMPOTENCY_KEY','DOCUMENT_TYPE_REJECTED','DOCUMENT_ENCODING_REJECTED','ASSET_KIND_MISMATCH'].includes(message)||error instanceof SyntaxError||error instanceof URIError||(error instanceof Error&&error.name==='ZodError')?422:500;
       reply(response,status,status===500?'INTERNAL_ERROR':message==='INVALID_BODY'?'INVALID_BODY':status===422?'INVALID_INPUT':message);
     }

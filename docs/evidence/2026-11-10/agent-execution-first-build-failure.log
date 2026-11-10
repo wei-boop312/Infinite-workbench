@@ -1,0 +1,8 @@
+$ tsc -p tsconfig.json
+src/localAgentReview.ts(44,601): error TS2345: Argument of type '{ id: string; projectId: string; grantId: string; grantHash: string; actorId: string; mode: "review_only" | "local_resize_execute"; policyVersion: string; toolName: "invoke_template"; toolVersion: "local-comfy-resize-v1"; ... 6 more ...; expiresAt: string; }' is not assignable to parameter of type '{ id: string; projectId: string; grantId: string; grantHash: string; actorId: string; mode: "review_only"; policyVersion: "local-agent-review-v1"; toolName: "invoke_template"; toolVersion: "local-comfy-resize-v1"; ... 7 more ...; approvalHash: string; } | { ...; } | Omit<...>'.
+  Type '{ id: string; projectId: string; grantId: string; grantHash: string; actorId: string; mode: "review_only" | "local_resize_execute"; policyVersion: string; toolName: "invoke_template"; toolVersion: "local-comfy-resize-v1"; ... 6 more ...; expiresAt: string; }' is not assignable to type 'Omit<{ id: string; projectId: string; grantId: string; grantHash: string; actorId: string; mode: "review_only"; policyVersion: "local-agent-review-v1"; toolName: "invoke_template"; toolVersion: "local-comfy-resize-v1"; ... 7 more ...; approvalHash: string; } | { ...; }, "approvalHash">'.
+    Types of property 'policyVersion' are incompatible.
+      Type 'string' is not assignable to type '"local-agent-review-v1" | "local-agent-execute-v1"'.
+C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\apps\api:
+[ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @canvas/api@0.1.0 build: `tsc -p tsconfig.json`
+Exit status 2

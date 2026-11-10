@@ -1,0 +1,32 @@
+{
+  "caseId": "685cb617-75ff-4b93-b988-a1ea7ec0f510",
+  "status": "passed",
+  "scope": "actual-disk-restart-and-owned-cpu-agent-action-no-model",
+  "databaseReopened": true,
+  "snapshotVersion": 3,
+  "snapshotHash": "f214c61914be2ecaf678c05dd9cc9caffeaa96ce96def277bb0dc44247d4fdb8",
+  "approvalConsumedOnce": true,
+  "requestRetryReused": true,
+  "counts": {
+    "runs": 1,
+    "run_snapshots": 1,
+    "outbox": 1,
+    "run_attempts": 1,
+    "agent_execution_consumptions": 1,
+    "run_outputs": 1
+  },
+  "resultSha256": "2d2d70c8294ed34065bebd0ff4327957a6d456342238e90abfd69c91af28889e",
+  "resultDimensions": [
+    64,
+    64
+  ],
+  "originalBytesUnchanged": true,
+  "readyResultPreservedAfterRevoke": true,
+  "runtimeStopped": true,
+  "archiveRecoveredAfterRevoke": true,
+  "archiveRecoveredByDifferentEditor": true,
+  "noSecondGeneration": true,
+  "modelRequests": 0,
+  "providerCost": "0",
+  "evidence": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\docs\\evidence\\2026-11-10\\agent-execution\\685cb617-75ff-4b93-b988-a1ea7ec0f510"
+}

@@ -1,5 +1,8 @@
+import {LocalAgentExecution} from './localAgentExecution.ts';
+import {LocalBoundRuns} from './localBoundRuns.ts';
+import {WorkspaceModelGateway} from './workspaceModelGateway.ts';
 import { createHash,randomBytes,randomUUID } from 'node:crypto';
-import { WorkspaceWorkflowSchema,WorkspaceTemplateSchema,WorkspaceObjectSchema,WorkspaceBindingRequestSchema,WorkspaceParametersSchema,WorkspaceRuntimeEvidenceSchema,WorkspaceArtifactManifestSchema } from '@canvas/contracts';
+import { AgentExecutionPinSchema,WorkspaceWorkflowSchema,WorkspaceTemplateSchema,WorkspaceObjectSchema,WorkspaceBindingRequestSchema,WorkspaceParametersSchema,WorkspaceRuntimeEvidenceSchema,WorkspaceArtifactManifestSchema } from '@canvas/contracts';
 import { LocalWorkspaceDatabase } from './localWorkspaceDatabase.ts';
 import { contentHash,validateWorkflow } from './workspacePrototype.ts';
 import {validateResizeCapabilityPin} from './workspaceModelGateway.ts';
@@ -17,11 +20,16 @@ type AttemptRow={id:string;actor_id:string;worker_id:string;token_hash:string;le
 
 /** Internal worker port, never accepts an actor or lease from public HTTP. */
 export class LocalRunExecution {
-  constructor(private db:LocalWorkspaceDatabase,private compilerSourceSha256:string){}
+  private agent:LocalAgentExecution;
+  constructor(private db:LocalWorkspaceDatabase,private compilerSourceSha256:string,gateway=new WorkspaceModelGateway({compilerConfigured:true,localResizeExecutor:false})){
+    this.agent=new LocalAgentExecution(db,new LocalBoundRuns(db,compilerSourceSha256,gateway),gateway);
+  }
   private validateSnapshot(raw:unknown,projectId:string,actorId:string,compilerSourceSha256=this.compilerSourceSha256){
     const snapshot=raw as Record<string,any>;
-    if(!snapshot||![1,2].includes(snapshot.schemaVersion))throw Error('SNAPSHOT_INTEGRITY_FAILED');
-    if(snapshot.schemaVersion===2)validateResizeCapabilityPin(snapshot.modelCapability);
+    if(!snapshot||![1,2,3].includes(snapshot.schemaVersion))throw Error('SNAPSHOT_INTEGRITY_FAILED');
+    if(snapshot.schemaVersion>=2)validateResizeCapabilityPin(snapshot.modelCapability);
+    if(snapshot.schemaVersion===3)AgentExecutionPinSchema.parse(snapshot.agentExecution);
+    else if(snapshot.agentExecution!==undefined)throw Error('SNAPSHOT_INTEGRITY_FAILED');
     const binding=WorkspaceBindingRequestSchema.parse(snapshot.binding),workflow=WorkspaceWorkflowSchema.parse(snapshot.workflow),template=WorkspaceTemplateSchema.parse(snapshot.template),
       source=WorkspaceObjectSchema.parse(snapshot.source),tool=WorkspaceObjectSchema.parse(snapshot.tool),parameters=WorkspaceParametersSchema.parse(snapshot.parameters);
     validateWorkflow(workflow);
@@ -32,7 +40,17 @@ export class LocalRunExecution {
       snapshot.asset?.id!==source.assetVersionId||!/^[a-f0-9]{64}$/.test(snapshot.asset?.sha256??'')||
       snapshot.authorization?.actorId!==actorId||snapshot.authorization?.scope!=='local-resize-only-v1'||snapshot.authorization?.providerCost!=='0'||snapshot.authorization?.currency!=='USD'||
       snapshot.compiler?.version!=='2.15.2'||snapshot.compiler?.sourceSha256!==compilerSourceSha256||snapshot.compiler?.registryValidation!=='required-before-worker-execution')throw Error('SNAPSHOT_INTEGRITY_FAILED');
-    return {...snapshot,binding,workflow,template,source,tool,parameters,asset:{id:source.assetVersionId,sha256:snapshot.asset.sha256 as string}};
+    return {...snapshot,schemaVersion:snapshot.schemaVersion as number,agentExecution:snapshot.agentExecution,binding,workflow,template,source,tool,parameters,asset:{id:source.assetVersionId,sha256:snapshot.asset.sha256 as string}};
+  }
+  /** No lease or side effects; avoid starting an owned runtime for blocked work.
+   * claim and beforeSubmit repeat the checks after startup to close the gap. */
+  async preflightStart(actorId:string,projectId:string,runId:string,now=new Date()){
+    await this.db.asActor(actorId,async tx=>{
+      const row=(await tx.query<{state:string;payload:unknown;content_hash:string;allowed:boolean}>('SELECT r.state,s.payload,s.content_hash,workspace.can_edit(r.project_id) AS allowed FROM workspace.runs r JOIN workspace.run_snapshots s ON s.project_id=r.project_id AND s.id=r.snapshot_id WHERE r.project_id=$1 AND r.id=$2',[projectId,runId])).rows[0];
+      if(!row)throw Error('NOT_FOUND');if(!row.allowed)throw Error('EXECUTION_PERMISSION_DENIED');if(row.state!=='queued')throw Error('RUN_NOT_QUEUED');
+      if(contentHash(row.payload)!==row.content_hash)throw Error('SNAPSHOT_INTEGRITY_FAILED');const snapshot=this.validateSnapshot(row.payload,projectId,actorId);
+      if(snapshot.schemaVersion===3)await this.agent.guardStart(tx,actorId,projectId,runId,snapshot.agentExecution,now);
+    });
   }
   async claim(actorId:string,projectId:string,runId:string,workerId:string,now=new Date()){
     const token=randomBytes(32).toString('base64url'),attemptId=randomUUID();
@@ -42,6 +60,7 @@ export class LocalRunExecution {
       if(!run)throw Error('NOT_FOUND');if(run.state!=='queued')throw Error('RUN_NOT_QUEUED');
       if(contentHash(run.payload)!==run.content_hash)throw Error('SNAPSHOT_INTEGRITY_FAILED');
       const snapshot=this.validateSnapshot(run.payload,projectId,actorId);
+      if(snapshot.schemaVersion===3)await this.agent.guardStart(tx,actorId,projectId,runId,snapshot.agentExecution,now);
       const asset=(await tx.query<{sha256:string;state:string}>('SELECT sha256,state FROM workspace.asset_versions WHERE project_id=$1 AND id=$2',[projectId,snapshot.asset.id])).rows[0];
       if(!asset||asset.state!=='ready'||asset.sha256!==snapshot.asset.sha256)throw Error('ASSET_INTEGRITY_FAILED');
       await tx.query("INSERT INTO workspace.run_attempts(project_id,id,run_id,actor_id,worker_id,token_hash,lease_expires_at,stage) VALUES($1,$2,$3,$4,$5,$6,$7,'claimed')",[projectId,attemptId,runId,actorId,workerId,hash(token),new Date(now.getTime()+60_000).toISOString()]);
@@ -60,6 +79,10 @@ export class LocalRunExecution {
       const run=(await tx.query<{state:string}>('SELECT state FROM workspace.runs WHERE project_id=$1 AND id=$2 FOR UPDATE',[lease.projectId,lease.runId])).rows[0];
       if(run?.state==='cancel_requested')throw Error('RUN_CANCEL_REQUESTED');
       if(run?.state!=='running')throw Error('RUN_NOT_RUNNING');
+      const frozen=(await tx.query<{payload:any;content_hash:string}>('SELECT s.payload,s.content_hash FROM workspace.runs r JOIN workspace.run_snapshots s ON s.project_id=r.project_id AND s.id=r.snapshot_id WHERE r.project_id=$1 AND r.id=$2',[lease.projectId,lease.runId])).rows[0];
+      if(!frozen||contentHash(frozen.payload)!==frozen.content_hash)throw Error('SNAPSHOT_INTEGRITY_FAILED');
+      const snapshot=this.validateSnapshot(frozen.payload,lease.projectId,lease.actorId);
+      if(snapshot.schemaVersion===3)await this.agent.guardStart(tx,lease.actorId,lease.projectId,lease.runId,snapshot.agentExecution,now);
       const prep=(await tx.query<{request_hash:string;payload:unknown;content_hash:string}>('SELECT request_hash,payload,content_hash FROM workspace.run_preparations WHERE project_id=$1 AND attempt_id=$2',[lease.projectId,lease.attemptId])).rows[0];
       if(prep&&(prep.request_hash!==requestHash||contentHash(prep.payload)!==prep.content_hash))throw Error('PREPARATION_INTEGRITY_FAILED');
       // Persist the exact outbound request before allowing one external POST.

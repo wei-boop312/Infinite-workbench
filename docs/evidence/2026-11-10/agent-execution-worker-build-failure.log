@@ -1,0 +1,8 @@
+$ tsc -p tsconfig.json
+src/localRunExecution.ts(53,19): error TS2339: Property 'schemaVersion' does not exist on type '{ binding: { id: string; projectId: string; taskLineId: string; sourceObjectId: string; sourceObjectRevision: number; toolObjectId: string; toolObjectRevision: number; templateVersionId: string; }; ... 5 more ...; asset: { ...; }; }'.
+src/localRunExecution.ts(53,101): error TS2339: Property 'agentExecution' does not exist on type '{ binding: { id: string; projectId: string; taskLineId: string; sourceObjectId: string; sourceObjectRevision: number; toolObjectId: string; toolObjectRevision: number; templateVersionId: string; }; ... 5 more ...; asset: { ...; }; }'.
+src/localRunExecution.ts(75,19): error TS2339: Property 'schemaVersion' does not exist on type '{ binding: { id: string; projectId: string; taskLineId: string; sourceObjectId: string; sourceObjectRevision: number; toolObjectId: string; toolObjectRevision: number; templateVersionId: string; }; ... 5 more ...; asset: { ...; }; }'.
+src/localRunExecution.ts(75,119): error TS2339: Property 'agentExecution' does not exist on type '{ binding: { id: string; projectId: string; taskLineId: string; sourceObjectId: string; sourceObjectRevision: number; toolObjectId: string; toolObjectRevision: number; templateVersionId: string; }; ... 5 more ...; asset: { ...; }; }'.
+C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\apps\api:
+[ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @canvas/api@0.1.0 build: `tsc -p tsconfig.json`
+Exit status 2
