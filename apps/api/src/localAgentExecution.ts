@@ -10,6 +10,12 @@ import {contentHash} from './workspacePrototype.ts';
 export class LocalAgentExecution {
   readonly authority:LocalAgentReview;
   constructor(private db:LocalWorkspaceDatabase,private runs:LocalBoundRuns,gateway:WorkspaceModelGateway){this.authority=new LocalAgentReview(db,gateway,'local_resize_execute');}
+  async proposals(actorId:string,projectId:string,grantId:string){
+    const result=await this.authority.proposals(actorId,projectId,grantId);
+    const rows=(await this.db.asActor(actorId,tx=>tx.query<{id:string;proposal_id:string;run_id:string;payload:unknown;content_hash:string;state:string}>('SELECT c.id,c.proposal_id,c.run_id,c.payload,c.content_hash,r.state FROM workspace.agent_execution_consumptions c JOIN workspace.runs r ON r.project_id=c.project_id AND r.id=c.run_id WHERE c.project_id=$1 AND c.grant_id=$2 AND c.actor_id=$3',[projectId,grantId,actorId]))).rows;
+    for(const row of rows){const pin=AgentExecutionPinSchema.parse(row.payload),item=result.items.find(item=>item.proposal.id===row.proposal_id);if(!item||contentHash(pin)!==row.content_hash||pin.consumptionId!==row.id||pin.proposalId!==row.proposal_id||pin.grantId!==result.grant.id||pin.grantHash!==contentHash(result.grant)||pin.proposalHash!==contentHash(item.proposal)||pin.approvalHash!==item.proposal.approvalHash||(result.grant.level==='L1'&&pin.nonce!==item.approval?.nonce))throw Error('AGENT_CONSUMPTION_INTEGRITY_FAILED');}
+    return {...result,items:result.items.map(item=>{const row=rows.find(row=>row.proposal_id===item.proposal.id);return {...item,consumption:row?{id:row.id,runId:row.run_id,state:row.state}:null};})};
+  }
   async revoke(actorId:string,projectId:string,grantId:string,reason:string){
     // Release the grant lock before requesting cancellation (run lock).
     const receipt=await this.authority.revoke(actorId,projectId,grantId,reason);

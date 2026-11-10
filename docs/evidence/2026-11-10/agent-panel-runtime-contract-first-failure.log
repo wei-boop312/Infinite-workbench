@@ -1,0 +1,35 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/workspace-http.test.ts (8 tests | 1 failed) 3863ms
+   ❯ 本地身份到项目/租约/保存的真实HTTP闭环 (8)
+     × 未登录拒绝；跨站登录被拒绝；真实登录仅通过HttpOnly cookie发session 99ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/workspace-http.test.ts > 本地身份到项目/租约/保存的真实HTTP闭环 > 未登录拒绝；跨站登录被拒绝；真实登录仅通过HttpOnly cookie发session
+AssertionError: expected { resizeEnabled: true, …(15) } to deeply equal { resizeEnabled: true, …(14) }
+
+- Expected
++ Received
+
+@@ -1,6 +1,7 @@
+  {
++   "agentExecutionPanelEnabled": true,
+    "archiveRecoveryEnabled": false,
+    "canvasOperationsEnabled": true,
+    "canvasSelectionEnabled": true,
+    "displayEdgesEnabled": true,
+    "documentFactsEnabled": false,
+
+ ❯ tests/workspace-http.test.ts:28:63
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 23 passed (24)
+   Start at  09:55:00
+   Duration  4.74s (tests 79%, transform 13%, import 8%)
+

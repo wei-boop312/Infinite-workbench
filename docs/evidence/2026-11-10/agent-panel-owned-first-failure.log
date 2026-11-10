@@ -1,0 +1,42 @@
+
+Running 1 test using 1 worker
+
+(node:52900) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  x  1 tests\owned-runtime-e2e\resize.spec.ts:36:1 › 真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投 (9.3s)
+
+
+  1) tests\owned-runtime-e2e\resize.spec.ts:36:1 › 真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投 ───────
+
+    error: column "asset_version_id" does not exist
+        at pe.Oe (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-7WWLJV32.js:1:18174)
+        at pe.tt (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-7WWLJV32.js:1:15560)
+        at pe.parse (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-7WWLJV32.js:1:14234)
+        at q.Ce (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-O74Z5DUS.js:5:1759)
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-O74Z5DUS.js:5:1151
+        at null.<anonymous> (wasm://wasm/022a9842:1:5417253)
+        at null.<anonymous> (wasm://wasm/022a9842:1:2185348)
+        at null.<anonymous> (wasm://wasm/022a9842:1:2215164)
+        at null.<anonymous> (wasm://wasm/022a9842:1:2215729)
+        at null.<anonymous> (wasm://wasm/022a9842:1:5074904)
+        at null.<anonymous> (wasm://wasm/022a9842:1:3639442)
+        at q.execProtocolRawSync (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-O74Z5DUS.js:3:199335)
+        at q.execProtocolRaw (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-O74Z5DUS.js:3:199579)
+        at q.execProtocolStream (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-O74Z5DUS.js:3:200233)
+        at q.u (C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-44NZIGN2.js:8:2155)
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\node_modules\.pnpm\@electric-sql+pglite@0.5.15\node_modules\@electric-sql\pglite\dist\chunk-44NZIGN2.js:8:2380
+
+    Error Context: test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\error-context.md
+
+    Error Context: test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\resize-真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    tests\owned-runtime-e2e\resize.spec.ts:36:1 › 真实本地登录→上传→工具卡固定输入→持久队列→CPU缩放→画布回填下载→刷新不重投 ────────

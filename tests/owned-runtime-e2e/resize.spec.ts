@@ -1,3 +1,4 @@
+import {WorkspaceModelGateway} from '../../apps/api/src/workspaceModelGateway';
 import {test,expect} from '@playwright/test';
 import {resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -16,6 +17,7 @@ import {LocalArchiveRecovery} from '../../apps/api/src/localArchiveRecovery';
 import {LocalRunArtifactStore} from '../../apps/api/src/localRunArtifactStore';
 let db:LocalWorkspaceDatabase,server:Server,dispatcher:LocalRunDispatcher,origin='';
 const runtimes:OwnedComfyRuntime[]=[],errors:unknown[]=[];
+const agentPanel=process.env.WORKSPACE_ACCEPT_AGENT_PANEL==='1';
 const archiveFailure=process.env.WORKSPACE_ACCEPT_ARCHIVE_FAILURE==='1',unplacedKind=process.env.WORKSPACE_ACCEPT_UNPLACED??'';
 if(unplacedKind&&!['source','tool'].includes(unplacedKind))throw Error('INVALID_OWNED_UNPLACED_MODE');if(unplacedKind&&archiveFailure)throw Error('INCOMPATIBLE_OWNED_MODES');
 let releaseUnplacedResult:()=>void;const unplacedGate=new Promise<void>(done=>{releaseUnplacedResult=done;});
@@ -26,8 +28,8 @@ test.beforeAll(async()=>{
   if(!process.env.WORKSPACE_COMFY_PYTHON||!process.env.WORKSPACE_COMFY_MAIN)throw Error('EXPLICIT_OWNED_RUNTIME_REQUIRED');
   const artifacts=new LocalRunArtifactStore(resolve('work','owned-browser-artifacts-'+caseId));
   if(archiveFailure){const original=assets.upload.bind(assets);let failed=false;assets.upload=async(...args)=>{if(!failed&&String(args[4]).startsWith('resize-')){failed=true;throw Error('owned-browser-archive-storage-failure');}return original(...args);};}
-  dispatcher=new LocalRunDispatcher(db,()=>{const Runtime=unplacedKind?class extends OwnedComfyRuntime{async result(...args:Parameters<OwnedComfyRuntime['result']>){await unplacedGate;return super.result(...args);}}:OwnedComfyRuntime;const runtime=new Runtime({root:process.cwd(),pythonExecutable:process.env.WORKSPACE_COMFY_PYTHON!,comfyMain:process.env.WORKSPACE_COMFY_MAIN!,compilerSourceSha256:pin});runtimes.push(runtime);return new LocalResizeWorker(new LocalRunExecution(db,pin),assets,runtime,artifacts);},error=>errors.push(String(error)));
-  server=createLocalWorkspaceHttp(db,{origin:()=>origin,assets,compilerSourceSha256:pin,clientFile:resolve('apps/web/local-workspace.html'),archiveRecovery:new LocalArchiveRecovery(new LocalRunExecution(db,pin),artifacts,assets),onRunQueued:()=>dispatcher.wake()});
+  dispatcher=new LocalRunDispatcher(db,()=>{const Runtime=unplacedKind?class extends OwnedComfyRuntime{async result(...args:Parameters<OwnedComfyRuntime['result']>){await unplacedGate;return super.result(...args);}}:OwnedComfyRuntime;const runtime=new Runtime({root:process.cwd(),pythonExecutable:process.env.WORKSPACE_COMFY_PYTHON!,comfyMain:process.env.WORKSPACE_COMFY_MAIN!,compilerSourceSha256:pin});runtimes.push(runtime);return new LocalResizeWorker(new LocalRunExecution(db,pin,new WorkspaceModelGateway({compilerConfigured:true,localResizeExecutor:true})),assets,runtime,artifacts);},error=>errors.push(String(error)));
+  server=createLocalWorkspaceHttp(db,{origin:()=>origin,assets,compilerSourceSha256:pin,clientFile:resolve('apps/web/local-workspace.html'),archiveRecovery:new LocalArchiveRecovery(new LocalRunExecution(db,pin,new WorkspaceModelGateway({compilerConfigured:true,localResizeExecutor:true})),artifacts,assets),onRunQueued:()=>dispatcher.wake()});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw Error('NO_ADDRESS');origin=`http://127.0.0.1:${address.port}`;dispatcher.start();
 });
 test.afterAll(async()=>{releaseUnplacedResult();if(server){server.emit('workspace-shutdown');await new Promise<void>(done=>server.close(()=>done()));}if(dispatcher)await dispatcher.close();for(const runtime of runtimes)await runtime.close();if(db)await db.close();writeFileSync(resolve(evidence,'runtime-report.json'),JSON.stringify({caseId,errors,runtimes:runtimes.map(r=>r.evidence)},null,2));});
@@ -40,7 +42,7 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   await page.getByLabel('选择产品图片').setInputFiles({name:'owned-product.png',mimeType:'image/png',buffer:source});await expect(page.getByRole('status').first()).toHaveText('已保存到本机');
   await page.getByRole('button',{name:'添加缩放工具'}).click();const form=page.locator('[data-tool-form]');
   await form.getByLabel('工具输入图片').selectOption({label:'owned-product.png'});await form.getByRole('button',{name:'固定输入',exact:true}).click();
-  await expect(form.getByRole('status')).toContainText('已固定图片修订');await form.getByRole('button',{name:'提交缩放任务'}).click();
+  await expect(form.getByRole('status')).toContainText('已固定图片修订');if(agentPanel){await acceptAgentPanel(page,source);return;}await form.getByRole('button',{name:'提交缩放任务'}).click();
   if(unplacedKind){await acceptUnplacedThroughUI(page);return;}
   if(archiveFailure){
     await expect(form.getByRole('status')).toHaveText('执行结果待核查；未自动重试',{timeout:60_000});
@@ -98,6 +100,16 @@ test('真实本地登录→上传→工具卡固定输入→持久队列→CPU�
   writeFileSync(resolve(evidence,'assertions.json'),JSON.stringify({scope:'real-browser-owned-cpu-no-model',runs,outputs,sourcePixels:'RGB(51,102,204)',resultDimensions:[256,256],userUndoPreservedBackgroundOutput:true,taskCardDownloadedSameBytes:true,taskCardReopened:true,archiveRecoveredThroughUI:archiveFailure,reloaded:true,noSecondSubmission:true},null,2));
 });
 
+
+async function acceptAgentPanel(page:import('@playwright/test').Page,sourceBytes:Buffer){
+  let posts=0;page.on('request',request=>{if(request.method()==='POST'&&request.url().endsWith('/agent-executions'))posts++;});
+  await page.getByRole('button',{name:'Agent授权',exact:true}).click();let dialog=page.getByRole('dialog',{name:'Agent 执行授权'});await dialog.getByLabel('我明确授予上述本地执行范围').check();await dialog.getByRole('button',{name:'明确创建执行授权',exact:true}).click();await expect(dialog.getByRole('button',{name:'创建执行提案',exact:true})).toBeEnabled();await dialog.getByRole('button',{name:'创建执行提案',exact:true}).click();await expect(dialog.getByRole('button',{name:'批准此提案',exact:true})).toBeDisabled();await dialog.getByLabel('我已核对提案参数、来源与有效期').check();await dialog.getByRole('button',{name:'批准此提案',exact:true}).click();await expect(dialog.getByRole('button',{name:'批准此提案',exact:true})).toBeDisabled();await dialog.getByLabel('我已核对提案参数、来源与有效期').check();
+  const responseWaiting=page.waitForResponse(response=>response.request().method()==='POST'&&response.url().endsWith('/agent-executions'));await dialog.getByRole('button',{name:'执行此提案（创建本地任务）',exact:true}).click();const response=await responseWaiting;expect(response.status()).toBe(201);const runId=(await response.json()).data.id,actor=(await(await page.request.get(origin+'/v1/me')).json()).data.user.id,project=(await db.asActor(actor,tx=>tx.query<{project_id:string}>('SELECT project_id FROM workspace.runs WHERE id=$1',[runId]))).rows[0].project_id;
+  await expect.poll(async()=>((await(await page.request.get(`${origin}/v1/projects/${project}/runs/${runId}`)).json()).data.state),{timeout:60_000}).toBe('succeeded');await dialog.getByRole('button',{name:'读取任务状态',exact:true}).click();await expect(dialog.getByRole('status')).toContainText('已完成，结果已归档');
+  const waiting=page.waitForEvent('download');await dialog.getByRole('link',{name:'下载任务结果',exact:true}).click();const path=await(await waiting).path();if(!path)throw Error('NO_AGENT_DOWNLOAD');const bytes=readFileSync(path),sharp=createRequire(new URL('../../apps/api/package.json',import.meta.url))('sharp'),decoded=await sharp(bytes).removeAlpha().raw().toBuffer({resolveWithObject:true});expect(decoded.info).toMatchObject({width:256,height:256});expect(decoded.data.every((v:number,i:number)=>v===[51,102,204][i%3])).toBe(true);writeFileSync(resolve(evidence,'agent-result.png'),bytes);await page.screenshot({path:resolve(evidence,'agent-panel-completed.png'),fullPage:true});
+  await dialog.getByRole('button',{name:'查看画布结果',exact:true}).click();await expect(page.getByRole('img',{name:'缩放结果',exact:true})).toBeVisible();await page.reload();await page.getByRole('button',{name:'Agent授权',exact:true}).click();dialog=page.getByRole('dialog',{name:'Agent 执行授权'});await expect(dialog.getByRole('status')).toContainText('已完成，结果已归档');await expect(dialog.getByRole('button',{name:'执行此提案（创建本地任务）',exact:true})).toBeDisabled();expect(posts).toBe(1);await dialog.getByRole('button',{name:'撤销当前执行授权',exact:true}).click();await expect(dialog.getByRole('status')).toContainText('已完成，结果已归档');
+  const counts=await db.asActor(actor,async tx=>{const result:Record<string,number>={};for(const table of ['runs','run_attempts','outbox','agent_execution_consumptions','run_outputs'])result[table]=(await tx.query(`SELECT * FROM workspace.${table} WHERE project_id=$1`,[project])).rows.length;return result;});expect(Object.values(counts)).toEqual([1,1,1,1,1]);const assetId=(await db.asActor(actor,tx=>tx.query<{asset_version_id:string}>("SELECT payload->>'assetVersionId' AS asset_version_id FROM workspace.bindings WHERE project_id=$1",[project]))).rows[0].asset_version_id;expect(Buffer.from(await(await page.request.get(`${origin}/v1/projects/${project}/assets/${assetId}?download=1`)).body())).toEqual(sourceBytes);expect(runtimes).toHaveLength(1);await expect.poll(()=>runtimes[0].evidence.stopped).toBe(true);expect(errors).toEqual([]);writeFileSync(resolve(evidence,'agent-panel-assertions.json'),JSON.stringify({scope:'real-native-browser-agent-approval-owned-cpu',counts,posts,resultDimensions:[256,256],resultDownloaded:true,reopenedFromServerReceipts:true,readyPreservedAfterRevoke:true,originalBytesUnchanged:true,runtimeStopped:true},null,2));
+}
 
 async function acceptUnplacedThroughUI(page:import('@playwright/test').Page){
   await expect(page.locator('[data-tool-form]').getByRole('status')).toHaveText('正在缩放',{timeout:60_000});

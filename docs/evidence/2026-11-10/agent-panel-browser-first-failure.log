@@ -1,0 +1,54 @@
+
+Running 1 test using 1 worker
+
+(node:70952) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  x  1 tests\local-e2e\workspace.spec.ts:28:1 › 执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队 (30.1s)
+
+
+  1) tests\local-e2e\workspace.spec.ts:28:1 › 执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队 ────────────────
+
+    Test timeout of 30000ms exceeded.
+
+    Error: locator.click: Test timeout of 30000ms exceeded.
+    Call log:
+      - waiting for getByRole('dialog', { name: 'Agent 执行授权' }).getByRole('button', { name: '明确创建执行授权', exact: true })
+        - locator resolved to <button disabled>明确创建执行授权</button>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is not enabled
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is not enabled
+        - retrying click action
+          - waiting 100ms
+        57 × waiting for element to be visible, enabled and stable
+           - element is not enabled
+         - retrying click action
+           - waiting 500ms
+
+
+      30 |   await page.goto(origin);await expect(page.getByRole('heading',{name:'创建本机账号'})).toBeVisible();
+      31 |   await page.getByLabel('用户名',{exact:true}).fill('preview_owner');await page.getByLabel('密码',{exact:true}).fill('owned-browser-password-very-long-2026');
+    > 32 |   await page.getByRole('button',{name:'创建账号并进入'}).click();await expect(page.getByText('我的项目',{exact:true})).toBeVisible();
+         |                                                                                                                           ^
+      33 |   await page.getByLabel('新项目名称').fill('本地产品项目');await page.getByRole('button',{name:'创建项目',exact:true}).click();
+      34 |   await expect(page.locator('#current')).toHaveText('本地产品项目');await page.getByRole('button',{name:'添加文字卡'}).click();
+      35 |   const card=page.getByLabel('卡片内容');await card.fill('由人确认：接口数量和外观不得猜测');await page.locator('#current').click();
+        at C:\Users\MECHREVO\Documents\ChatGPT\无限画布探索\AI-Commercial-Workspace\implementation\tests\local-e2e\workspace.spec.ts:32:237
+
+    Error Context: test-results\workspace-执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队\error-context.md
+
+    Error Context: test-results\workspace-执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队\error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\workspace-执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队\trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace test-results\workspace-执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    tests\local-e2e\workspace.spec.ts:28:1 › 执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队 ─────────────────

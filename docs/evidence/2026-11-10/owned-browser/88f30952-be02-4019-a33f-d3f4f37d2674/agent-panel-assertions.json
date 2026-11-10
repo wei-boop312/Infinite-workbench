@@ -1,0 +1,20 @@
+{
+  "scope": "real-native-browser-agent-approval-owned-cpu",
+  "counts": {
+    "runs": 1,
+    "run_attempts": 1,
+    "outbox": 1,
+    "agent_execution_consumptions": 1,
+    "run_outputs": 1
+  },
+  "posts": 1,
+  "resultDimensions": [
+    256,
+    256
+  ],
+  "resultDownloaded": true,
+  "reopenedFromServerReceipts": true,
+  "readyPreservedAfterRevoke": true,
+  "originalBytesUnchanged": true,
+  "runtimeStopped": true
+}

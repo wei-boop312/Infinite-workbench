@@ -1,0 +1,19 @@
+
+Running 12 tests using 1 worker
+
+(node:70372) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok  1 tests\local-e2e\workspace.spec.ts:29:1 › 首个真实账号→登录态→项目→文字卡拖动编辑→刷新恢复→注销 (2.6s)
+  ok  2 tests\local-e2e\workspace.spec.ts:76:1 › 滚动升级时运行配置接口尚未提供，仍能登录并打开已有项目 (385ms)
+  ok  3 tests\local-e2e\workspace.spec.ts:87:1 › 创建撤销与重做持久保存；连续22次编辑精确撤销20步且重开保留结果 (2.9s)
+  ok  4 tests\local-e2e\workspace.spec.ts:100:1 › 保存回复丢失保留固定操作，用户重试只提交一次修订并可撤销，viewer无法软删 (719ms)
+  ok  5 tests\local-e2e\workspace.spec.ts:116:1 › 多选组合整体移动、批量撤销、锁定、复制删除、属性和缩放框选均可保存重开 (2.0s)
+  ok  6 tests\local-e2e\workspace.spec.ts:140:1 › 复制图片只派生卡片ID，仍引用私有原资产；删除副本可撤销且不删除原件 (580ms)
+  ok  7 tests\local-e2e\workspace.spec.ts:148:1 › UTF8资料卡只读预览、原件下载、复制撤销与重开，资料不能进入图片工具或执行脚本 (1.3s)
+  ok  8 tests\local-e2e\workspace.spec.ts:166:1 › 展示连线保存、标签纯文本、混合复制撤销、删端点隐藏恢复与重开，不产生执行任务 (1.6s)
+  ok  9 tests\local-e2e\workspace.spec.ts:177:1 › 独立任务卡固定运行，回复丢失幂等确认、复制删除撤销、状态日志和重开不重投 (3.7s)
+  ok 10 tests\local-e2e\workspace.spec.ts:185:1 › 资料规则候选有原文，丢回复重开确认、冲突处理、人工核对与历史只读，零模型任务 (1.8s)
+  ok 11 tests\local-e2e\workspace.spec.ts:195:1 › 人工策划固定事实与图片，丢回复重开确认、来源变化保留草稿、历史副本不执行 (2.6s)
+  ok 12 tests\local-e2e\workspace.spec.ts:203:1 › 执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队 (2.0s)
+
+  12 passed (25.0s)

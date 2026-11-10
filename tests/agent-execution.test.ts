@@ -106,3 +106,8 @@ it('revoked queued work does not even start a runtime or read/upload private sou
   await expect(new LocalResizeWorker(worker,{download} as unknown as LocalWorkspaceAssets,runtime,{} as LocalRunArtifactStore).execute(actor,f.project,run.id)).rejects.toThrow('AGENT_GRANT_REVOKED');
   expect(runtime.start).not.toHaveBeenCalled();expect(download).not.toHaveBeenCalled();expect(runtime.upload).not.toHaveBeenCalled();expect(runtime.submit).not.toHaveBeenCalled();expect(runtime.close).toHaveBeenCalledOnce();expect((await counts(f.project)).run_attempts).toBe(0);
 });
+it('grant proposal reads survive consumption/revocation and remain scoped to the original actor',async()=>{
+  const f=await fixture();await approve(f);const created=await agent.execute(actor,f.project,f.input);await agent.revoke(actor,f.project,f.grant.id,'read after revoke');
+  const read=await agent.proposals(actor,f.project,f.grant.id);expect(read).toMatchObject({canEdit:true,state:'revoked',items:[{proposal:{id:f.proposal.id},approval:{nonce:f.nonce},consumption:{id:f.input.id,runId:created.id,state:'cancelled'}}]});
+  await expect(agent.proposals(other,f.project,f.grant.id)).rejects.toThrow('NOT_FOUND');await expect(agent.proposals(actor,randomUUID(),f.grant.id)).rejects.toThrow('NOT_FOUND');
+});
