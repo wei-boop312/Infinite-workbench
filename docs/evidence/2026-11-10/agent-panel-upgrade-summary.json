@@ -1,0 +1,13 @@
+{
+  "verifiedBackupFiles": 1171,
+  "entryStatus": 200,
+  "scope": "local-agent-panel-backup-copy-service-refresh",
+  "codeCommit": "67608df",
+  "entryHasAgentPanel": true,
+  "toVersion": 19,
+  "agentModuleStatus": 200,
+  "ready": true,
+  "launcherPid": 68976,
+  "existingTablesPreserved": 45,
+  "fromVersion": 19
+}
