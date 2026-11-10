@@ -1,3 +1,4 @@
+import type {Transaction} from '@electric-sql/pglite';
 import { randomUUID } from 'node:crypto';
 import { WorkspaceParametersSchema, WorkspaceWorkflowSchema, WorkspaceTemplateSchema, WorkspaceObjectSchema, WorkspaceBindingRequestSchema } from '@canvas/contracts';
 import { LocalWorkspaceDatabase } from './localWorkspaceDatabase.ts';
@@ -10,11 +11,20 @@ export class LocalBoundRuns {
     if(compilerSourceSha256!==null&&!/^[a-f0-9]{64}$/.test(compilerSourceSha256))throw Error('INVALID_COMPILER_PIN');
   }
   async create(actorId:string,projectId:string,bindingId:string,input:unknown,key:string){
+    return this.db.asActor(actorId,tx=>this.createInTransaction(tx,actorId,projectId,bindingId,input,key));
+  }
+  /** Internal server port: caller owns the transaction, including any future
+   * one-time action consumption. No commit, nested transaction or client scope.
+   * Review-only records are not an execution authority accepted by this port. */
+  async createInTransaction(tx:Transaction,actorId:string,projectId:string,bindingId:string,input:unknown,key:string){
     if(this.compilerSourceSha256===null)throw Error('COMPILER_NOT_CONFIGURED');
     const parameters=WorkspaceParametersSchema.parse(input),modelCapability=this.gateway.resizeSnapshot(input);
     if(!/^[a-zA-Z0-9_-]{1,128}$/.test(key))throw Error('INVALID_IDEMPOTENCY_KEY');
     const requestHash=contentHash({bindingId,parameters,policy:'local-resize-only-v1'});
-    return this.db.asActor(actorId,async tx=>{
+    const principal=(await tx.query<{actor:string;allowed:boolean}>('SELECT workspace.actor_id()::text AS actor,workspace.can_edit(project_id) AS allowed FROM workspace.canvases WHERE project_id=$1',[projectId])).rows[0];
+    if(!principal)throw Error('NOT_FOUND');
+    if(principal.actor.toLowerCase()!==actorId.toLowerCase())throw Error('EXECUTION_AUTHORITY_MISMATCH');
+    if(!principal.allowed)throw Error('ACCESS_DENIED');
       // Serialize creation and deduplication with the same budget lock as the
       // existing run kernel. Snapshot/run/reservation/outbox commit together.
       if(!(await tx.query('SELECT project_id FROM workspace.budgets WHERE project_id=$1 FOR UPDATE',[projectId])).rows.length)throw Error('NOT_FOUND');
@@ -51,7 +61,6 @@ export class LocalBoundRuns {
       await tx.query("INSERT INTO workspace.runs(project_id,id,snapshot_id,state,idempotency_key,request_hash,reserved_amount) VALUES($1,$2,$3,'queued',$4,$5,0)",[projectId,id,snapshotId,key,requestHash]);
       await tx.query("INSERT INTO workspace.outbox(project_id,id,run_id,event_type,payload) VALUES($1,$2,$3,'run.created',$4)",[projectId,randomUUID(),id,JSON.stringify({runId:id,actorId})]);
       return {id,reused:false};
-    });
   }
   async read(actorId:string,projectId:string,id:string){
     return this.db.asActor(actorId,async tx=>{

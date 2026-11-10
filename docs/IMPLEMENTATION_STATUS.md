@@ -368,3 +368,14 @@ UI新增“视觉策划”列表、人工新建/编辑、镜头增删/排序/图
 
 ### 第十四次日常服务升级完成
 09:19完成：1152文件hash一致，独立restore-check副本17→18，39张既有表全部原有列数据摘要一致；launcher33492，入口200。私有备份work/local-workspace/backups/20261110-091859-49aef18a-50fe-4add-b078-aca8944aeb17，脱敏统计agent-review-upgrade-summary.json。代码提交5a883cf；未在日常库添加测试账号或素材。review_only授权记录不会执行任务，也不能未来静默升级为执行授权。最近周额度已用73%/剩余27%，继续审批消费/任务原子事务及运行前撤销检查，达到剩余20%时保存并暂停；完整实施目标仍未完成。
+
+
+## 2026-11-10 Agent任务原子创建接线第一步（仍LOCAL_PARTIAL）
+将LocalBoundRuns.create的已有真实创建事务提取为内部createInTransaction。默认create仍通过db.asActor调用同一实现；内部入口验证数据库当前actor与可信actor一致、当前项目编辑权限，不接客户端authorization或review_only记录。预算串行锁、固定绑定/版本核验、v2快照、run/outbox仍同事务；原手工requestHash与返回格式保持。
+
+27项四文件专项通过：调用方在成功创建后抛错整体rollback；数据库最后outbox INSERT注入失败时无孤立snapshot/run/预算变化；重试可创建新run；原hash/去重不变；同项目其他designer不能替换actor，viewer不能写。另有真实磁盘验收93cf12d1-305a-49c3-a45d-ec8ded4fa2ab，两次关闭重开：第一次rollback后snapshot/run/outbox/attempt全0；第二次提交后各1/1/1/0，hash不变且请求复用原run。这是持久排队证据，不是执行成功；未启动dispatcher或供应商。
+
+六包构建通过，全量测试运行中。待完成新的明确执行授权mode/policy、一次性消费记录、Agent身份requestHash/新快照、claim/beforeSubmit撤销与有效期核验、UI与真实CPU验收；尚未把审查nonce当执行授权。接线调用链/锁序和提交边界详见docs/AGENT_EXECUTION_INTEGRATION.md，设计不等于已实现。未新增迁移/依赖或付费调用，日常4310仍为已部署审查版本。
+
+### 共享事务入口冻结结果
+全量91文件2991项全部通过，298.27秒；六包构建、真实磁盘两次重开与自有CPU浏览器a0093f60-8a7c-441a-8781-609a06fd42bc通过（13.7秒）。无新增迁移/依赖/付费调用，未改变超时或4worker配置；日常4310保留上一稳定审查版本。本次保存共享事务入口及后续接线设计，下一步实际接入新执行授权、nonce消费、快照与worker guard，不能把设计称为已实现。本周额度已用74%/剩余26%，目标保持active，继续至20%条件。

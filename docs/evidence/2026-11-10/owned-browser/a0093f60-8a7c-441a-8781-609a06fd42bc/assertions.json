@@ -1,0 +1,32 @@
+{
+  "scope": "real-browser-owned-cpu-no-model",
+  "runs": [
+    {
+      "id": "8063868f-9298-4365-a35c-85aa5050b529",
+      "state": "succeeded"
+    }
+  ],
+  "outputs": [
+    {
+      "project_id": "b32b3032-510a-4482-b374-3a2b46912a62",
+      "run_id": "8063868f-9298-4365-a35c-85aa5050b529",
+      "attempt_id": "3b6003a9-ba27-4061-ad8f-0deb1bcd7b75",
+      "asset_version_id": "de6c8c0c-dcef-4713-8768-4219aad1f2ca",
+      "object_id": "0e9236c6-6b52-42cd-b64b-90ea3e9d710f",
+      "object_revision": 1,
+      "sha256": "b767e5833737a1a5f4f6735659c0a2e6ef54a980a4d196116a7dff95418b1676",
+      "created_at": "2026-11-10T01:27:35.439Z"
+    }
+  ],
+  "sourcePixels": "RGB(51,102,204)",
+  "resultDimensions": [
+    256,
+    256
+  ],
+  "userUndoPreservedBackgroundOutput": true,
+  "taskCardDownloadedSameBytes": true,
+  "taskCardReopened": true,
+  "archiveRecoveredThroughUI": false,
+  "reloaded": true,
+  "noSecondSubmission": true
+}

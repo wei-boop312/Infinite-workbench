@@ -1,0 +1,23 @@
+{
+  "caseId": "93cf12d1-305a-49c3-a45d-ec8ded4fa2ab",
+  "status": "passed",
+  "scope": "actual-disk-transaction-rollback-and-queued-run-dedup-no-dispatch",
+  "databaseReopens": 2,
+  "rolledBack": {
+    "run_snapshots": 0,
+    "runs": 0,
+    "outbox": 0,
+    "run_attempts": 0
+  },
+  "committed": {
+    "run_snapshots": 1,
+    "runs": 1,
+    "outbox": 1,
+    "run_attempts": 0
+  },
+  "snapshotHashUnchanged": true,
+  "requestRetryReused": true,
+  "executed": false,
+  "modelRequests": 0,
+  "evidence": "C:\\Users\\MECHREVO\\Documents\\ChatGPT\\无限画布探索\\AI-Commercial-Workspace\\implementation\\docs\\evidence\\2026-11-10\\run-transaction\\93cf12d1-305a-49c3-a45d-ec8ded4fa2ab"
+}
