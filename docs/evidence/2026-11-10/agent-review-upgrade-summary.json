@@ -1,0 +1,11 @@
+{
+  "launcherPid": 33492,
+  "scope": "local-agent-review-backup-copy-upgrade",
+  "existingTablesPreserved": 39,
+  "toVersion": 18,
+  "fromVersion": 17,
+  "codeCommit": "5a883cf",
+  "entryStatus": 200,
+  "ready": true,
+  "verifiedBackupFiles": 1152
+}
