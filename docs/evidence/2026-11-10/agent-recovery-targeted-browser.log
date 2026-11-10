@@ -1,0 +1,9 @@
+
+Running 2 tests using 1 worker
+
+(node:71504) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 1 tests\local-e2e\workspace.spec.ts:203:1 › 执行授权面板：逐项审批、提交丢回复重开确认、服务端回执恢复及撤销不重复入队 (2.3s)
+  ok 2 tests\local-e2e\workspace.spec.ts:226:1 › 多授权恢复定位原提案，提交前丢请求后来源变化明确拒绝并保留固定记录 (1.6s)
+
+  2 passed (6.7s)
