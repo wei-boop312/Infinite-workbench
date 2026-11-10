@@ -1,0 +1,118 @@
+{
+  "manifest": {
+    "mime": "image/png",
+    "runId": "862db6b3-e0a1-45e6-8f66-6701b2be9137",
+    "width": 256,
+    "height": 256,
+    "sha256": "e3fa7718f094de964e184a2d26fade04e8bddd9b312fd4f6a612a1951088056e",
+    "history": {
+      "meta": {
+        "3": {
+          "node_id": "3",
+          "parent_node": null,
+          "display_node": "3",
+          "real_node_id": "3"
+        }
+      },
+      "prompt": [
+        0,
+        "d22fa312-82a9-4ec1-92e2-8f0b4f9f094e",
+        {
+          "1": {
+            "_meta": {
+              "title": "读取原图"
+            },
+            "inputs": {
+              "image": "input-fc239c08-f10c-4568-9d9a-f585c4fa24ad.png"
+            },
+            "class_type": "LoadImage"
+          },
+          "2": {
+            "_meta": {
+              "title": "调整图片尺寸"
+            },
+            "inputs": {
+              "crop": "disabled",
+              "image": [
+                "1",
+                0
+              ],
+              "width": 256,
+              "height": 256,
+              "upscale_method": "lanczos"
+            },
+            "class_type": "ImageScale"
+          },
+          "3": {
+            "_meta": {
+              "title": "保存结果"
+            },
+            "inputs": {
+              "images": [
+                "2",
+                0
+              ],
+              "filename_prefix": "workflow_architect/resize"
+            },
+            "class_type": "SaveImage"
+          }
+        },
+        {
+          "client_id": "ab76afc2-d4eb-459c-b3ac-8389c7b591bd",
+          "create_time": 1794269279901
+        },
+        [
+          "3"
+        ]
+      ],
+      "status": {
+        "messages": [
+          [
+            "execution_start",
+            {
+              "prompt_id": "d22fa312-82a9-4ec1-92e2-8f0b4f9f094e",
+              "timestamp": 1794269279902
+            }
+          ],
+          [
+            "execution_cached",
+            {
+              "nodes": [],
+              "prompt_id": "d22fa312-82a9-4ec1-92e2-8f0b4f9f094e",
+              "timestamp": 1794269279904
+            }
+          ],
+          [
+            "execution_success",
+            {
+              "prompt_id": "d22fa312-82a9-4ec1-92e2-8f0b4f9f094e",
+              "timestamp": 1794269279926
+            }
+          ]
+        ],
+        "completed": true,
+        "status_str": "success"
+      },
+      "outputs": {
+        "3": {
+          "images": [
+            {
+              "type": "output",
+              "filename": "resize_00001_.png",
+              "subfolder": "workflow_architect"
+            }
+          ]
+        }
+      }
+    },
+    "byteSize": 1382,
+    "attemptId": "719f95b5-d90f-420b-9b9f-d451a010eeed",
+    "projectId": "cc1bc698-3902-43c8-9f39-93e462afcb18",
+    "requestHash": "50be43e4c0cbfea932ea7b1c680ce8c5090a32256ac652aa67242643681c8348",
+    "snapshotHash": "532748d5feb948214ef0f63e79dce4b1cf03140896ea8676269931e94780584b",
+    "schemaVersion": 1,
+    "providerRequestId": "d22fa312-82a9-4ec1-92e2-8f0b4f9f094e",
+    "runtimeEvidenceHash": "3d42107611fda1d2026684844ba8fb2bb1bd0fca077a6c2d074a332e5628814f"
+  },
+  "manifest_hash": "13144b51f64007268d0c0216196c57e8253dc24faa8406e01fa12a12136d73dc"
+}

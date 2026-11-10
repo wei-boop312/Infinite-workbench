@@ -1,6 +1,7 @@
 import { z } from "zod";
 export * from "./workspace.ts";
 export * from "./workspaceModels.ts";
+export * from "./workspaceFacts.ts";
 import { LockedImagePixelDraftSchema } from "./lockedImagePixels.ts";
 export { LockedImagePixelDraftSchema, type LockedImagePixelDraft } from "./lockedImagePixels.ts";
 import { CreateImagePreparationSchema, ImageExecutionRequestSchema, ImageInputTransformSchema, ImageProtocolSchema, ImageProviderConnectionSchema, ImageProviderPublicSchema, ImageProviderOutcomeSchema, ImageRequestTemplateSchema, LocalImageQuoteSchema } from "./imageProviders.ts";

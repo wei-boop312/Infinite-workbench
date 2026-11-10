@@ -1,0 +1,28 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/document-facts.test.ts (5 tests | 1 failed) 2315ms
+   × 真实HTTP大于64KiB事实编辑可提交，viewer只读，来源/actor注入拒绝且历史确认不变 175ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/document-facts.test.ts > 真实HTTP大于64KiB事实编辑可提交，viewer只读，来源/actor注入拒绝且历史确认不变
+AssertionError: expected 422 to be 200 // Object.is equality
+
+- Expected
++ Received
+
+- 200
++ 422
+
+ ❯ tests/document-facts.test.ts:25:419
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 3 passed (4)
+      Tests  1 failed | 23 passed (24)
+   Start at  08:04:46
+   Duration  5.30s (tests 82%, transform 10%, import 7%)
+

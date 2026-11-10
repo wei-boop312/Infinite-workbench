@@ -1,0 +1,18 @@
+{
+  "scope": "actual-document-facts-disk-restart-local-rules-no-model",
+  "caseId": "9f756316-c3f8-4cd4-9804-70fe71ed43fb",
+  "status": "passed",
+  "databaseReopened": true,
+  "sourceSha256": "3775c418e5a1645f499fadba6662402721d7fdf5d5425c6546485fe478eb9cd1",
+  "originalBytesUnchanged": true,
+  "sourceAnchorsExact": true,
+  "oldCandidateUnconfirmed": true,
+  "newRevisionManuallyConfirmed": true,
+  "immutableFactRevisions": 2,
+  "immutableRequestReceipts": 2,
+  "receiptReused": true,
+  "outsiderDenied": true,
+  "runCount": 0,
+  "canvasRevision": 0,
+  "modelRequests": 0
+}

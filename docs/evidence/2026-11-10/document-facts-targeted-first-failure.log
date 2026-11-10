@@ -1,0 +1,25 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/document-facts.test.ts (4 tests | 1 failed) 1558ms
+   × 初次整理可幂等重试、不同ID不重置现有事实；确认修订保留原件与旧候选，历史可读取 84ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/document-facts.test.ts > 初次整理可幂等重试、不同ID不重置现有事实；确认修订保留原件与旧候选，历史可读取
+AssertionError: expected [Function] to throw error including 'IMMUTABLE_HISTORY' but got 'permission denied for table document_…'
+
+Expected: "IMMUTABLE_HISTORY"
+Received: "permission denied for table document_fact_revisions"
+
+ ❯ tests/document-facts.test.ts:15:1603
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 18 passed (19)
+   Start at  07:58:33
+   Duration  4.74s (tests 81%, transform 11%, import 8%)
+

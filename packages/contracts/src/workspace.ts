@@ -1,4 +1,5 @@
 import { z } from "zod";
+import {WorkspaceFactRevisionSchema,WorkspaceFactCommandSchema} from "./workspaceFacts.ts";
 import {WorkspaceModelCapabilitySchema,WorkspaceModelCostSchema,WorkspaceModelPreflightSchema} from "./workspaceModels.ts";
 
 // A separate protocol: legacy CanvasDocument v2 is never silently reinterpreted.
@@ -105,6 +106,8 @@ export function workspaceJsonSchemas() {
     "canvas-operation.schema":z.toJSONSchema(WorkspaceCanvasOperationSchema),
     "model-capability.schema":z.toJSONSchema(WorkspaceModelCapabilitySchema),
     "model-cost.schema":z.toJSONSchema(WorkspaceModelCostSchema),
+    "document-fact-revision.schema":z.toJSONSchema(WorkspaceFactRevisionSchema),
+    "document-fact-command.schema":z.toJSONSchema(WorkspaceFactCommandSchema),
     "model-preflight.schema":z.toJSONSchema(WorkspaceModelPreflightSchema),
     "result-placement.schema":z.toJSONSchema(WorkspaceResultPlacementSchema),
     "document-asset.schema":z.toJSONSchema(WorkspaceDocumentAssetSchema),
