@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 2,
+  "capability": {
+    "id": "local-comfy-resize",
+    "cost": {
+      "basis": "local-no-provider-charge",
+      "state": "known",
+      "amount": "0",
+      "currency": "USD"
+    },
+    "model": null,
+    "version": 1,
+    "provider": "owned-cpu-comfy",
+    "operation": "image.resize",
+    "readiness": "ready",
+    "inputKinds": [
+      "image"
+    ],
+    "outputKind": "image"
+  },
+  "capabilityHash": "e58ea54f9db723333842f86b867fc639d67df34f9b70fb928268c89da25aa8ee"
+}

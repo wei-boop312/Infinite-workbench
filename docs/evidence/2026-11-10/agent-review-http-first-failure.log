@@ -1,0 +1,28 @@
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/agent-review.test.ts (6 tests | 1 failed) 2376ms
+   × 真实HTTP审查/审批无执行入口，无预算或任务副作用，失去编辑权限仍可撤回自己授权 126ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/agent-review.test.ts > 真实HTTP审查/审批无执行入口，无预算或任务副作用，失去编辑权限仍可撤回自己授权
+AssertionError: expected 404 to be 201 // Object.is equality
+
+- Expected
++ Received
+
+- 201
++ 404
+
+ ❯ tests/agent-review.test.ts:24:1722
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 3 passed (4)
+      Tests  1 failed | 27 passed (28)
+   Start at  09:07:34
+   Duration  5.09s (tests 82%, transform 10%, import 7%)
+

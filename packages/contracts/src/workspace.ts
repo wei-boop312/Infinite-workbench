@@ -1,4 +1,6 @@
 import { z } from "zod";
+import {WorkspaceParametersSchema} from "./workspaceParameters.ts";
+import {AgentReviewGrantRequestSchema,AgentReviewGrantSchema,AgentReviewProposalRequestSchema,AgentReviewProposalSchema,AgentReviewApprovalRequestSchema} from "./workspaceAgentReview.ts";
 import {WorkspacePlanRevisionSchema,WorkspacePlanCommandSchema} from "./workspacePlans.ts";
 import {WorkspaceFactRevisionSchema,WorkspaceFactCommandSchema} from "./workspaceFacts.ts";
 import {WorkspaceModelCapabilitySchema,WorkspaceModelCostSchema,WorkspaceModelPreflightSchema} from "./workspaceModels.ts";
@@ -6,10 +8,7 @@ import {WorkspaceModelCapabilitySchema,WorkspaceModelCostSchema,WorkspaceModelPr
 // A separate protocol: legacy CanvasDocument v2 is never silently reinterpreted.
 const Id = z.uuid();
 const Revision = z.number().int().positive();
-export const WorkspaceParametersSchema = z.object({
-  width: z.number().int().min(64).max(8192),
-  height: z.number().int().min(64).max(8192),
-}).strict().refine(p => p.width * p.height <= 16_000_000, "Output pixel limit exceeded");
+export {WorkspaceParametersSchema} from "./workspaceParameters.ts";
 
 export const WorkspaceAssetSchema = z.object({
   id: Id, projectId: Id, sha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -111,6 +110,11 @@ export function workspaceJsonSchemas() {
     "document-fact-command.schema":z.toJSONSchema(WorkspaceFactCommandSchema),
     "visual-plan-revision.schema":z.toJSONSchema(WorkspacePlanRevisionSchema),
     "visual-plan-command.schema":z.toJSONSchema(WorkspacePlanCommandSchema),
+    "agent-review-grant-request.schema":z.toJSONSchema(AgentReviewGrantRequestSchema),
+    "agent-review-grant.schema":z.toJSONSchema(AgentReviewGrantSchema),
+    "agent-review-proposal-request.schema":z.toJSONSchema(AgentReviewProposalRequestSchema),
+    "agent-review-proposal.schema":z.toJSONSchema(AgentReviewProposalSchema),
+    "agent-review-approval-request.schema":z.toJSONSchema(AgentReviewApprovalRequestSchema),
     "model-preflight.schema":z.toJSONSchema(WorkspaceModelPreflightSchema),
     "result-placement.schema":z.toJSONSchema(WorkspaceResultPlacementSchema),
     "document-asset.schema":z.toJSONSchema(WorkspaceDocumentAssetSchema),
