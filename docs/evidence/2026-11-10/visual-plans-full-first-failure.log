@@ -1,0 +1,30 @@
+$ vitest run
+
+ RUN  v5.0.2 C:/Users/MECHREVO/Documents/ChatGPT/无限画布探索/AI-Commercial-Workspace/implementation
+
+ ❯ tests/locked-production-native.test.ts (47 tests | 1 failed) 117337ms
+   ❯ protected network openai manual=false (2)
+     × keeps complete v2 identity, original wire and one raw response 6247ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/locked-production-native.test.ts > protected network openai manual=false > keeps complete v2 identity, original wire and one raw response
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ tests/locked-production-native.test.ts:44:5
+     42|     let t: Live;
+     43|     beforeEach(async () => { t = await live({ protocol: kind, manual }…
+     44|     it("keeps complete v2 identity, original wire and one raw response…
+       |     ^
+     45|       const { f, n } = t;
+     46|       n.hooks.write = () => { expect(t.saved().lockedProductionImageAt…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 88 passed (89)
+      Tests  1 failed | 2981 passed (2982)
+   Start at  08:32:49
+   Duration  306.17s (tests 98%, import 1%)
+
+[ELIFECYCLE] Test failed. See above for more details.

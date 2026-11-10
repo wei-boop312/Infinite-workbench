@@ -1,0 +1,20 @@
+{
+  "scope": "actual-manual-plan-disk-restart-no-model-or-execution",
+  "caseId": "c5a1345a-51c7-4c57-ae56-b5bda54545df",
+  "status": "passed",
+  "databaseReopened": true,
+  "planRevisions": 2,
+  "requestReceipts": 2,
+  "originalPlanHashUnchanged": true,
+  "factVersionPinned": 2,
+  "sourceSha256": "439477c695b27bcb0faa0137e4907b41bc3655faad847829ef230873b88bdd60",
+  "imageSha256": "a17ad49249d86a6a46554148c0d6eaf1511d0ab2291fc1a1755f2d67e2986680",
+  "sourceBytesUnchanged": true,
+  "oldReceiptReused": true,
+  "currentPlanRevision": 2,
+  "canvasCopyPlanRevision": 1,
+  "outsiderDenied": true,
+  "runCount": 0,
+  "outboxCount": 0,
+  "modelRequests": 0
+}

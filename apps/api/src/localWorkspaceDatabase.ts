@@ -2,7 +2,7 @@ import { PGlite, type Transaction } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash, randomUUID, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
-import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema,WorkspaceDisplayEdgeSchema,type WorkspaceObject } from "@canvas/contracts";
+import { WorkspaceObjectSchema,WorkspaceCanvasOperationSchema,WorkspaceDisplayEdgeSchema,WorkspacePlanRevisionSchema,type WorkspaceObject } from "@canvas/contracts";
 import { contentHash } from "./workspacePrototype.ts";
 import {validateObjectMutation} from './objectMutation.ts';
 
@@ -15,7 +15,7 @@ export class LocalWorkspaceDatabase {
     const db = await PGlite.create(directory ?? "memory://");
     try {
       await db.exec("CREATE TABLE IF NOT EXISTS public.workspace_migrations(version integer primary key,sha256 text not null)");
-      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql','013_private_documents.sql','014_display_edges.sql','015_task_cards.sql','016_document_facts.sql'].entries()){
+      for(const [index,name] of ['001_workspace.sql','002_local_identity.sql','003_local_assets.sql','004_binding_order.sql','005_local_run_attempts.sql','006_local_run_outputs.sql','007_canvas_change_journal.sql','008_local_run_cancellation.sql','009_run_artifact_evidence.sql','010_archive_recovery_leases.sql','011_canvas_operations.sql','012_unplaced_run_results.sql','013_private_documents.sql','014_display_edges.sql','015_task_cards.sql','016_document_facts.sql','017_visual_plans.sql'].entries()){
         const version=index+1,sql=readFileSync(resolve(root,"db/migrations",name),"utf8");
         const applied=await db.query<{sha256:string}>("SELECT sha256 FROM public.workspace_migrations WHERE version=$1",[version]);
         if(!applied.rows.length)await db.transaction(async tx=>{
@@ -193,6 +193,7 @@ export class LocalWorkspaceDatabase {
     });
   }
   private async checkObjectAsset(tx:Transaction,object:WorkspaceObject){
+    if(object.type==='text'&&object.planSource){const source=object.planSource,row=(await tx.query<{payload:unknown;content_hash:string}>('SELECT payload,content_hash FROM workspace.visual_plan_revisions WHERE project_id=$1 AND plan_id=$2 AND revision=$3',[object.projectId,source.planId,source.revision])).rows[0];if(!row)throw Error('NOT_FOUND');if(contentHash(row.payload)!==row.content_hash)throw Error('PLAN_INTEGRITY_FAILED');const plan=WorkspacePlanRevisionSchema.parse(row.payload);if(plan.projectId.toLowerCase()!==object.projectId.toLowerCase()||plan.id.toLowerCase()!==source.planId.toLowerCase()||plan.revision!==source.revision)throw Error('PLAN_INTEGRITY_FAILED');}
     if(object.type==='task'){if(!(await tx.query('SELECT id FROM workspace.runs WHERE project_id=$1 AND id=$2',[object.projectId,object.runId])).rows.length)throw Error('NOT_FOUND');return;}
     if(object.type!=='image'&&object.type!=='file')return;
     const asset=(await tx.query<{kind:string}>('SELECT kind FROM workspace.asset_versions WHERE project_id=$1 AND id=$2',[object.projectId,object.assetVersionId])).rows[0];

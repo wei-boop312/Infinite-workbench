@@ -1,4 +1,5 @@
 import { z } from "zod";
+import {WorkspacePlanRevisionSchema,WorkspacePlanCommandSchema} from "./workspacePlans.ts";
 import {WorkspaceFactRevisionSchema,WorkspaceFactCommandSchema} from "./workspaceFacts.ts";
 import {WorkspaceModelCapabilitySchema,WorkspaceModelCostSchema,WorkspaceModelPreflightSchema} from "./workspaceModels.ts";
 
@@ -30,7 +31,7 @@ const ObjectBase = {
 export const WorkspaceObjectSchema = z.discriminatedUnion("type", [
   z.object({ ...ObjectBase, type: z.literal("image"), assetVersionId: Id }).strict(),
   z.object({ ...ObjectBase, type: z.literal("file"), assetVersionId: Id }).strict(),
-  z.object({ ...ObjectBase, type: z.literal("text"), text: z.string().max(100_000) }).strict(),
+  z.object({ ...ObjectBase, type: z.literal("text"), text: z.string().max(100_000),planSource:z.object({planId:Id,revision:z.number().int().positive().max(Number.MAX_SAFE_INTEGER)}).strict().optional() }).strict(),
   z.object({ ...ObjectBase, type: z.literal("tool"), templateVersionId: Id }).strict(),
   z.object({ ...ObjectBase, type: z.literal("task"), runId: Id }).strict(),
 ]);
@@ -108,6 +109,8 @@ export function workspaceJsonSchemas() {
     "model-cost.schema":z.toJSONSchema(WorkspaceModelCostSchema),
     "document-fact-revision.schema":z.toJSONSchema(WorkspaceFactRevisionSchema),
     "document-fact-command.schema":z.toJSONSchema(WorkspaceFactCommandSchema),
+    "visual-plan-revision.schema":z.toJSONSchema(WorkspacePlanRevisionSchema),
+    "visual-plan-command.schema":z.toJSONSchema(WorkspacePlanCommandSchema),
     "model-preflight.schema":z.toJSONSchema(WorkspaceModelPreflightSchema),
     "result-placement.schema":z.toJSONSchema(WorkspaceResultPlacementSchema),
     "document-asset.schema":z.toJSONSchema(WorkspaceDocumentAssetSchema),
